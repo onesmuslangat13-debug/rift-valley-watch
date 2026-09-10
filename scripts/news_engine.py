@@ -1,8 +1,12 @@
 # ============================================================
 # RIFT VALLEY WATCH
-# OFFICIAL-SOURCE NEWS ENGINE — V1
+# OFFICIAL-SOURCE NEWS ENGINE — V1.1
 #
 # OFFICIAL COUNTY SOURCES
+#          ↓
+# STORY EXTRACTION
+#          ↓
+# GENERIC HEADING FILTER
 #          ↓
 # COUNTY DETECTION
 #          ↓
@@ -13,6 +17,18 @@
 # STORY QUALITY SCORING
 #          ↓
 # STRONGEST STORY
+#
+# COVERAGE:
+# Bomet
+# Kericho
+# Nakuru
+# Nandi
+# Uasin Gishu
+# Elgeyo-Marakwet
+# West Pokot
+# Narok
+#
+# PRIMARY SOURCES ONLY
 #
 # No The Star
 # No Standard
@@ -137,13 +153,6 @@ COUNTY_KEYWORDS = {
 # ============================================================
 # OFFICIAL SOURCES
 # ============================================================
-#
-# These are official county-government websites.
-#
-# Some counties expose their latest news directly on the
-# homepage while others have dedicated news pages.
-#
-# ============================================================
 
 OFFICIAL_SOURCES = [
     {
@@ -197,13 +206,12 @@ OFFICIAL_SOURCES = [
 
 
 # ============================================================
-# POLITICAL / ACCOUNTABILITY TERMS
+# POLITICAL TERMS
 # ============================================================
 
 POLITICAL_TERMS = [
     "governor",
     "deputy governor",
-    "senator",
     "senator",
     "mp",
     "member of parliament",
@@ -225,6 +233,10 @@ POLITICAL_TERMS = [
     "cabinet secretary",
 ]
 
+
+# ============================================================
+# ACCOUNTABILITY TERMS
+# ============================================================
 
 ACCOUNTABILITY_TERMS = [
     "audit",
@@ -267,6 +279,10 @@ ACCOUNTABILITY_TERMS = [
 ]
 
 
+# ============================================================
+# HIGH PRIORITY TERMS
+# ============================================================
+
 HIGH_PRIORITY_TERMS = [
     "breaking",
     "killed",
@@ -299,6 +315,10 @@ HIGH_PRIORITY_TERMS = [
     "tender",
 ]
 
+
+# ============================================================
+# MEDIUM PRIORITY TERMS
+# ============================================================
 
 MEDIUM_PRIORITY_TERMS = [
     "county",
@@ -493,6 +513,41 @@ CATEGORY_TERMS = {
 
 
 # ============================================================
+# GENERIC / NON-STORY TITLES
+# ============================================================
+
+GENERIC_TITLES = {
+    "recent news",
+    "recent news & events",
+    "recent news and events",
+    "news & events",
+    "news and events",
+    "latest news",
+    "latest updates",
+    "latest update",
+    "news",
+    "events",
+    "news updates",
+    "latest news and events",
+    "recent updates",
+    "our news",
+    "county news",
+    "featured news",
+    "news headlines",
+    "latest stories",
+    "recent stories",
+    "our latest news",
+    "latest developments",
+    "updates",
+    "announcements",
+    "notice",
+    "notices",
+    "press releases",
+    "press release",
+}
+
+
+# ============================================================
 # CONFIG
 # ============================================================
 
@@ -516,6 +571,7 @@ def load_config():
             "r",
             encoding="utf-8",
         ) as file:
+
             config = json.load(file)
 
         defaults.update(config)
@@ -571,7 +627,77 @@ def normalize_url(base_url, href):
     if href.startswith("javascript:"):
         return ""
 
-    return urljoin(base_url, href)
+    return urljoin(
+        base_url,
+        href,
+    )
+
+
+# ============================================================
+# NORMALIZE TITLE
+# ============================================================
+
+def normalize_title(title):
+    """Normalize a title for comparison."""
+
+    title = clean_text(title)
+
+    title = re.sub(
+        r"\s+",
+        " ",
+        title.lower(),
+    )
+
+    title = title.strip(
+        " -|:•·"
+    )
+
+    return title
+
+
+# ============================================================
+# GENERIC TITLE CHECK
+# ============================================================
+
+def is_generic_title(title):
+    """Return True when a title is a website heading."""
+
+    normalized = normalize_title(
+        title
+    )
+
+    if not normalized:
+        return True
+
+    if normalized in GENERIC_TITLES:
+        return True
+
+    # --------------------------------------------------------
+    # Common heading patterns
+    # --------------------------------------------------------
+
+    generic_patterns = [
+        r"^recent news",
+        r"^latest news",
+        r"^latest updates",
+        r"^recent updates",
+        r"^news and events$",
+        r"^news & events$",
+        r"^news updates$",
+        r"^featured news$",
+        r"^latest stories$",
+        r"^recent stories$",
+    ]
+
+    for pattern in generic_patterns:
+
+        if re.search(
+            pattern,
+            normalized,
+        ):
+            return True
+
+    return False
 
 
 # ============================================================
@@ -581,7 +707,10 @@ def normalize_url(base_url, href):
 def detect_county(title, summary):
     """Identify the strongest matching covered county."""
 
-    text = f"{title} {summary}".lower()
+    text = (
+        f"{title} {summary}"
+        .lower()
+    )
 
     matches = {}
 
@@ -613,7 +742,10 @@ def detect_county(title, summary):
 def detect_category(title, summary):
     """Identify the strongest story category."""
 
-    text = f"{title} {summary}".lower()
+    text = (
+        f"{title} {summary}"
+        .lower()
+    )
 
     scores = {}
 
@@ -646,7 +778,10 @@ def detect_category(title, summary):
 def political_score(title, summary):
     """Score stories involving political leadership."""
 
-    text = f"{title} {summary}".lower()
+    text = (
+        f"{title} {summary}"
+        .lower()
+    )
 
     score = 0
 
@@ -665,7 +800,10 @@ def political_score(title, summary):
 def accountability_score(title, summary):
     """Score stories involving accountability."""
 
-    text = f"{title} {summary}".lower()
+    text = (
+        f"{title} {summary}"
+        .lower()
+    )
 
     score = 0
 
@@ -688,7 +826,10 @@ def score_story(
 ):
     """Calculate story importance."""
 
-    text = f"{title} {summary}".lower()
+    text = (
+        f"{title} {summary}"
+        .lower()
+    )
 
     score = 0
 
@@ -774,6 +915,11 @@ def score_story(
         "newsletter",
         "weekly roundup",
         "daily roundup",
+        "photo gallery",
+        "gallery",
+        "advertisement",
+        "vacancy",
+        "job vacancy",
     ]
 
     for term in weak_terms:
@@ -781,11 +927,22 @@ def score_story(
         if term in title.lower():
             score -= 5
 
+    # --------------------------------------------------------
+    # Weak headline
+    # --------------------------------------------------------
+
     if len(title.split()) < 4:
         score -= 5
 
+    # --------------------------------------------------------
+    # Weak summary
+    # --------------------------------------------------------
+
     if len(summary) < 80:
         score -= 5
+
+    if len(summary) < 30:
+        score -= 10
 
     return score
 
@@ -849,6 +1006,23 @@ def extract_stories(
     stories = []
 
     # --------------------------------------------------------
+    # Remove obvious non-content areas
+    # --------------------------------------------------------
+
+    for element in soup.find_all(
+        [
+            "nav",
+            "footer",
+            "header",
+            "script",
+            "style",
+            "noscript",
+        ]
+    ):
+
+        element.decompose()
+
+    # --------------------------------------------------------
     # Look for article/post structures first
     # --------------------------------------------------------
 
@@ -883,7 +1057,24 @@ def extract_stories(
             continue
 
         # ----------------------------------------------------
-        # Ignore navigation/interface text
+        # Generic website heading filter
+        # ----------------------------------------------------
+
+        if is_generic_title(title):
+            continue
+
+        # ----------------------------------------------------
+        # Minimum title quality
+        # ----------------------------------------------------
+
+        if len(title) < 20:
+            continue
+
+        if len(title.split()) < 4:
+            continue
+
+        # ----------------------------------------------------
+        # Ignore obvious interface text
         # ----------------------------------------------------
 
         ignored_terms = [
@@ -897,12 +1088,16 @@ def extract_stories(
             "search",
             "menu",
             "services",
+            "privacy policy",
+            "terms and conditions",
+            "quick links",
         ]
 
-        if title.lower() in ignored_terms:
-            continue
+        normalized_title = normalize_title(
+            title
+        )
 
-        if len(title) < 20:
+        if normalized_title in ignored_terms:
             continue
 
         # ----------------------------------------------------
@@ -917,9 +1112,13 @@ def extract_stories(
         href = ""
 
         if link:
+
             href = normalize_url(
                 source["url"],
-                link.get("href", ""),
+                link.get(
+                    "href",
+                    "",
+                ),
             )
 
         if not href:
@@ -941,12 +1140,51 @@ def extract_stories(
                 paragraph.get_text(" ")
             )
 
-            if text:
-                summary_parts.append(text)
+            if not text:
+                continue
+
+            # Avoid tiny UI fragments
+            if len(text) < 25:
+                continue
+
+            summary_parts.append(
+                text
+            )
 
         summary = " ".join(
             summary_parts
         )
+
+        # ----------------------------------------------------
+        # Avoid containers with no meaningful summary
+        # ----------------------------------------------------
+
+        if len(summary) < 20:
+
+            # Try nearby text from the container
+            container_text = clean_text(
+                container.get_text(" ")
+            )
+
+            if container_text:
+                summary = container_text
+
+        # ----------------------------------------------------
+        # Remove title duplication from summary
+        # ----------------------------------------------------
+
+        if summary:
+
+            summary_normalized = normalize_title(
+                summary
+            )
+
+            title_normalized = normalize_title(
+                title
+            )
+
+            if summary_normalized == title_normalized:
+                summary = ""
 
         # ----------------------------------------------------
         # Build story
@@ -960,7 +1198,9 @@ def extract_stories(
             "county": source["county"],
         }
 
-        stories.append(story)
+        stories.append(
+            story
+        )
 
     # --------------------------------------------------------
     # Remove duplicate titles
@@ -972,17 +1212,9 @@ def extract_stories(
 
     for story in stories:
 
-        key = re.sub(
-            r"[^a-z0-9 ]",
-            "",
-            story["title"].lower(),
+        key = normalize_title(
+            story["title"]
         )
-
-        key = re.sub(
-            r"\s+",
-            " ",
-            key,
-        ).strip()
 
         if not key:
             continue
@@ -992,7 +1224,9 @@ def extract_stories(
 
         seen.add(key)
 
-        unique.append(story)
+        unique.append(
+            story
+        )
 
     return unique
 
@@ -1022,6 +1256,13 @@ def enrich_stories(stories):
             "county"
         )
 
+        # ----------------------------------------------------
+        # Final generic-title protection
+        # ----------------------------------------------------
+
+        if is_generic_title(title):
+            continue
+
         detected_county = detect_county(
             title,
             summary,
@@ -1047,7 +1288,9 @@ def enrich_stories(stories):
         )
 
         story["county"] = county
+
         story["category"] = category
+
         story["score"] = score
 
         story["political_score"] = (
@@ -1064,7 +1307,9 @@ def enrich_stories(stories):
             )
         )
 
-        enriched.append(story)
+        enriched.append(
+            story
+        )
 
     return enriched
 
@@ -1082,17 +1327,9 @@ def remove_duplicates(stories):
 
     for story in stories:
 
-        normalized = re.sub(
-            r"[^a-z0-9 ]",
-            "",
-            story["title"].lower(),
+        normalized = normalize_title(
+            story["title"]
         )
-
-        normalized = re.sub(
-            r"\s+",
-            " ",
-            normalized,
-        ).strip()
 
         if not normalized:
             continue
@@ -1100,9 +1337,13 @@ def remove_duplicates(stories):
         if normalized in seen:
             continue
 
-        seen.add(normalized)
+        seen.add(
+            normalized
+        )
 
-        unique.append(story)
+        unique.append(
+            story
+        )
 
     return unique
 
@@ -1121,17 +1362,45 @@ def select_story(stories):
         stories
     )
 
+    # --------------------------------------------------------
+    # Final safety filter
+    # --------------------------------------------------------
+
+    stories = [
+        story
+        for story in stories
+        if not is_generic_title(
+            story.get(
+                "title",
+                "",
+            )
+        )
+    ]
+
+    if not stories:
+        return None
+
+    # --------------------------------------------------------
+    # Ranking
+    # --------------------------------------------------------
+
     stories.sort(
         key=lambda story: (
-            story.get("score", 0),
+            story.get(
+                "score",
+                0,
+            ),
+
             story.get(
                 "accountability_score",
                 0,
             ),
+
             story.get(
                 "political_score",
                 0,
             ),
+
             len(
                 story.get(
                     "summary",
@@ -1194,10 +1463,12 @@ def run_news_engine():
     )
 
     print("=" * 60)
+
     print(
         "RIFT VALLEY WATCH — "
-        "OFFICIAL-SOURCE NEWS ENGINE"
+        "OFFICIAL-SOURCE NEWS ENGINE V1.1"
     )
+
     print("=" * 60)
 
     print(
