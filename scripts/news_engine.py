@@ -1,46 +1,36 @@
 # ============================================================
-# RIFT VALLEY WATCH
-# OFFICIAL-SOURCE NEWS ENGINE — V1.1
-#
-# OFFICIAL COUNTY SOURCES
-#          ↓
-# STORY EXTRACTION
-#          ↓
-# GENERIC HEADING FILTER
-#          ↓
-# COUNTY DETECTION
-#          ↓
-# CATEGORY DETECTION
-#          ↓
-# POLITICS / ACCOUNTABILITY SCORING
-#          ↓
-# STORY QUALITY SCORING
-#          ↓
-# STRONGEST STORY
+# RIFT VALLEY WATCH V1.2
+# OFFICIAL-SOURCE REGIONAL NEWS ENGINE
 #
 # COVERAGE:
-# Bomet
-# Kericho
-# Nakuru
-# Nandi
-# Uasin Gishu
-# Elgeyo-Marakwet
-# West Pokot
-# Narok
+# Bomet | Kericho | Nakuru | Nandi
+# Uasin Gishu | Elgeyo-Marakwet | West Pokot | Narok
 #
-# PRIMARY SOURCES ONLY
+# SOURCES:
+# Official county/government websites only
 #
-# No The Star
-# No Standard
-# No Citizen Digital
-#
+# PIPELINE:
+# OFFICIAL SOURCES
+#       ↓
+# STORY EXTRACTION
+#       ↓
+# COUNTY DETECTION
+#       ↓
+# CATEGORY DETECTION
+#       ↓
+# POLITICAL / ACCOUNTABILITY SCORING
+#       ↓
+# STORY RANKING
+#       ↓
+# ONE STORY
+#       ↓
+# data/story.json
 # ============================================================
 
 import json
+import os
 import re
-from datetime import datetime, timezone
-from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -50,419 +40,252 @@ from bs4 import BeautifulSoup
 # PATHS
 # ============================================================
 
-ROOT = Path(__file__).resolve().parents[1]
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-CONFIG_DIR = ROOT / "config"
-DATA_DIR = ROOT / "data"
-
-CONFIG_FILE = CONFIG_DIR / "settings.json"
-STORY_FILE = DATA_DIR / "story.json"
-
-DATA_DIR.mkdir(parents=True, exist_ok=True)
+CONFIG_FILE = os.path.join(BASE_DIR, "config", "settings.json")
+STORY_FILE = os.path.join(BASE_DIR, "data", "story.json")
 
 
 # ============================================================
-# COUNTY COVERAGE
+# OFFICIAL SOURCES ONLY
+# ============================================================
+
+OFFICIAL_SOURCES = {
+    "Bomet": {
+        "name": "Bomet County Government",
+        "url": "https://bomet.go.ke/news/"
+    },
+    "Kericho": {
+        "name": "Kericho County Government",
+        "url": "https://www.kericho.go.ke/"
+    },
+    "Nakuru": {
+        "name": "Nakuru County Government",
+        "url": "https://www.nakuru.go.ke/"
+    },
+    "Nandi": {
+        "name": "Nandi County Government",
+        "url": "https://nandi.go.ke/news/"
+    },
+    "Uasin Gishu": {
+        "name": "Uasin Gishu County Government",
+        "url": "https://uasingishu.go.ke/"
+    },
+    "Elgeyo-Marakwet": {
+        "name": "Elgeyo-Marakwet County Government",
+        "url": "https://elgeyomarakwet.go.ke/news/"
+    },
+    "West Pokot": {
+        "name": "West Pokot County Government",
+        "url": "https://www.westpokot.go.ke/"
+    },
+    "Narok": {
+        "name": "Narok County Government",
+        "url": "https://www.narok.go.ke/"
+    }
+}
+
+
+# ============================================================
+# COUNTY KEYWORDS
 # ============================================================
 
 COUNTY_KEYWORDS = {
     "Bomet": [
         "bomet",
-        "sotik",
-        "konoin",
-        "chepalungu",
-        "longisa",
-        "mulot",
+        "bomet county"
     ],
 
     "Kericho": [
         "kericho",
-        "ainamoi",
-        "belgut",
-        "kipkelion",
-        "litein",
-        "londiani",
-        "bureti",
-        "sigowet",
+        "kericho county"
     ],
 
     "Nakuru": [
         "nakuru",
-        "naivasha",
-        "gilgil",
-        "molo",
-        "njoro",
-        "rongai",
-        "kuresoi",
+        "nakuru county"
     ],
 
     "Nandi": [
         "nandi",
-        "kapsabet",
-        "mosop",
-        "aldai",
-        "emgwen",
-        "tinderet",
-        "chesumei",
+        "nandi county"
     ],
 
     "Uasin Gishu": [
         "uasin gishu",
         "eldoret",
-        "turbo",
-        "kesses",
-        "soy",
-        "moiben",
-        "kapseret",
+        "uasin gishu county"
     ],
 
     "Elgeyo-Marakwet": [
-        "elgeyo-marakwet",
-        "elgeyo marakwet",
-        "iten",
+        "elgeyo",
         "marakwet",
-        "keiyo",
-        "keiyo south",
-        "keiyo north",
-        "kapcherop",
-        "tambach",
+        "elgeyo-marakwet",
+        "elgeyo marakwet"
     ],
 
     "West Pokot": [
         "west pokot",
-        "kapenguria",
-        "kacheliba",
-        "sigor",
         "pokot",
-        "chepareria",
-        "turkwel",
+        "kapenguria",
+        "west pokot county"
     ],
 
     "Narok": [
         "narok",
-        "kilgoris",
-        "trans mara",
-        "suswa",
-        "maasai mara",
-        "ololulunga",
-        "mau",
-    ],
+        "narok county",
+        "maasai mara"
+    ]
 }
-
-
-# ============================================================
-# OFFICIAL SOURCES
-# ============================================================
-
-OFFICIAL_SOURCES = [
-    {
-        "name": "Bomet County Government",
-        "county": "Bomet",
-        "url": "https://bomet.go.ke/news/",
-    },
-
-    {
-        "name": "Kericho County Government",
-        "county": "Kericho",
-        "url": "https://www.kericho.go.ke/",
-    },
-
-    {
-        "name": "Nakuru County Government",
-        "county": "Nakuru",
-        "url": "https://www.nakuru.go.ke/",
-    },
-
-    {
-        "name": "Nandi County Government",
-        "county": "Nandi",
-        "url": "https://nandi.go.ke/news/",
-    },
-
-    {
-        "name": "Uasin Gishu County Government",
-        "county": "Uasin Gishu",
-        "url": "https://uasingishu.go.ke/",
-    },
-
-    {
-        "name": "Elgeyo-Marakwet County Government",
-        "county": "Elgeyo-Marakwet",
-        "url": "https://elgeyomarakwet.go.ke/news/",
-    },
-
-    {
-        "name": "West Pokot County Government",
-        "county": "West Pokot",
-        "url": "https://www.westpokot.go.ke/",
-    },
-
-    {
-        "name": "Narok County Government",
-        "county": "Narok",
-        "url": "https://www.narok.go.ke/",
-    },
-]
-
-
-# ============================================================
-# POLITICAL TERMS
-# ============================================================
-
-POLITICAL_TERMS = [
-    "governor",
-    "deputy governor",
-    "senator",
-    "mp",
-    "member of parliament",
-    "mca",
-    "member of county assembly",
-    "county assembly",
-    "assembly",
-    "politician",
-    "political",
-    "party",
-    "election",
-    "elections",
-    "campaign",
-    "government",
-    "cabinet",
-    "leader",
-    "leaders",
-    "minister",
-    "cabinet secretary",
-]
-
-
-# ============================================================
-# ACCOUNTABILITY TERMS
-# ============================================================
-
-ACCOUNTABILITY_TERMS = [
-    "audit",
-    "auditor",
-    "auditor-general",
-    "audit report",
-    "accountability",
-    "irregular",
-    "irregularities",
-    "mismanagement",
-    "misuse",
-    "funds",
-    "budget",
-    "budget implementation",
-    "expenditure",
-    "procurement",
-    "tender",
-    "contract",
-    "contractor",
-    "project",
-    "project monitoring",
-    "investigation",
-    "investigated",
-    "probe",
-    "court",
-    "petition",
-    "complaint",
-    "oversight",
-    "public participation",
-    "performance",
-    "promise",
-    "pledge",
-    "commitment",
-    "delivery",
-    "delay",
-    "delayed",
-    "unfinished",
-    "abandoned",
-    "failed",
-]
-
-
-# ============================================================
-# HIGH PRIORITY TERMS
-# ============================================================
-
-HIGH_PRIORITY_TERMS = [
-    "breaking",
-    "killed",
-    "dead",
-    "death",
-    "missing",
-    "arrested",
-    "accident",
-    "crash",
-    "fire",
-    "flood",
-    "landslide",
-    "attack",
-    "shooting",
-    "police",
-    "court",
-    "governor",
-    "senator",
-    "mp",
-    "mca",
-    "audit",
-    "auditor",
-    "investigation",
-    "probe",
-    "irregularities",
-    "mismanagement",
-    "corruption",
-    "budget",
-    "procurement",
-    "tender",
-]
-
-
-# ============================================================
-# MEDIUM PRIORITY TERMS
-# ============================================================
-
-MEDIUM_PRIORITY_TERMS = [
-    "county",
-    "assembly",
-    "development",
-    "hospital",
-    "health",
-    "school",
-    "university",
-    "road",
-    "highway",
-    "bridge",
-    "agriculture",
-    "farmers",
-    "tea",
-    "coffee",
-    "business",
-    "investment",
-    "jobs",
-    "employment",
-    "market",
-    "prices",
-    "water",
-    "electricity",
-    "tourism",
-    "livestock",
-]
 
 
 # ============================================================
 # CATEGORIES
 # ============================================================
 
-CATEGORY_TERMS = {
+CATEGORIES = {
     "BREAKING NEWS": [
         "breaking",
-        "killed",
-        "dead",
-        "death",
-        "missing",
-        "arrested",
-        "accident",
+        "urgent",
+        "alert",
+        "rescue",
+        "incident",
         "crash",
+        "accident",
         "fire",
-        "flood",
-        "landslide",
-        "attack",
-        "shooting",
+        "missing",
+        "killed",
+        "death",
+        "fatal",
+        "arrested"
     ],
 
     "POLITICS": [
         "governor",
         "senator",
-        "mp",
         "mca",
+        "mp ",
+        "member of parliament",
         "politician",
         "political",
         "election",
         "elections",
-        "party",
         "campaign",
+        "party",
+        "ward",
+        "assembly",
+        "county assembly",
+        "deputy governor",
         "president",
-        "deputy president",
-        "cabinet",
-        "government",
+        "government"
     ],
 
     "ACCOUNTABILITY": [
         "audit",
         "auditor",
-        "audit report",
-        "accountability",
-        "irregularities",
-        "mismanagement",
-        "misuse",
-        "funds",
-        "budget",
+        "auditor-general",
         "procurement",
         "tender",
+        "tenders",
         "contract",
+        "contracts",
+        "budget",
+        "budgets",
+        "funds",
+        "money",
+        "expenditure",
+        "spending",
+        "irregular",
+        "misuse",
+        "mismanagement",
+        "corruption",
         "investigation",
-        "probe",
-        "court",
-        "petition",
+        "accountability",
         "oversight",
-        "performance",
-        "promise",
-        "pledge",
-        "delay",
-        "delayed",
-        "unfinished",
-        "abandoned",
+        "pending bills",
+        "unpaid bills",
+        "revenue",
+        "loss",
+        "losses"
     ],
 
     "DEVELOPMENT": [
-        "road",
-        "highway",
-        "bridge",
         "project",
-        "construction",
-        "infrastructure",
+        "projects",
+        "road",
+        "roads",
+        "bridge",
+        "bridges",
         "water",
-        "electricity",
+        "infrastructure",
+        "construction",
+        "constructed",
+        "development",
+        "stadium",
+        "market",
+        "markets",
         "housing",
+        "electricity",
+        "street lighting"
     ],
 
     "SECURITY": [
         "police",
-        "arrested",
+        "security",
         "crime",
-        "attack",
         "robbery",
-        "shooting",
-        "court",
+        "theft",
         "suspect",
+        "arrest",
+        "arrested",
+        "dci",
+        "investigation",
+        "bandit",
+        "bandits",
+        "attack",
+        "attacked",
+        "terror",
+        "terrorism"
     ],
 
     "AGRICULTURE": [
+        "agriculture",
         "farmer",
         "farmers",
-        "agriculture",
-        "tea",
+        "farming",
         "coffee",
+        "tea",
         "maize",
-        "dairy",
-        "livestock",
-        "crop",
-        "harvest",
-        "seedlings",
         "fertilizer",
+        "livestock",
+        "dairy",
+        "crops",
+        "harvest",
+        "irrigation",
+        "seedlings",
+        "seeds"
     ],
 
     "HEALTH": [
-        "hospital",
         "health",
+        "hospital",
+        "hospitals",
         "doctor",
-        "patient",
-        "disease",
+        "doctors",
+        "nurse",
+        "nurses",
         "clinic",
         "medical",
-        "nurse",
+        "medicine",
+        "disease",
+        "vaccination",
+        "immunization",
+        "maternal",
+        "healthcare"
     ],
 
     "EDUCATION": [
+        "education",
         "school",
         "schools",
         "student",
@@ -470,45 +293,58 @@ CATEGORY_TERMS = {
         "teacher",
         "teachers",
         "university",
-        "education",
         "college",
         "bursary",
+        "scholarship",
+        "scholars",
+        "training"
     ],
 
     "BUSINESS": [
         "business",
-        "investment",
-        "company",
-        "jobs",
-        "employment",
-        "market",
-        "prices",
-        "economy",
+        "businesses",
         "trade",
-        "coffee",
-        "tourism",
+        "traders",
+        "market",
+        "markets",
+        "investment",
+        "investor",
+        "investors",
+        "industry",
+        "industrial",
+        "enterprise",
+        "employment",
+        "jobs",
+        "economy"
     ],
 
     "COMMUNITY": [
         "community",
         "residents",
-        "families",
         "youth",
         "women",
+        "groups",
         "leaders",
-        "initiative",
+        "families",
+        "social",
+        "empowerment",
+        "donation",
+        "charity"
     ],
 
     "TOURISM": [
         "tourism",
         "tourist",
-        "maasai mara",
+        "tourists",
+        "hotel",
+        "hotels",
         "wildlife",
         "park",
-        "hotel",
-        "travel",
-        "conservation",
-    ],
+        "parks",
+        "mara",
+        "attraction",
+        "tour"
+    ]
 }
 
 
@@ -518,8 +354,8 @@ CATEGORY_TERMS = {
 
 GENERIC_TITLES = {
     "recent news",
+    "recent news events",
     "recent news & events",
-    "recent news and events",
     "news & events",
     "news and events",
     "latest news",
@@ -544,127 +380,87 @@ GENERIC_TITLES = {
     "notices",
     "press releases",
     "press release",
+    "news and events",
+    "news events"
 }
 
 
 # ============================================================
-# CONFIG
+# WEAK / NON-NEWS TERMS
 # ============================================================
 
-def load_config():
-    """Load application configuration."""
-
-    defaults = {
-        "page_name": "Rift Valley Watch",
-        "region": "Rift Valley, Kenya",
-        "language": "en",
-        "max_articles": 100,
-        "max_script_words": 180,
-    }
-
-    if not CONFIG_FILE.exists():
-        return defaults
-
-    try:
-        with open(
-            CONFIG_FILE,
-            "r",
-            encoding="utf-8",
-        ) as file:
-
-            config = json.load(file)
-
-        defaults.update(config)
-
-        return defaults
-
-    except Exception:
-        return defaults
+WEAK_TERMS = [
+    "photo gallery",
+    "gallery",
+    "advertisement",
+    "advert",
+    "vacancy",
+    "job vacancy",
+    "careers",
+    "career opportunity",
+    "tender notice",
+    "download",
+    "login",
+    "register",
+    "contact us",
+    "privacy policy",
+    "terms and conditions"
+]
 
 
 # ============================================================
-# TEXT CLEANING
+# REQUEST SETTINGS
 # ============================================================
 
-def clean_text(text):
-    """Clean HTML and whitespace from text."""
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 Chrome/131.0 Safari/537.36"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,"
+        "application/xml;q=0.9,*/*;q=0.8"
+    )
+}
+
+TIMEOUT = 20
+
+
+# ============================================================
+# HELPERS
+# ============================================================
+
+def normalize_text(text):
+    """Normalize whitespace and common HTML spacing."""
 
     if not text:
         return ""
 
-    text = BeautifulSoup(
-        str(text),
-        "html.parser",
-    ).get_text(" ")
-
-    text = re.sub(
-        r"\s+",
-        " ",
-        text,
-    )
+    text = str(text)
+    text = text.replace("\xa0", " ")
+    text = re.sub(r"\s+", " ", text)
 
     return text.strip()
 
 
-# ============================================================
-# NORMALIZE URL
-# ============================================================
-
-def normalize_url(base_url, href):
-    """Convert relative URLs into absolute URLs."""
-
-    if not href:
-        return ""
-
-    href = href.strip()
-
-    if href.startswith("#"):
-        return ""
-
-    if href.startswith("mailto:"):
-        return ""
-
-    if href.startswith("javascript:"):
-        return ""
-
-    return urljoin(
-        base_url,
-        href,
-    )
-
-
-# ============================================================
-# NORMALIZE TITLE
-# ============================================================
-
 def normalize_title(title):
-    """Normalize a title for comparison."""
+    """Normalize title for comparison."""
 
-    title = clean_text(title)
+    title = normalize_text(title).lower()
 
-    title = re.sub(
-        r"\s+",
-        " ",
-        title.lower(),
-    )
+    title = title.replace("–", "-")
+    title = title.replace("—", "-")
 
-    title = title.strip(
-        " -|:•·"
-    )
+    title = re.sub(r"[^\w\s&-]", "", title)
+    title = re.sub(r"\s+", " ", title)
 
-    return title
+    return title.strip()
 
-
-# ============================================================
-# GENERIC TITLE CHECK
-# ============================================================
 
 def is_generic_title(title):
-    """Return True when a title is a website heading."""
+    """Reject page headings that are not actual stories."""
 
-    normalized = normalize_title(
-        title
-    )
+    normalized = normalize_title(title)
 
     if not normalized:
         return True
@@ -672,121 +468,239 @@ def is_generic_title(title):
     if normalized in GENERIC_TITLES:
         return True
 
-    # --------------------------------------------------------
-    # Common heading patterns
-    # --------------------------------------------------------
+    # Catch variations such as:
+    # "Recent News & Events 2026"
+    # "Latest News and Events"
+    if normalized.startswith("recent news"):
+        return True
 
-    generic_patterns = [
-        r"^recent news",
-        r"^latest news",
-        r"^latest updates",
-        r"^recent updates",
-        r"^news and events$",
-        r"^news & events$",
-        r"^news updates$",
-        r"^featured news$",
-        r"^latest stories$",
-        r"^recent stories$",
-    ]
+    if normalized.startswith("latest news"):
+        return True
 
-    for pattern in generic_patterns:
+    if normalized.startswith("news & events"):
+        return True
 
-        if re.search(
-            pattern,
-            normalized,
-        ):
+    if normalized.startswith("news and events"):
+        return True
+
+    if normalized.startswith("recent updates"):
+        return True
+
+    return False
+
+
+def is_weak_title(title):
+    """Reject obvious non-news content."""
+
+    normalized = normalize_title(title)
+
+    for term in WEAK_TERMS:
+        if term in normalized:
             return True
 
     return False
+
+
+def word_count(text):
+    return len(normalize_text(text).split())
+
+
+def title_is_reasonable(title):
+    """
+    A genuine news title normally has enough information
+    to stand on its own.
+    """
+
+    title = normalize_text(title)
+
+    if not title:
+        return False
+
+    if is_generic_title(title):
+        return False
+
+    if is_weak_title(title):
+        return False
+
+    words = word_count(title)
+
+    if words < 4:
+        return False
+
+    if len(title) < 25:
+        return False
+
+    return True
+
+
+def normalize_url(url):
+    if not url:
+        return ""
+
+    url = url.strip()
+
+    if url.startswith("//"):
+        url = "https:" + url
+
+    return url
+
+
+def url_is_bad(url, source_url):
+    """
+    Reject navigation, category, template and section links.
+    """
+
+    if not url:
+        return True
+
+    url = normalize_url(url)
+
+    if url.startswith("#"):
+        return True
+
+    if url.lower().startswith("javascript:"):
+        return True
+
+    if url.lower().startswith("mailto:"):
+        return True
+
+    absolute_url = urljoin(source_url, url)
+
+    source_parsed = urlparse(source_url)
+    candidate_parsed = urlparse(absolute_url)
+
+    source_path = source_parsed.path.rstrip("/").lower()
+    candidate_path = candidate_parsed.path.rstrip("/").lower()
+
+    # Same page as source
+    if absolute_url.rstrip("/") == source_url.rstrip("/"):
+        return True
+
+    if candidate_path == source_path:
+        return True
+
+    # Common section/navigation paths
+    bad_path_parts = [
+        "/templates/",
+        "/category/",
+        "/categories/",
+        "/tag/",
+        "/tags/",
+        "/page/",
+        "/author/",
+        "/search",
+        "/events",
+        "/gallery",
+        "/contact",
+        "/about",
+        "/login",
+        "/register"
+    ]
+
+    for bad_part in bad_path_parts:
+        if bad_part in candidate_path:
+            return True
+
+    # Specific known generic page from Kericho
+    if "news_and_events" in candidate_path:
+        return True
+
+    # Generic news index itself
+    if candidate_path.endswith("/news"):
+        return True
+
+    # Generic events index
+    if candidate_path.endswith("/events"):
+        return True
+
+    return False
+
+
+def likely_story_link(title, href, source_url):
+    """
+    Determine whether an <a> element is probably a real
+    individual story rather than navigation.
+    """
+
+    if not title_is_reasonable(title):
+        return False
+
+    if url_is_bad(href, source_url):
+        return False
+
+    # A useful story title usually contains several words.
+    if word_count(title) < 5:
+        return False
+
+    return True
 
 
 # ============================================================
 # COUNTY DETECTION
 # ============================================================
 
-def detect_county(title, summary):
-    """Identify the strongest matching covered county."""
+def detect_county(text):
+    text = normalize_text(text).lower()
 
-    text = (
-        f"{title} {summary}"
-        .lower()
-    )
-
-    matches = {}
+    scores = {}
 
     for county, keywords in COUNTY_KEYWORDS.items():
-
-        count = 0
+        score = 0
 
         for keyword in keywords:
+            if keyword in text:
+                score += 1
 
-            if keyword.lower() in text:
-                count += 1
+        if score:
+            scores[county] = score
 
-        if count:
-            matches[county] = count
-
-    if not matches:
+    if not scores:
         return None
 
-    return max(
-        matches,
-        key=matches.get,
-    )
+    return max(scores, key=scores.get)
 
 
 # ============================================================
 # CATEGORY DETECTION
 # ============================================================
 
-def detect_category(title, summary):
-    """Identify the strongest story category."""
+def detect_category(text):
 
-    text = (
-        f"{title} {summary}"
-        .lower()
-    )
+    text = normalize_text(text).lower()
 
     scores = {}
 
-    for category, keywords in CATEGORY_TERMS.items():
+    for category, keywords in CATEGORIES.items():
 
         score = 0
 
         for keyword in keywords:
 
-            if keyword.lower() in text:
+            if keyword in text:
                 score += 1
 
-        scores[category] = score
+        if score:
+            scores[category] = score
 
-    best_category = max(
-        scores,
-        key=scores.get,
-    )
-
-    if scores[best_category] == 0:
+    if not scores:
         return "COMMUNITY"
 
-    return best_category
+    return max(scores, key=scores.get)
 
 
 # ============================================================
 # POLITICAL SCORE
 # ============================================================
 
-def political_score(title, summary):
-    """Score stories involving political leadership."""
+def political_score(text):
 
-    text = (
-        f"{title} {summary}"
-        .lower()
-    )
+    text = normalize_text(text).lower()
+
+    terms = CATEGORIES["POLITICS"]
 
     score = 0
 
-    for term in POLITICAL_TERMS:
-
+    for term in terms:
         if term in text:
             score += 4
 
@@ -797,18 +711,15 @@ def political_score(title, summary):
 # ACCOUNTABILITY SCORE
 # ============================================================
 
-def accountability_score(title, summary):
-    """Score stories involving accountability."""
+def accountability_score(text):
 
-    text = (
-        f"{title} {summary}"
-        .lower()
-    )
+    text = normalize_text(text).lower()
+
+    terms = CATEGORIES["ACCOUNTABILITY"]
 
     score = 0
 
-    for term in ACCOUNTABILITY_TERMS:
-
+    for term in terms:
         if term in text:
             score += 5
 
@@ -816,419 +727,444 @@ def accountability_score(title, summary):
 
 
 # ============================================================
-# STORY SCORING
+# STORY SCORE
 # ============================================================
 
-def score_story(
-    title,
-    summary,
-    county,
-):
-    """Calculate story importance."""
+def score_story(story):
 
-    text = (
-        f"{title} {summary}"
-        .lower()
-    )
+    title = normalize_text(story.get("title", ""))
+    summary = normalize_text(story.get("summary", ""))
+
+    combined = f"{title} {summary}".lower()
 
     score = 0
 
-    # --------------------------------------------------------
     # County relevance
-    # --------------------------------------------------------
+    if story.get("county"):
+        score += 20
 
-    if county:
-        score += 15
-
-    # --------------------------------------------------------
-    # High-priority terms
-    # --------------------------------------------------------
-
-    for term in HIGH_PRIORITY_TERMS:
-
-        if term in text:
-            score += 5
-
-    # --------------------------------------------------------
-    # Medium-priority terms
-    # --------------------------------------------------------
-
-    for term in MEDIUM_PRIORITY_TERMS:
-
-        if term in text:
-            score += 2
-
-    # --------------------------------------------------------
     # Political importance
-    # --------------------------------------------------------
+    score += story.get("political_score", 0)
 
-    score += political_score(
-        title,
-        summary,
-    )
-
-    # --------------------------------------------------------
     # Accountability importance
-    # --------------------------------------------------------
+    score += story.get("accountability_score", 0)
 
-    score += accountability_score(
-        title,
-        summary,
-    )
+    # Title quality
+    title_words = word_count(title)
 
-    # --------------------------------------------------------
-    # Strong headline indicators
-    # --------------------------------------------------------
-
-    if "breaking" in title.lower():
+    if title_words >= 7:
         score += 10
 
-    if re.search(
-        r"\b\d+\b",
-        title,
-    ):
-        score += 2
+    elif title_words >= 5:
+        score += 5
 
-    if "%" in summary:
-        score += 2
+    # Summary depth
+    summary_words = word_count(summary)
 
-    # --------------------------------------------------------
-    # Story depth
-    # --------------------------------------------------------
+    if summary_words >= 60:
+        score += 10
 
-    if len(summary) >= 150:
-        score += 3
+    elif summary_words >= 30:
+        score += 5
 
-    if len(summary) >= 300:
-        score += 3
-
-    if len(summary) >= 500:
-        score += 2
-
-    # --------------------------------------------------------
-    # Weak formats
-    # --------------------------------------------------------
-
-    weak_terms = [
-        "opinion",
-        "podcast",
-        "newsletter",
-        "weekly roundup",
-        "daily roundup",
-        "photo gallery",
-        "gallery",
-        "advertisement",
-        "vacancy",
-        "job vacancy",
+    # Strong news terms
+    high_priority_terms = [
+        "launches",
+        "launched",
+        "approves",
+        "approved",
+        "allocates",
+        "allocated",
+        "investigation",
+        "audit",
+        "auditor",
+        "budget",
+        "project",
+        "hospital",
+        "road",
+        "water",
+        "security",
+        "arrested",
+        "governor",
+        "county assembly"
     ]
 
-    for term in weak_terms:
+    for term in high_priority_terms:
 
-        if term in title.lower():
-            score -= 5
+        if term in combined:
+            score += 3
 
-    # --------------------------------------------------------
-    # Weak headline
-    # --------------------------------------------------------
+    # Weak content penalties
+    for term in WEAK_TERMS:
 
-    if len(title.split()) < 4:
-        score -= 5
-
-    # --------------------------------------------------------
-    # Weak summary
-    # --------------------------------------------------------
-
-    if len(summary) < 80:
-        score -= 5
-
-    if len(summary) < 30:
-        score -= 10
+        if term in combined:
+            score -= 15
 
     return score
 
 
 # ============================================================
-# FETCH OFFICIAL PAGE
+# FETCH SOURCE
 # ============================================================
 
-def fetch_source(source):
-    """Fetch an official county website."""
+def fetch_source(county, source):
+
+    print(f"      Fetching: {source['name']}")
 
     try:
 
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 "
-                "(Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 "
-                "Chrome/120 Safari/537.36"
-            )
-        }
-
         response = requests.get(
             source["url"],
-            headers=headers,
-            timeout=25,
+            headers=HEADERS,
+            timeout=TIMEOUT
         )
 
         response.raise_for_status()
 
         return response.text
 
-    except Exception as error:
+    except Exception as exc:
 
         print(
-            f"[WARNING] Could not fetch "
-            f"{source['name']}: {error}"
+            f"      [WARNING] Could not fetch "
+            f"{source['name']}: {exc}"
         )
 
+        return None
+
+
+# ============================================================
+# EXTRACT SUMMARY FROM CONTAINER
+# ============================================================
+
+def extract_summary(container, title):
+
+    if container is None:
         return ""
 
+    paragraphs = []
+
+    # First look for actual paragraphs
+    for p in container.find_all("p"):
+
+        text = normalize_text(p.get_text(" ", strip=True))
+
+        if not text:
+            continue
+
+        if text.lower() == title.lower():
+            continue
+
+        if len(text) < 40:
+            continue
+
+        paragraphs.append(text)
+
+    # Remove duplicates
+    unique = []
+
+    for text in paragraphs:
+
+        if text not in unique:
+            unique.append(text)
+
+    summary = " ".join(unique)
+
+    # Limit size
+    if len(summary) > 1000:
+        summary = summary[:1000].rsplit(" ", 1)[0] + "..."
+
+    return summary
+
 
 # ============================================================
-# EXTRACT STORIES FROM HTML
+# FIND STORY CONTAINER
 # ============================================================
 
-def extract_stories(
-    html,
-    source,
-):
-    """Extract likely news stories from an official page."""
+def find_story_container(anchor):
 
-    if not html:
-        return []
+    """
+    Move upward from the story link and find a reasonable
+    article/list/div container without swallowing the entire
+    webpage.
+    """
 
-    soup = BeautifulSoup(
-        html,
-        "html.parser",
-    )
+    # Best case: actual article
+    article = anchor.find_parent("article")
+
+    if article is not None:
+        return article
+
+    # Next best: list item
+    li = anchor.find_parent("li")
+
+    if li is not None:
+
+        text = normalize_text(li.get_text(" ", strip=True))
+
+        if len(text) <= 2500:
+            return li
+
+    # Try limited div ancestors
+    current = anchor.parent
+
+    for _ in range(4):
+
+        if current is None:
+            break
+
+        if current.name == "div":
+
+            text = normalize_text(
+                current.get_text(" ", strip=True)
+            )
+
+            if 50 <= len(text) <= 2500:
+                return current
+
+        current = current.parent
+
+    return anchor.parent
+
+
+# ============================================================
+# EXTRACT STORIES — LINK CENTRIC
+# ============================================================
+
+def extract_stories(html, county, source):
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Remove elements that cannot contain useful stories
+    for tag in soup([
+        "script",
+        "style",
+        "noscript",
+        "footer",
+        "header",
+        "nav",
+        "form",
+        "svg"
+    ]):
+
+        tag.decompose()
 
     stories = []
 
-    # --------------------------------------------------------
-    # Remove obvious non-content areas
-    # --------------------------------------------------------
-
-    for element in soup.find_all(
-        [
-            "nav",
-            "footer",
-            "header",
-            "script",
-            "style",
-            "noscript",
-        ]
-    ):
-
-        element.decompose()
+    seen_urls = set()
+    seen_titles = set()
 
     # --------------------------------------------------------
-    # Look for article/post structures first
+    # PRIMARY METHOD:
+    # Look for real links to individual stories.
     # --------------------------------------------------------
 
-    containers = soup.find_all(
-        [
-            "article",
-            "li",
-            "div",
-        ]
-    )
+    for anchor in soup.find_all("a", href=True):
 
-    for container in containers:
-
-        heading = container.find(
-            [
-                "h1",
-                "h2",
-                "h3",
-                "h4",
-                "h5",
-            ]
+        title = normalize_text(
+            anchor.get_text(" ", strip=True)
         )
 
-        if not heading:
-            continue
-
-        title = clean_text(
-            heading.get_text(" ")
+        href = normalize_url(
+            anchor.get("href", "")
         )
 
-        if not title:
+        if not likely_story_link(
+            title,
+            href,
+            source["url"]
+        ):
             continue
 
-        # ----------------------------------------------------
-        # Generic website heading filter
-        # ----------------------------------------------------
+        absolute_url = urljoin(
+            source["url"],
+            href
+        )
 
-        if is_generic_title(title):
+        normalized_candidate_url = (
+            absolute_url.rstrip("/")
+        )
+
+        normalized_candidate_title = (
+            normalize_title(title)
+        )
+
+        if normalized_candidate_url in seen_urls:
             continue
 
-        # ----------------------------------------------------
-        # Minimum title quality
-        # ----------------------------------------------------
-
-        if len(title) < 20:
+        if normalized_candidate_title in seen_titles:
             continue
 
-        if len(title.split()) < 4:
-            continue
+        container = find_story_container(anchor)
 
-        # ----------------------------------------------------
-        # Ignore obvious interface text
-        # ----------------------------------------------------
-
-        ignored_terms = [
-            "home",
-            "contact us",
-            "about us",
-            "read more",
-            "learn more",
-            "login",
-            "subscribe",
-            "search",
-            "menu",
-            "services",
-            "privacy policy",
-            "terms and conditions",
-            "quick links",
-        ]
-
-        normalized_title = normalize_title(
+        summary = extract_summary(
+            container,
             title
         )
 
-        if normalized_title in ignored_terms:
-            continue
+        # If the container gives no summary, inspect nearby text
+        if not summary:
 
-        # ----------------------------------------------------
-        # Find link
-        # ----------------------------------------------------
-
-        link = heading.find("a")
-
-        if not link:
-            link = container.find("a")
-
-        href = ""
-
-        if link:
-
-            href = normalize_url(
-                source["url"],
-                link.get(
-                    "href",
-                    "",
-                ),
+            nearby = normalize_text(
+                container.get_text(" ", strip=True)
+                if container
+                else ""
             )
 
-        if not href:
-            href = source["url"]
+            if nearby.lower() != title.lower():
 
-        # ----------------------------------------------------
-        # Summary
-        # ----------------------------------------------------
+                nearby = nearby.replace(
+                    title,
+                    ""
+                ).strip()
 
-        paragraphs = container.find_all(
-            "p"
+                if len(nearby) >= 40:
+                    summary = nearby[:1000]
+
+        combined = f"{title} {summary}"
+
+        detected_county = detect_county(
+            combined
         )
 
-        summary_parts = []
+        # Prefer the source county when the article is
+        # clearly from that county's official website.
+        if not detected_county:
+            detected_county = county
 
-        for paragraph in paragraphs:
-
-            text = clean_text(
-                paragraph.get_text(" ")
-            )
-
-            if not text:
-                continue
-
-            # Avoid tiny UI fragments
-            if len(text) < 25:
-                continue
-
-            summary_parts.append(
-                text
-            )
-
-        summary = " ".join(
-            summary_parts
+        category = detect_category(
+            combined
         )
 
-        # ----------------------------------------------------
-        # Avoid containers with no meaningful summary
-        # ----------------------------------------------------
+        political = political_score(
+            combined
+        )
 
-        if len(summary) < 20:
-
-            # Try nearby text from the container
-            container_text = clean_text(
-                container.get_text(" ")
-            )
-
-            if container_text:
-                summary = container_text
-
-        # ----------------------------------------------------
-        # Remove title duplication from summary
-        # ----------------------------------------------------
-
-        if summary:
-
-            summary_normalized = normalize_title(
-                summary
-            )
-
-            title_normalized = normalize_title(
-                title
-            )
-
-            if summary_normalized == title_normalized:
-                summary = ""
-
-        # ----------------------------------------------------
-        # Build story
-        # ----------------------------------------------------
+        accountability = accountability_score(
+            combined
+        )
 
         story = {
             "title": title,
             "summary": summary,
-            "url": href,
+            "url": absolute_url,
             "source": source["name"],
-            "county": source["county"],
+            "county": detected_county,
+            "category": category,
+            "political_score": political,
+            "accountability_score": accountability
         }
 
-        stories.append(
-            story
+        story["score"] = score_story(story)
+
+        stories.append(story)
+
+        seen_urls.add(
+            normalized_candidate_url
+        )
+
+        seen_titles.add(
+            normalized_candidate_title
         )
 
     # --------------------------------------------------------
-    # Remove duplicate titles
+    # SECONDARY METHOD:
+    # Some county websites use article blocks where the
+    # heading itself contains the link.
     # --------------------------------------------------------
 
-    unique = []
+    if not stories:
 
-    seen = set()
+        for heading in soup.find_all(
+            ["h2", "h3", "h4", "h5"]
+        ):
 
-    for story in stories:
+            title = normalize_text(
+                heading.get_text(" ", strip=True)
+            )
 
-        key = normalize_title(
-            story["title"]
-        )
+            if not title_is_reasonable(title):
+                continue
 
-        if not key:
-            continue
+            anchor = heading.find("a", href=True)
 
-        if key in seen:
-            continue
+            if anchor is None:
+                anchor = heading.find_parent(
+                    "a",
+                    href=True
+                )
 
-        seen.add(key)
+            if anchor is None:
+                continue
 
-        unique.append(
-            story
-        )
+            href = normalize_url(
+                anchor.get("href", "")
+            )
 
-    return unique
+            if url_is_bad(
+                href,
+                source["url"]
+            ):
+                continue
+
+            absolute_url = urljoin(
+                source["url"],
+                href
+            )
+
+            if absolute_url.rstrip("/") in seen_urls:
+                continue
+
+            container = find_story_container(
+                anchor
+            )
+
+            summary = extract_summary(
+                container,
+                title
+            )
+
+            combined = f"{title} {summary}"
+
+            detected_county = (
+                detect_county(combined)
+                or county
+            )
+
+            category = detect_category(
+                combined
+            )
+
+            political = political_score(
+                combined
+            )
+
+            accountability = accountability_score(
+                combined
+            )
+
+            story = {
+                "title": title,
+                "summary": summary,
+                "url": absolute_url,
+                "source": source["name"],
+                "county": detected_county,
+                "category": category,
+                "political_score": political,
+                "accountability_score": accountability
+            }
+
+            story["score"] = score_story(
+                story
+            )
+
+            stories.append(story)
+
+            seen_urls.add(
+                absolute_url.rstrip("/")
+            )
+
+    return stories
 
 
 # ============================================================
@@ -1236,190 +1172,100 @@ def extract_stories(
 # ============================================================
 
 def enrich_stories(stories):
-    """Detect category and calculate score."""
 
     enriched = []
 
     for story in stories:
 
-        title = story.get(
-            "title",
-            "",
+        title = normalize_text(
+            story.get("title", "")
         )
-
-        summary = story.get(
-            "summary",
-            "",
-        )
-
-        county = story.get(
-            "county"
-        )
-
-        # ----------------------------------------------------
-        # Final generic-title protection
-        # ----------------------------------------------------
 
         if is_generic_title(title):
             continue
 
-        detected_county = detect_county(
-            title,
-            summary,
+        if is_weak_title(title):
+            continue
+
+        text = (
+            f"{title} "
+            f"{story.get('summary', '')}"
         )
 
-        # ----------------------------------------------------
-        # Keep source county if article text doesn't mention
-        # the county directly.
-        # ----------------------------------------------------
-
-        if detected_county:
-            county = detected_county
-
-        category = detect_category(
-            title,
-            summary,
+        story["county"] = (
+            detect_county(text)
+            or story.get("county")
         )
 
-        score = score_story(
-            title,
-            summary,
-            county,
+        story["category"] = detect_category(
+            text
         )
-
-        story["county"] = county
-
-        story["category"] = category
-
-        story["score"] = score
 
         story["political_score"] = (
-            political_score(
-                title,
-                summary,
-            )
+            political_score(text)
         )
 
         story["accountability_score"] = (
-            accountability_score(
-                title,
-                summary,
-            )
+            accountability_score(text)
         )
 
-        enriched.append(
+        story["score"] = score_story(
             story
         )
+
+        enriched.append(story)
 
     return enriched
 
 
 # ============================================================
-# REMOVE DUPLICATES
+# RANK STORIES
 # ============================================================
 
-def remove_duplicates(stories):
-    """Remove duplicate headlines."""
+def rank_stories(stories):
 
-    unique = []
-
-    seen = set()
-
-    for story in stories:
-
-        normalized = normalize_title(
-            story["title"]
-        )
-
-        if not normalized:
-            continue
-
-        if normalized in seen:
-            continue
-
-        seen.add(
-            normalized
-        )
-
-        unique.append(
-            story
-        )
-
-    return unique
+    return sorted(
+        stories,
+        key=lambda story: (
+            story.get("score", 0),
+            story.get("accountability_score", 0),
+            story.get("political_score", 0),
+            word_count(
+                story.get("summary", "")
+            )
+        ),
+        reverse=True
+    )
 
 
 # ============================================================
-# SELECT STRONGEST STORY
+# SELECT STORY
 # ============================================================
 
 def select_story(stories):
-    """Select the strongest regional story."""
 
-    if not stories:
-        return None
-
-    stories = remove_duplicates(
+    ranked = rank_stories(
         stories
     )
 
-    # --------------------------------------------------------
-    # Final safety filter
-    # --------------------------------------------------------
+    for story in ranked:
 
-    stories = [
-        story
-        for story in stories
-        if not is_generic_title(
-            story.get(
-                "title",
-                "",
-            )
+        title = normalize_text(
+            story.get("title", "")
         )
-    ]
 
-    if not stories:
-        return None
+        if is_generic_title(title):
+            continue
 
-    # --------------------------------------------------------
-    # Ranking
-    # --------------------------------------------------------
+        if is_weak_title(title):
+            continue
 
-    stories.sort(
-        key=lambda story: (
-            story.get(
-                "score",
-                0,
-            ),
+        if not story.get("url"):
+            continue
 
-            story.get(
-                "accountability_score",
-                0,
-            ),
+        return story
 
-            story.get(
-                "political_score",
-                0,
-            ),
-
-            len(
-                story.get(
-                    "summary",
-                    "",
-                )
-            ),
-        ),
-        reverse=True,
-    )
-
-    selected = stories[0]
-
-    selected["selected_at"] = (
-        datetime.now(
-            timezone.utc
-        ).isoformat()
-    )
-
-    return selected
+    return None
 
 
 # ============================================================
@@ -1427,76 +1273,80 @@ def select_story(stories):
 # ============================================================
 
 def save_story(story):
-    """Save selected story."""
 
-    if not story:
-        return
+    os.makedirs(
+        os.path.dirname(STORY_FILE),
+        exist_ok=True
+    )
 
     with open(
         STORY_FILE,
         "w",
-        encoding="utf-8",
+        encoding="utf-8"
     ) as file:
 
         json.dump(
             story,
             file,
             indent=2,
-            ensure_ascii=False,
+            ensure_ascii=False
         )
 
 
 # ============================================================
-# MAIN ENGINE
+# MAIN
 # ============================================================
 
-def run_news_engine():
-    """Run the complete official-source engine."""
+def main():
 
-    config = load_config()
+    print()
+    print("=" * 60)
+    print("RIFT VALLEY WATCH V1.2")
+    print("OFFICIAL-SOURCE NEWS ENGINE")
+    print("=" * 60)
+    print()
+
+    # --------------------------------------------------------
+    # LOAD SETTINGS
+    # --------------------------------------------------------
+
+    try:
+
+        with open(
+            CONFIG_FILE,
+            "r",
+            encoding="utf-8"
+        ) as file:
+
+            settings = json.load(file)
+
+    except Exception as exc:
+
+        print(
+            f"[ERROR] Could not load settings: {exc}"
+        )
+
+        return
 
     max_articles = int(
-        config.get(
+        settings.get(
             "max_articles",
-            100,
+            50
         )
-    )
-
-    print("=" * 60)
-
-    print(
-        "RIFT VALLEY WATCH — "
-        "OFFICIAL-SOURCE NEWS ENGINE V1.1"
-    )
-
-    print("=" * 60)
-
-    print(
-        "\nPrimary sources only."
-    )
-
-    print(
-        "Political and accountability stories are included."
     )
 
     # --------------------------------------------------------
     # STEP 1
     # --------------------------------------------------------
 
-    print(
-        "\n[1/5] Loading official county sources..."
-    )
+    print("[1/5] Loading official county sources...")
 
     all_stories = []
 
-    for source in OFFICIAL_SOURCES:
-
-        print(
-            f"      Fetching: "
-            f"{source['name']}"
-        )
+    for county, source in OFFICIAL_SOURCES.items():
 
         html = fetch_source(
+            county,
             source
         )
 
@@ -1505,20 +1355,21 @@ def run_news_engine():
 
         stories = extract_stories(
             html,
-            source,
+            county,
+            source
         )
 
         print(
-            f"      Stories found: "
-            f"{len(stories)}"
+            f"      Stories found: {len(stories)}"
         )
 
         all_stories.extend(
             stories
         )
 
+    print()
     print(
-        f"\n      Total stories found: "
+        f"      Total stories found: "
         f"{len(all_stories)}"
     )
 
@@ -1526,128 +1377,130 @@ def run_news_engine():
     # STEP 2
     # --------------------------------------------------------
 
-    print(
-        "\n[2/5] Limiting story pool..."
-    )
+    print()
+    print("[2/5] Limiting story pool...")
 
-    all_stories = all_stories[
-        :max_articles
-    ]
+    # Remove duplicate URLs first
+    unique_stories = []
+    seen = set()
+
+    for story in all_stories:
+
+        url = story.get("url", "").rstrip("/")
+
+        if not url:
+            continue
+
+        if url in seen:
+            continue
+
+        seen.add(url)
+        unique_stories.append(story)
+
+    # Keep a reasonable working pool
+    stories = unique_stories[:max_articles]
 
     print(
         f"      Stories considered: "
-        f"{len(all_stories)}"
+        f"{len(stories)}"
     )
 
     # --------------------------------------------------------
     # STEP 3
     # --------------------------------------------------------
 
+    print()
     print(
-        "\n[3/5] Detecting counties and categories..."
+        "[3/5] Detecting counties and categories..."
     )
 
-    enriched = enrich_stories(
-        all_stories
+    stories = enrich_stories(
+        stories
     )
 
     print(
         f"      Stories enriched: "
-        f"{len(enriched)}"
+        f"{len(stories)}"
     )
 
     # --------------------------------------------------------
     # STEP 4
     # --------------------------------------------------------
 
-    print(
-        "\n[4/5] Ranking stories..."
+    print()
+    print("[4/5] Ranking stories...")
+
+    selected = select_story(
+        stories
     )
-
-    story = select_story(
-        enriched
-    )
-
-    if not story:
-
-        print(
-            "\n[ERROR] "
-            "No suitable regional story found."
-        )
-
-        return None
 
     # --------------------------------------------------------
     # STEP 5
     # --------------------------------------------------------
 
+    if not selected:
+
+        print()
+        print(
+            "[ERROR] No valid Rift Valley story found."
+        )
+        print(
+            "        The engine rejected page headings "
+            "and non-story links."
+        )
+
+        return
+
+    print()
     print(
-        "\n[5/5] Strongest story selected"
+        "[5/5] Strongest story selected"
     )
 
-    print(
-        "-" * 60
-    )
-
+    print("-" * 60)
     print(
         f"TITLE        : "
-        f"{story['title']}"
+        f"{selected['title']}"
     )
-
     print(
         f"COUNTY       : "
-        f"{story['county']}"
+        f"{selected['county']}"
     )
-
     print(
         f"CATEGORY     : "
-        f"{story['category']}"
+        f"{selected['category']}"
     )
-
     print(
         f"SOURCE       : "
-        f"{story['source']}"
+        f"{selected['source']}"
     )
-
     print(
         f"SCORE        : "
-        f"{story['score']}"
+        f"{selected['score']}"
     )
-
     print(
         f"POLITICAL    : "
-        f"{story['political_score']}"
+        f"{selected['political_score']}"
     )
-
     print(
         f"ACCOUNTABILITY: "
-        f"{story['accountability_score']}"
+        f"{selected['accountability_score']}"
     )
-
     print(
         f"URL          : "
-        f"{story['url']}"
+        f"{selected['url']}"
     )
-
-    print(
-        "-" * 60
-    )
+    print("-" * 60)
 
     save_story(
-        story
+        selected
     )
 
+    print()
     print(
-        f"\n[SAVED] "
-        f"{STORY_FILE}"
+        f"[SAVED] {STORY_FILE}"
     )
+    print()
 
-    return story
-
-
-# ============================================================
-# DIRECT EXECUTION
-# ============================================================
 
 if __name__ == "__main__":
-    run_news_engine()
+    main()
