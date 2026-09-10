@@ -1,3 +1,4 @@
+```python
 # ============================================================
 # RIFT VALLEY WATCH V2.0
 # PROFESSIONAL NEWS SCRIPT ENGINE
@@ -47,15 +48,15 @@ def clean_text(text):
 
     text = str(text)
 
+    text = text.replace(
+        "\xa0",
+        " "
+    )
+
     text = re.sub(
         r"\s+",
         " ",
         text
-    )
-
-    text = text.replace(
-        "\xa0",
-        " "
     )
 
     return text.strip()
@@ -64,7 +65,7 @@ def clean_text(text):
 def word_count(text):
 
     return len(
-        text.split()
+        clean_text(text).split()
     )
 
 
@@ -122,7 +123,6 @@ def trim_to_complete_sentences(
         )
 
         if total + words > maximum:
-
             break
 
         selected.append(
@@ -136,9 +136,8 @@ def trim_to_complete_sentences(
             selected
         )
 
-    # If the first sentence alone exceeds
-    # the limit, preserve it rather than
-    # creating a broken sentence.
+    # Preserve the first complete sentence
+    # if it alone exceeds the limit.
     return sentences[0]
 
 
@@ -164,7 +163,26 @@ def load_story():
             encoding="utf-8"
         ) as f:
 
-            return json.load(f)
+            data = json.load(f)
+
+        if not isinstance(data, dict):
+
+            print(
+                "[ERROR] story.json must contain "
+                "a JSON object."
+            )
+
+            return None
+
+        return data
+
+    except json.JSONDecodeError as e:
+
+        print(
+            f"[ERROR] Invalid JSON in story.json: {e}"
+        )
+
+        return None
 
     except Exception as e:
 
@@ -235,8 +253,7 @@ def clean_summary(
         )
 
     # --------------------------------------------------------
-    # Remove repeated title if it appears immediately
-    # after another sentence.
+    # Remove repeated title if it appears immediately.
     # --------------------------------------------------------
 
     if title:
@@ -274,23 +291,23 @@ def extract_facts(
 
     facts = []
 
+    noise = [
+        "click here",
+        "read more",
+        "follow us",
+        "subscribe",
+        "share this",
+        "cookie policy",
+        "privacy policy",
+        "terms and conditions"
+    ]
+
     for sentence in sentences:
 
         if word_count(sentence) < 6:
             continue
 
-        # Skip obvious page noise.
         lowered = sentence.lower()
-
-        noise = [
-            "click here",
-            "read more",
-            "follow us",
-            "subscribe",
-            "share this",
-            "cookie policy",
-            "privacy policy"
-        ]
 
         if any(
             item in lowered
@@ -340,12 +357,13 @@ def get_category(story):
         )
     ).upper()
 
+    if not category:
+        category = "REGIONAL NEWS"
+
+    # --------------------------------------------------------
     # Correct common development misclassification.
-    #
-    # A story should remain DEVELOPMENT when its headline
-    # and article body are clearly about construction,
-    # infrastructure, facilities or public projects,
-    # unless there is strong political/accountability content.
+    # --------------------------------------------------------
+
     if category == "POLITICS":
 
         title = clean_text(
@@ -465,6 +483,9 @@ def generate_hook(story):
         story
     )
 
+    if not title:
+        title = "a new regional development"
+
     if category == "BREAKING NEWS":
 
         return (
@@ -577,6 +598,12 @@ def generate_what_happened(
         )
     )
 
+    if not source:
+        source = "the official source"
+
+    if not title:
+        title = "The latest development"
+
     if not facts:
 
         return (
@@ -592,7 +619,9 @@ def generate_what_happened(
 
         if len(facts) > 1:
             first_fact = facts[1]
+
         else:
+
             return (
                 f"{title}. "
                 f"The development was reported by "
@@ -627,6 +656,7 @@ def generate_key_facts(
     for fact in facts:
 
         if fact not in selected:
+
             selected.append(
                 fact
             )
@@ -660,7 +690,7 @@ def generate_why_it_matters(
         return (
             f"The development matters because agriculture "
             f"is an important part of livelihoods in "
-            f"{county, and changes in farming practices "
+            f"{county}, and changes in farming practices "
             f"can affect household incomes, food security "
             f"and local markets."
         )
@@ -969,7 +999,11 @@ def build_script(
 
     for sentence in sentences:
 
-        normalized = sentence.lower().strip()
+        normalized = (
+            sentence
+            .lower()
+            .strip()
+        )
 
         if normalized in seen:
             continue
@@ -987,8 +1021,7 @@ def build_script(
     )
 
     # --------------------------------------------------------
-    # IMPORTANT:
-    # Never cut a narration in the middle of a sentence.
+    # Never cut narration in the middle of a sentence.
     # --------------------------------------------------------
 
     if word_count(narration) > TARGET_WORDS:
@@ -998,7 +1031,10 @@ def build_script(
             TARGET_WORDS
         )
 
+    # --------------------------------------------------------
     # Absolute safety limit.
+    # --------------------------------------------------------
+
     if word_count(narration) > MAX_WORDS:
 
         narration = trim_to_complete_sentences(
@@ -1176,7 +1212,8 @@ def quality_check(
         "read more",
         "cookie policy",
         "privacy policy",
-        "subscribe now"
+        "subscribe now",
+        "terms and conditions"
     ]
 
     lowered = narration.lower()
@@ -1348,3 +1385,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+```
