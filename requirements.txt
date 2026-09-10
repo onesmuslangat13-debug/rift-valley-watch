@@ -1,0 +1,7 @@
+requests
+feedparser
+beautifulsoup4
+gTTS
+Pillow
+moviepy
+numpy
