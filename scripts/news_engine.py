@@ -1,27 +1,33 @@
 # ============================================================
 # RIFT VALLEY WATCH
-# NEWS ENGINE — STEP 2E
+# OFFICIAL-SOURCE NEWS ENGINE — V1
 #
-# NEWS SOURCES
-#      ↓
+# OFFICIAL COUNTY SOURCES
+#          ↓
 # COUNTY DETECTION
-#      ↓
-# REGIONAL FILTER
-#      ↓
-# STORY SCORING
-#      ↓
+#          ↓
+# CATEGORY DETECTION
+#          ↓
+# POLITICS / ACCOUNTABILITY SCORING
+#          ↓
+# STORY QUALITY SCORING
+#          ↓
 # STRONGEST STORY
 #
-# This file handles news discovery and story selection only.
+# No The Star
+# No Standard
+# No Citizen Digital
+#
 # ============================================================
 
 import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urljoin
 
-import feedparser
 import requests
+from bs4 import BeautifulSoup
 
 
 # ============================================================
@@ -29,6 +35,7 @@ import requests
 # ============================================================
 
 ROOT = Path(__file__).resolve().parents[1]
+
 CONFIG_DIR = ROOT / "config"
 DATA_DIR = ROOT / "data"
 
@@ -39,7 +46,7 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ============================================================
-# RIFT VALLEY COVERAGE
+# COUNTY COVERAGE
 # ============================================================
 
 COUNTY_KEYWORDS = {
@@ -51,6 +58,7 @@ COUNTY_KEYWORDS = {
         "longisa",
         "mulot",
     ],
+
     "Kericho": [
         "kericho",
         "ainamoi",
@@ -58,7 +66,10 @@ COUNTY_KEYWORDS = {
         "kipkelion",
         "litein",
         "londiani",
+        "bureti",
+        "sigowet",
     ],
+
     "Nakuru": [
         "nakuru",
         "naivasha",
@@ -66,7 +77,9 @@ COUNTY_KEYWORDS = {
         "molo",
         "njoro",
         "rongai",
+        "kuresoi",
     ],
+
     "Nandi": [
         "nandi",
         "kapsabet",
@@ -74,7 +87,9 @@ COUNTY_KEYWORDS = {
         "aldai",
         "emgwen",
         "tinderet",
+        "chesumei",
     ],
+
     "Uasin Gishu": [
         "uasin gishu",
         "eldoret",
@@ -82,7 +97,9 @@ COUNTY_KEYWORDS = {
         "kesses",
         "soy",
         "moiben",
+        "kapseret",
     ],
+
     "Elgeyo-Marakwet": [
         "elgeyo-marakwet",
         "elgeyo marakwet",
@@ -91,14 +108,20 @@ COUNTY_KEYWORDS = {
         "keiyo",
         "keiyo south",
         "keiyo north",
+        "kapcherop",
+        "tambach",
     ],
+
     "West Pokot": [
         "west pokot",
         "kapenguria",
         "kacheliba",
         "sigor",
         "pokot",
+        "chepareria",
+        "turkwel",
     ],
+
     "Narok": [
         "narok",
         "kilgoris",
@@ -106,33 +129,143 @@ COUNTY_KEYWORDS = {
         "suswa",
         "maasai mara",
         "ololulunga",
+        "mau",
     ],
 }
 
 
 # ============================================================
-# NEWS SOURCES
+# OFFICIAL SOURCES
+# ============================================================
+#
+# These are official county-government websites.
+#
+# Some counties expose their latest news directly on the
+# homepage while others have dedicated news pages.
+#
 # ============================================================
 
-RSS_SOURCES = [
+OFFICIAL_SOURCES = [
     {
-        "name": "The Star",
-        "url": "https://www.the-star.co.ke/rss",
+        "name": "Bomet County Government",
+        "county": "Bomet",
+        "url": "https://bomet.go.ke/news/",
     },
+
     {
-        "name": "The Standard",
-        "url": "https://www.standardmedia.co.ke/rss",
+        "name": "Kericho County Government",
+        "county": "Kericho",
+        "url": "https://www.kericho.go.ke/",
     },
+
     {
-        "name": "Citizen Digital",
-        "url": "https://www.citizen.digital/rss",
+        "name": "Nakuru County Government",
+        "county": "Nakuru",
+        "url": "https://www.nakuru.go.ke/",
+    },
+
+    {
+        "name": "Nandi County Government",
+        "county": "Nandi",
+        "url": "https://nandi.go.ke/news/",
+    },
+
+    {
+        "name": "Uasin Gishu County Government",
+        "county": "Uasin Gishu",
+        "url": "https://uasingishu.go.ke/",
+    },
+
+    {
+        "name": "Elgeyo-Marakwet County Government",
+        "county": "Elgeyo-Marakwet",
+        "url": "https://elgeyomarakwet.go.ke/news/",
+    },
+
+    {
+        "name": "West Pokot County Government",
+        "county": "West Pokot",
+        "url": "https://www.westpokot.go.ke/",
+    },
+
+    {
+        "name": "Narok County Government",
+        "county": "Narok",
+        "url": "https://www.narok.go.ke/",
     },
 ]
 
 
 # ============================================================
-# STORY PRIORITY
+# POLITICAL / ACCOUNTABILITY TERMS
 # ============================================================
+
+POLITICAL_TERMS = [
+    "governor",
+    "deputy governor",
+    "senator",
+    "senator",
+    "mp",
+    "member of parliament",
+    "mca",
+    "member of county assembly",
+    "county assembly",
+    "assembly",
+    "politician",
+    "political",
+    "party",
+    "election",
+    "elections",
+    "campaign",
+    "government",
+    "cabinet",
+    "leader",
+    "leaders",
+    "minister",
+    "cabinet secretary",
+]
+
+
+ACCOUNTABILITY_TERMS = [
+    "audit",
+    "auditor",
+    "auditor-general",
+    "audit report",
+    "accountability",
+    "irregular",
+    "irregularities",
+    "mismanagement",
+    "misuse",
+    "funds",
+    "budget",
+    "budget implementation",
+    "expenditure",
+    "procurement",
+    "tender",
+    "contract",
+    "contractor",
+    "project",
+    "project monitoring",
+    "investigation",
+    "investigated",
+    "probe",
+    "court",
+    "petition",
+    "complaint",
+    "oversight",
+    "public participation",
+    "performance",
+    "promise",
+    "pledge",
+    "commitment",
+    "delivery",
+    "delay",
+    "delayed",
+    "unfinished",
+    "abandoned",
+    "failed",
+]
+
 
 HIGH_PRIORITY_TERMS = [
     "breaking",
@@ -151,12 +284,25 @@ HIGH_PRIORITY_TERMS = [
     "police",
     "court",
     "governor",
-    "president",
-    "deputy president",
-    "cabinet",
-    "government",
-    "election",
-    "elections",
+    "senator",
+    "mp",
+    "mca",
+    "audit",
+    "auditor",
+    "investigation",
+    "probe",
+    "irregularities",
+    "mismanagement",
+    "corruption",
+    "budget",
+    "procurement",
+    "tender",
+]
+
+
+MEDIUM_PRIORITY_TERMS = [
+    "county",
+    "assembly",
     "development",
     "hospital",
     "health",
@@ -169,30 +315,16 @@ HIGH_PRIORITY_TERMS = [
     "farmers",
     "tea",
     "coffee",
-]
-
-
-MEDIUM_PRIORITY_TERMS = [
-    "county",
-    "assembly",
-    "senator",
-    "mp",
-    "woman representative",
     "business",
     "investment",
     "jobs",
     "employment",
     "market",
     "prices",
-    "education",
     "water",
     "electricity",
-    "housing",
-    "infrastructure",
     "tourism",
     "livestock",
-    "maize",
-    "dairy",
 ]
 
 
@@ -216,11 +348,14 @@ CATEGORY_TERMS = {
         "attack",
         "shooting",
     ],
+
     "POLITICS": [
         "governor",
         "senator",
         "mp",
+        "mca",
         "politician",
+        "political",
         "election",
         "elections",
         "party",
@@ -230,6 +365,34 @@ CATEGORY_TERMS = {
         "cabinet",
         "government",
     ],
+
+    "ACCOUNTABILITY": [
+        "audit",
+        "auditor",
+        "audit report",
+        "accountability",
+        "irregularities",
+        "mismanagement",
+        "misuse",
+        "funds",
+        "budget",
+        "procurement",
+        "tender",
+        "contract",
+        "investigation",
+        "probe",
+        "court",
+        "petition",
+        "oversight",
+        "performance",
+        "promise",
+        "pledge",
+        "delay",
+        "delayed",
+        "unfinished",
+        "abandoned",
+    ],
+
     "DEVELOPMENT": [
         "road",
         "highway",
@@ -241,6 +404,7 @@ CATEGORY_TERMS = {
         "electricity",
         "housing",
     ],
+
     "SECURITY": [
         "police",
         "arrested",
@@ -251,6 +415,7 @@ CATEGORY_TERMS = {
         "court",
         "suspect",
     ],
+
     "AGRICULTURE": [
         "farmer",
         "farmers",
@@ -262,7 +427,10 @@ CATEGORY_TERMS = {
         "livestock",
         "crop",
         "harvest",
+        "seedlings",
+        "fertilizer",
     ],
+
     "HEALTH": [
         "hospital",
         "health",
@@ -271,7 +439,9 @@ CATEGORY_TERMS = {
         "disease",
         "clinic",
         "medical",
+        "nurse",
     ],
+
     "EDUCATION": [
         "school",
         "schools",
@@ -282,7 +452,9 @@ CATEGORY_TERMS = {
         "university",
         "education",
         "college",
+        "bursary",
     ],
+
     "BUSINESS": [
         "business",
         "investment",
@@ -293,7 +465,10 @@ CATEGORY_TERMS = {
         "prices",
         "economy",
         "trade",
+        "coffee",
+        "tourism",
     ],
+
     "COMMUNITY": [
         "community",
         "residents",
@@ -303,6 +478,7 @@ CATEGORY_TERMS = {
         "leaders",
         "initiative",
     ],
+
     "TOURISM": [
         "tourism",
         "tourist",
@@ -311,6 +487,7 @@ CATEGORY_TERMS = {
         "park",
         "hotel",
         "travel",
+        "conservation",
     ],
 }
 
@@ -322,26 +499,31 @@ CATEGORY_TERMS = {
 def load_config():
     """Load application configuration."""
 
+    defaults = {
+        "page_name": "Rift Valley Watch",
+        "region": "Rift Valley, Kenya",
+        "language": "en",
+        "max_articles": 100,
+        "max_script_words": 180,
+    }
+
     if not CONFIG_FILE.exists():
-        return {
-            "page_name": "Rift Valley Watch",
-            "region": "Rift Valley, Kenya",
-            "language": "en",
-            "max_articles": 50,
-            "max_script_words": 180,
-        }
+        return defaults
 
     try:
-        with open(CONFIG_FILE, "r", encoding="utf-8") as file:
-            return json.load(file)
+        with open(
+            CONFIG_FILE,
+            "r",
+            encoding="utf-8",
+        ) as file:
+            config = json.load(file)
+
+        defaults.update(config)
+
+        return defaults
+
     except Exception:
-        return {
-            "page_name": "Rift Valley Watch",
-            "region": "Rift Valley, Kenya",
-            "language": "en",
-            "max_articles": 50,
-            "max_script_words": 180,
-        }
+        return defaults
 
 
 # ============================================================
@@ -349,15 +531,47 @@ def load_config():
 # ============================================================
 
 def clean_text(text):
-    """Clean article text."""
+    """Clean HTML and whitespace from text."""
 
     if not text:
         return ""
 
-    text = re.sub(r"<[^>]+>", " ", str(text))
-    text = re.sub(r"\s+", " ", text)
+    text = BeautifulSoup(
+        str(text),
+        "html.parser",
+    ).get_text(" ")
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text,
+    )
 
     return text.strip()
+
+
+# ============================================================
+# NORMALIZE URL
+# ============================================================
+
+def normalize_url(base_url, href):
+    """Convert relative URLs into absolute URLs."""
+
+    if not href:
+        return ""
+
+    href = href.strip()
+
+    if href.startswith("#"):
+        return ""
+
+    if href.startswith("mailto:"):
+        return ""
+
+    if href.startswith("javascript:"):
+        return ""
+
+    return urljoin(base_url, href)
 
 
 # ============================================================
@@ -372,9 +586,11 @@ def detect_county(title, summary):
     matches = {}
 
     for county, keywords in COUNTY_KEYWORDS.items():
+
         count = 0
 
         for keyword in keywords:
+
             if keyword.lower() in text:
                 count += 1
 
@@ -384,7 +600,10 @@ def detect_county(title, summary):
     if not matches:
         return None
 
-    return max(matches, key=matches.get)
+    return max(
+        matches,
+        key=matches.get,
+    )
 
 
 # ============================================================
@@ -392,22 +611,27 @@ def detect_county(title, summary):
 # ============================================================
 
 def detect_category(title, summary):
-    """Identify the most relevant story category."""
+    """Identify the strongest story category."""
 
     text = f"{title} {summary}".lower()
 
     scores = {}
 
     for category, keywords in CATEGORY_TERMS.items():
+
         score = 0
 
         for keyword in keywords:
+
             if keyword.lower() in text:
                 score += 1
 
         scores[category] = score
 
-    best_category = max(scores, key=scores.get)
+    best_category = max(
+        scores,
+        key=scores.get,
+    )
 
     if scores[best_category] == 0:
         return "COMMUNITY"
@@ -416,11 +640,53 @@ def detect_category(title, summary):
 
 
 # ============================================================
+# POLITICAL SCORE
+# ============================================================
+
+def political_score(title, summary):
+    """Score stories involving political leadership."""
+
+    text = f"{title} {summary}".lower()
+
+    score = 0
+
+    for term in POLITICAL_TERMS:
+
+        if term in text:
+            score += 4
+
+    return score
+
+
+# ============================================================
+# ACCOUNTABILITY SCORE
+# ============================================================
+
+def accountability_score(title, summary):
+    """Score stories involving accountability."""
+
+    text = f"{title} {summary}".lower()
+
+    score = 0
+
+    for term in ACCOUNTABILITY_TERMS:
+
+        if term in text:
+            score += 5
+
+    return score
+
+
+# ============================================================
 # STORY SCORING
 # ============================================================
 
-def score_story(title, summary, county):
-    """Calculate a relevance and importance score."""
+def score_story(
+    title,
+    summary,
+    county,
+):
+    """Calculate story importance."""
 
     text = f"{title} {summary}".lower()
 
@@ -438,6 +704,7 @@ def score_story(title, summary, county):
     # --------------------------------------------------------
 
     for term in HIGH_PRIORITY_TERMS:
+
         if term in text:
             score += 5
 
@@ -446,8 +713,27 @@ def score_story(title, summary, county):
     # --------------------------------------------------------
 
     for term in MEDIUM_PRIORITY_TERMS:
+
         if term in text:
             score += 2
+
+    # --------------------------------------------------------
+    # Political importance
+    # --------------------------------------------------------
+
+    score += political_score(
+        title,
+        summary,
+    )
+
+    # --------------------------------------------------------
+    # Accountability importance
+    # --------------------------------------------------------
+
+    score += accountability_score(
+        title,
+        summary,
+    )
 
     # --------------------------------------------------------
     # Strong headline indicators
@@ -456,7 +742,10 @@ def score_story(title, summary, county):
     if "breaking" in title.lower():
         score += 10
 
-    if re.search(r"\b\d+\b", title):
+    if re.search(
+        r"\b\d+\b",
+        title,
+    ):
         score += 2
 
     if "%" in summary:
@@ -476,7 +765,7 @@ def score_story(title, summary, county):
         score += 2
 
     # --------------------------------------------------------
-    # Weak / low-value formats
+    # Weak formats
     # --------------------------------------------------------
 
     weak_terms = [
@@ -485,11 +774,10 @@ def score_story(title, summary, county):
         "newsletter",
         "weekly roundup",
         "daily roundup",
-        "best",
-        "top",
     ]
 
     for term in weak_terms:
+
         if term in title.lower():
             score -= 5
 
@@ -503,13 +791,14 @@ def score_story(title, summary, county):
 
 
 # ============================================================
-# FETCH RSS SOURCE
+# FETCH OFFICIAL PAGE
 # ============================================================
 
-def fetch_rss_source(source):
-    """Fetch one RSS source safely."""
+def fetch_source(source):
+    """Fetch an official county website."""
 
     try:
+
         headers = {
             "User-Agent": (
                 "Mozilla/5.0 "
@@ -522,102 +811,281 @@ def fetch_rss_source(source):
         response = requests.get(
             source["url"],
             headers=headers,
-            timeout=20,
+            timeout=25,
         )
 
         response.raise_for_status()
 
-        feed = feedparser.parse(response.content)
-
-        articles = []
-
-        for entry in feed.entries:
-            title = clean_text(
-                entry.get("title", "")
-            )
-
-            summary = clean_text(
-                entry.get("summary", "")
-            )
-
-            link = entry.get("link", "")
-
-            if not title or not link:
-                continue
-
-            articles.append(
-                {
-                    "title": title,
-                    "summary": summary,
-                    "url": link,
-                    "source": source["name"],
-                }
-            )
-
-        return articles
+        return response.text
 
     except Exception as error:
+
         print(
             f"[WARNING] Could not fetch "
             f"{source['name']}: {error}"
         )
 
+        return ""
+
+
+# ============================================================
+# EXTRACT STORIES FROM HTML
+# ============================================================
+
+def extract_stories(
+    html,
+    source,
+):
+    """Extract likely news stories from an official page."""
+
+    if not html:
         return []
 
+    soup = BeautifulSoup(
+        html,
+        "html.parser",
+    )
 
-# ============================================================
-# REGIONAL FILTER
-# ============================================================
+    stories = []
 
-def filter_regional_stories(articles):
-    """Keep only stories relevant to our covered counties."""
+    # --------------------------------------------------------
+    # Look for article/post structures first
+    # --------------------------------------------------------
 
-    regional = []
+    containers = soup.find_all(
+        [
+            "article",
+            "li",
+            "div",
+        ]
+    )
 
-    for article in articles:
+    for container in containers:
 
-        county = detect_county(
-            article["title"],
-            article["summary"],
+        heading = container.find(
+            [
+                "h1",
+                "h2",
+                "h3",
+                "h4",
+                "h5",
+            ]
         )
 
-        if not county:
+        if not heading:
             continue
 
-        article["county"] = county
-
-        article["category"] = detect_category(
-            article["title"],
-            article["summary"],
+        title = clean_text(
+            heading.get_text(" ")
         )
 
-        article["score"] = score_story(
-            article["title"],
-            article["summary"],
+        if not title:
+            continue
+
+        # ----------------------------------------------------
+        # Ignore navigation/interface text
+        # ----------------------------------------------------
+
+        ignored_terms = [
+            "home",
+            "contact us",
+            "about us",
+            "read more",
+            "learn more",
+            "login",
+            "subscribe",
+            "search",
+            "menu",
+            "services",
+        ]
+
+        if title.lower() in ignored_terms:
+            continue
+
+        if len(title) < 20:
+            continue
+
+        # ----------------------------------------------------
+        # Find link
+        # ----------------------------------------------------
+
+        link = heading.find("a")
+
+        if not link:
+            link = container.find("a")
+
+        href = ""
+
+        if link:
+            href = normalize_url(
+                source["url"],
+                link.get("href", ""),
+            )
+
+        if not href:
+            href = source["url"]
+
+        # ----------------------------------------------------
+        # Summary
+        # ----------------------------------------------------
+
+        paragraphs = container.find_all(
+            "p"
+        )
+
+        summary_parts = []
+
+        for paragraph in paragraphs:
+
+            text = clean_text(
+                paragraph.get_text(" ")
+            )
+
+            if text:
+                summary_parts.append(text)
+
+        summary = " ".join(
+            summary_parts
+        )
+
+        # ----------------------------------------------------
+        # Build story
+        # ----------------------------------------------------
+
+        story = {
+            "title": title,
+            "summary": summary,
+            "url": href,
+            "source": source["name"],
+            "county": source["county"],
+        }
+
+        stories.append(story)
+
+    # --------------------------------------------------------
+    # Remove duplicate titles
+    # --------------------------------------------------------
+
+    unique = []
+
+    seen = set()
+
+    for story in stories:
+
+        key = re.sub(
+            r"[^a-z0-9 ]",
+            "",
+            story["title"].lower(),
+        )
+
+        key = re.sub(
+            r"\s+",
+            " ",
+            key,
+        ).strip()
+
+        if not key:
+            continue
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+
+        unique.append(story)
+
+    return unique
+
+
+# ============================================================
+# ENRICH STORIES
+# ============================================================
+
+def enrich_stories(stories):
+    """Detect category and calculate score."""
+
+    enriched = []
+
+    for story in stories:
+
+        title = story.get(
+            "title",
+            "",
+        )
+
+        summary = story.get(
+            "summary",
+            "",
+        )
+
+        county = story.get(
+            "county"
+        )
+
+        detected_county = detect_county(
+            title,
+            summary,
+        )
+
+        # ----------------------------------------------------
+        # Keep source county if article text doesn't mention
+        # the county directly.
+        # ----------------------------------------------------
+
+        if detected_county:
+            county = detected_county
+
+        category = detect_category(
+            title,
+            summary,
+        )
+
+        score = score_story(
+            title,
+            summary,
             county,
         )
 
-        regional.append(article)
+        story["county"] = county
+        story["category"] = category
+        story["score"] = score
 
-    return regional
+        story["political_score"] = (
+            political_score(
+                title,
+                summary,
+            )
+        )
+
+        story["accountability_score"] = (
+            accountability_score(
+                title,
+                summary,
+            )
+        )
+
+        enriched.append(story)
+
+    return enriched
 
 
 # ============================================================
 # REMOVE DUPLICATES
 # ============================================================
 
-def remove_duplicates(articles):
-    """Remove duplicate or near-duplicate headlines."""
+def remove_duplicates(stories):
+    """Remove duplicate headlines."""
 
     unique = []
+
     seen = set()
 
-    for article in articles:
+    for story in stories:
 
         normalized = re.sub(
             r"[^a-z0-9 ]",
             "",
-            article["title"].lower(),
+            story["title"].lower(),
         )
 
         normalized = re.sub(
@@ -633,7 +1101,8 @@ def remove_duplicates(articles):
             continue
 
         seen.add(normalized)
-        unique.append(article)
+
+        unique.append(story)
 
     return unique
 
@@ -642,26 +1111,43 @@ def remove_duplicates(articles):
 # SELECT STRONGEST STORY
 # ============================================================
 
-def select_story(articles):
-    """Select one strongest regional story."""
+def select_story(stories):
+    """Select the strongest regional story."""
 
-    if not articles:
+    if not stories:
         return None
 
-    articles = remove_duplicates(articles)
+    stories = remove_duplicates(
+        stories
+    )
 
-    articles.sort(
-        key=lambda article: (
-            article.get("score", 0),
-            len(article.get("summary", "")),
+    stories.sort(
+        key=lambda story: (
+            story.get("score", 0),
+            story.get(
+                "accountability_score",
+                0,
+            ),
+            story.get(
+                "political_score",
+                0,
+            ),
+            len(
+                story.get(
+                    "summary",
+                    "",
+                )
+            ),
         ),
         reverse=True,
     )
 
-    selected = articles[0]
+    selected = stories[0]
 
     selected["selected_at"] = (
-        datetime.now(timezone.utc).isoformat()
+        datetime.now(
+            timezone.utc
+        ).isoformat()
     )
 
     return selected
@@ -672,7 +1158,7 @@ def select_story(articles):
 # ============================================================
 
 def save_story(story):
-    """Save selected story to data/story.json."""
+    """Save selected story."""
 
     if not story:
         return
@@ -692,90 +1178,197 @@ def save_story(story):
 
 
 # ============================================================
-# MAIN NEWS ENGINE
+# MAIN ENGINE
 # ============================================================
 
 def run_news_engine():
-    """Run the complete regional news selection process."""
+    """Run the complete official-source engine."""
 
     config = load_config()
 
     max_articles = int(
-        config.get("max_articles", 50)
+        config.get(
+            "max_articles",
+            100,
+        )
     )
 
     print("=" * 60)
-    print("RIFT VALLEY WATCH — NEWS ENGINE")
+    print(
+        "RIFT VALLEY WATCH — "
+        "OFFICIAL-SOURCE NEWS ENGINE"
+    )
     print("=" * 60)
 
-    print("\n[1/5] Loading news sources...")
+    print(
+        "\nPrimary sources only."
+    )
 
-    all_articles = []
+    print(
+        "Political and accountability stories are included."
+    )
 
-    for source in RSS_SOURCES:
+    # --------------------------------------------------------
+    # STEP 1
+    # --------------------------------------------------------
+
+    print(
+        "\n[1/5] Loading official county sources..."
+    )
+
+    all_stories = []
+
+    for source in OFFICIAL_SOURCES:
 
         print(
-            f"      Fetching: {source['name']}"
+            f"      Fetching: "
+            f"{source['name']}"
         )
 
-        articles = fetch_rss_source(source)
+        html = fetch_source(
+            source
+        )
 
-        all_articles.extend(articles)
+        if not html:
+            continue
 
-    print(
-        f"      Total articles fetched: "
-        f"{len(all_articles)}"
-    )
+        stories = extract_stories(
+            html,
+            source,
+        )
 
-    print("\n[2/5] Limiting article pool...")
+        print(
+            f"      Stories found: "
+            f"{len(stories)}"
+        )
 
-    all_articles = all_articles[:max_articles]
-
-    print(
-        f"      Articles considered: "
-        f"{len(all_articles)}"
-    )
-
-    print("\n[3/5] Filtering for covered counties...")
-
-    regional_articles = filter_regional_stories(
-        all_articles
-    )
+        all_stories.extend(
+            stories
+        )
 
     print(
-        f"      Regional stories found: "
-        f"{len(regional_articles)}"
+        f"\n      Total stories found: "
+        f"{len(all_stories)}"
     )
 
-    print("\n[4/5] Ranking stories...")
+    # --------------------------------------------------------
+    # STEP 2
+    # --------------------------------------------------------
+
+    print(
+        "\n[2/5] Limiting story pool..."
+    )
+
+    all_stories = all_stories[
+        :max_articles
+    ]
+
+    print(
+        f"      Stories considered: "
+        f"{len(all_stories)}"
+    )
+
+    # --------------------------------------------------------
+    # STEP 3
+    # --------------------------------------------------------
+
+    print(
+        "\n[3/5] Detecting counties and categories..."
+    )
+
+    enriched = enrich_stories(
+        all_stories
+    )
+
+    print(
+        f"      Stories enriched: "
+        f"{len(enriched)}"
+    )
+
+    # --------------------------------------------------------
+    # STEP 4
+    # --------------------------------------------------------
+
+    print(
+        "\n[4/5] Ranking stories..."
+    )
 
     story = select_story(
-        regional_articles
+        enriched
     )
 
     if not story:
 
         print(
-            "\n[ERROR] No relevant Rift Valley story found."
+            "\n[ERROR] "
+            "No suitable regional story found."
         )
 
         return None
 
-    print("\n[5/5] Strongest story selected")
-
-    print("-" * 60)
-    print(f"TITLE    : {story['title']}")
-    print(f"COUNTY   : {story['county']}")
-    print(f"CATEGORY : {story['category']}")
-    print(f"SOURCE   : {story['source']}")
-    print(f"SCORE    : {story['score']}")
-    print(f"URL      : {story['url']}")
-    print("-" * 60)
-
-    save_story(story)
+    # --------------------------------------------------------
+    # STEP 5
+    # --------------------------------------------------------
 
     print(
-        f"\n[SAVED] {STORY_FILE}"
+        "\n[5/5] Strongest story selected"
+    )
+
+    print(
+        "-" * 60
+    )
+
+    print(
+        f"TITLE        : "
+        f"{story['title']}"
+    )
+
+    print(
+        f"COUNTY       : "
+        f"{story['county']}"
+    )
+
+    print(
+        f"CATEGORY     : "
+        f"{story['category']}"
+    )
+
+    print(
+        f"SOURCE       : "
+        f"{story['source']}"
+    )
+
+    print(
+        f"SCORE        : "
+        f"{story['score']}"
+    )
+
+    print(
+        f"POLITICAL    : "
+        f"{story['political_score']}"
+    )
+
+    print(
+        f"ACCOUNTABILITY: "
+        f"{story['accountability_score']}"
+    )
+
+    print(
+        f"URL          : "
+        f"{story['url']}"
+    )
+
+    print(
+        "-" * 60
+    )
+
+    save_story(
+        story
+    )
+
+    print(
+        f"\n[SAVED] "
+        f"{STORY_FILE}"
     )
 
     return story
