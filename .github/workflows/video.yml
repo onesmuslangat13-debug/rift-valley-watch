@@ -1,12 +1,159 @@
+name: Rift Valley Watch V2 Video
+
+on:
+  workflow_dispatch:
+
+jobs:
+  generate-video:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pillow gTTS
+
+      - name: Check project files
+        run: |
+          echo "=========================================="
+          echo "CHECKING PROJECT FILES"
+          echo "=========================================="
+
+          test -f data/story.json
+          test -f scripts/news_engine.py
+          test -f scripts/video_generator.py
+
+          echo "All required files found."
+
+      - name: Prepare output directories
+        run: |
+          echo "=========================================="
+          echo "PREPARING OUTPUT DIRECTORIES"
+          echo "=========================================="
+
+          mkdir -p output
+          mkdir -p output/scenes
+          mkdir -p assets
+          mkdir -p assets/source
+          mkdir -p assets/audio
+
+          echo "Directories ready."
+
+      - name: Generate verified news script
+        run: |
+          echo "=========================================="
+          echo "GENERATING VERIFIED NEWS SCRIPT"
+          echo "=========================================="
+
+          python -u scripts/news_engine.py
+
+      - name: Show generated script
+        run: |
+          echo "=========================================="
+          echo "GENERATED V2 SCRIPT"
+          echo "=========================================="
+
+          cat data/script.json
+
       - name: Generate V2 MP4
         run: |
-          mkdir -p output
           echo "=========================================="
           echo "STARTING VIDEO GENERATOR"
           echo "=========================================="
+
           python -u scripts/video_generator.py 2>&1 | tee video_generator.log
+
           STATUS=${PIPESTATUS[0]}
+
           echo "=========================================="
           echo "VIDEO GENERATOR EXIT CODE: $STATUS"
           echo "=========================================="
+
           exit $STATUS
+
+      - name: Show generator log
+        if: always()
+        run: |
+          echo "=========================================="
+          echo "VIDEO GENERATOR LOG"
+          echo "=========================================="
+
+          if [ -f video_generator.log ]; then
+            cat video_generator.log
+          else
+            echo "video_generator.log was not created."
+          fi
+
+      - name: Verify MP4 exists
+        run: |
+          echo "=========================================="
+          echo "OUTPUT FILE"
+          echo "=========================================="
+
+          mkdir -p output
+
+          ls -lah output/ || true
+
+          if [ ! -f output/rift_valley_watch.mp4 ]; then
+            echo "ERROR: output/rift_valley_watch.mp4 was not created."
+            exit 1
+          fi
+
+          echo "MP4 successfully created."
+
+      - name: Inspect MP4
+        run: |
+          echo "=========================================="
+          echo "MP4 INSPECTION"
+          echo "=========================================="
+
+          ffprobe -v error \
+            -show_entries format=duration,size \
+            -show_entries stream=codec_type,codec_name,width,height,r_frame_rate \
+            -of json \
+            output/rift_valley_watch.mp4
+
+      - name: Upload V2 MP4
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rift-valley-watch-v2-mp4
+          path: output/rift_valley_watch.mp4
+          if-no-files-found: error
+
+      - name: Upload generated script
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rift-valley-watch-v2-script
+          path: data/script.json
+          if-no-files-found: warn
+
+      - name: Upload generator log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: video-generator-log
+          path: video_generator.log
+          if-no-files-found: warn
+
+      - name: Upload output directory for debugging
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rift-valley-watch-debug-output
+          path: output/
+          if-no-files-found: warn
