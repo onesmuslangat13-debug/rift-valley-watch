@@ -35,15 +35,19 @@ jobs:
           echo "CHECKING PROJECT"
           echo "=========================================="
 
-          test -f data/story.json
-          test -f data/script.json
           test -f scripts/news_engine.py
           test -f scripts/video_generator.py
 
-          echo "Project files OK"
+          echo "news_engine.py ........ OK"
+          echo "video_generator.py .... OK"
 
       - name: Prepare directories
         run: |
+          echo "=========================================="
+          echo "PREPARING DIRECTORIES"
+          echo "=========================================="
+
+          mkdir -p data
           mkdir -p output
           mkdir -p output/scenes
           mkdir -p output/audio
@@ -51,6 +55,8 @@ jobs:
           mkdir -p assets/source
           mkdir -p assets/audio
           mkdir -p assets/music
+
+          echo "Directories ready"
 
       - name: Generate real-time news
         run: |
@@ -60,17 +66,34 @@ jobs:
 
           python -u scripts/news_engine.py
 
+      - name: Verify generated news files
+        run: |
+          echo "=========================================="
+          echo "VERIFYING NEWS FILES"
+          echo "=========================================="
+
+          test -f data/story.json
+          test -f data/script.json
+
+          echo
+          echo "story.json:"
+          ls -lh data/story.json
+
+          echo
+          echo "script.json:"
+          ls -lh data/script.json
+
       - name: Show generated news
         run: |
           echo "=========================================="
-          echo "STORY.JSON"
+          echo "GENERATED STORY"
           echo "=========================================="
 
           cat data/story.json
 
           echo
           echo "=========================================="
-          echo "SCRIPT.JSON"
+          echo "GENERATED SCRIPT"
           echo "=========================================="
 
           cat data/script.json
@@ -94,36 +117,34 @@ jobs:
 
           exit $STATUS
 
-      - name: Print complete generator log
+      - name: Show generator log
         if: always()
         run: |
           echo "=========================================="
-          echo "COMPLETE VIDEO GENERATOR LOG"
+          echo "VIDEO GENERATOR LOG"
           echo "=========================================="
 
           if [ -f video_generator.log ]; then
             cat video_generator.log
           else
-            echo "video_generator.log was not created"
+            echo "No generator log found."
           fi
 
-      - name: Inspect generated scenes
+      - name: Inspect output
         if: always()
         run: |
           echo "=========================================="
-          echo "OUTPUT DIRECTORY"
+          echo "OUTPUT FILES"
           echo "=========================================="
 
-          find output -maxdepth 3 -type f -printf '%p %s bytes\n' 2>/dev/null || true
+          find output -maxdepth 3 -type f \
+            -printf '%p %s bytes\n' 2>/dev/null || true
 
           echo
-          echo "=========================================="
-          echo "SCENE FILES"
-          echo "=========================================="
-
+          echo "SCENES:"
           ls -lah output/scenes/ 2>/dev/null || true
 
-      - name: Verify MP4 exists
+      - name: Verify MP4
         run: |
           echo "=========================================="
           echo "VERIFYING FINAL MP4"
@@ -131,13 +152,10 @@ jobs:
 
           if [ ! -f output/rift_valley_watch.mp4 ]; then
             echo
-            echo "ERROR: Final MP4 was not created."
+            echo "ERROR: output/rift_valley_watch.mp4 was not created."
             echo
-            echo "Last 150 lines of generator log:"
-            tail -n 150 video_generator.log || true
-            echo
-            echo "Generated files:"
-            find output -maxdepth 3 -type f -printf '%p %s bytes\n' || true
+            echo "LAST 200 LINES OF GENERATOR LOG:"
+            tail -n 200 video_generator.log || true
             exit 1
           fi
 
@@ -147,7 +165,7 @@ jobs:
         if: success()
         run: |
           echo "=========================================="
-          echo "FFPROBE"
+          echo "FINAL MP4 INSPECTION"
           echo "=========================================="
 
           ffprobe -v error \
@@ -164,11 +182,11 @@ jobs:
           path: output/rift_valley_watch.mp4
           if-no-files-found: error
 
-      - name: Upload generated script
+      - name: Upload news data
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: rift-valley-watch-v2-script
+          name: rift-valley-watch-v2-news
           path: |
             data/story.json
             data/script.json
