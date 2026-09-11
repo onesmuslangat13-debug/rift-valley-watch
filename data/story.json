@@ -2,8 +2,66 @@
   "title": "Construction of a new road project begins in Bomet County",
   "county": "Bomet County",
   "category": "DEVELOPMENT",
-  "source": "Bomet County Government",
-  "url": "",
   "date": "2026-09-11",
-  "summary": "Construction work has begun on a new road project in Bomet County. The project is expected to improve transport links, support local businesses and make movement easier for residents. County officials say the project is part of ongoing efforts to improve infrastructure and economic activity in the area."
+
+  "source": {
+    "name": "Bomet County Government",
+    "url": "",
+    "type": "OFFICIAL_SOURCE"
+  },
+
+  "verified_facts": [
+    {
+      "label": "PROJECT",
+      "value": "New road construction project"
+    },
+    {
+      "label": "LOCATION",
+      "value": "Bomet County"
+    },
+    {
+      "label": "STATUS",
+      "value": "Construction work has begun"
+    }
+  ],
+
+  "official_statement": {
+    "available": false,
+    "speaker": "",
+    "quote": ""
+  },
+
+  "summary": "Construction work has begun on a new road project in Bomet County. The county government says the project is intended to improve transport links, support local businesses and make movement easier for residents. Further project details should be confirmed from the official project documentation or county government statement before publication.",
+
+  "visuals": [
+    {
+      "type": "GRAPHIC",
+      "description": "Bomet County location graphic"
+    },
+    {
+      "type": "DATA_CARD",
+      "description": "Project status: Construction has begun"
+    },
+    {
+      "type": "SOURCE_CARD",
+      "description": "Bomet County Government"
+    }
+  ],
+
+  "editorial": {
+    "confirmed": [
+      "Construction work has begun.",
+      "The project is in Bomet County.",
+      "The county government says the project is intended to improve transport links."
+    ],
+    "unconfirmed": [
+      "Exact road name",
+      "Exact route",
+      "Project budget",
+      "Road length",
+      "Contractor",
+      "Completion date",
+      "Funding source"
+    ]
+  }
 }
