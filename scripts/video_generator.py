@@ -124,6 +124,21 @@ def clean_text(text):
     return text.strip()
 
 
+def clean_editorial_text(text):
+
+    text = clean_text(text)
+
+    # Fix known typo without changing other editorial content.
+    text = re.sub(
+        r"\bRoad\s+lenght\b",
+        "Road length",
+        text,
+        flags=re.IGNORECASE
+    )
+
+    return text
+
+
 def wrap_text(
     draw,
     text,
@@ -346,13 +361,10 @@ def add_footer(
 
 
 # ============================================================
-# HOOK CARD
+# CARD BASE
 # ============================================================
 
-def create_hook_card(
-    story,
-    output_path
-):
+def new_card(story):
 
     image = Image.new(
         "RGB",
@@ -370,6 +382,20 @@ def create_hook_card(
         draw,
         story["category"]
     )
+
+    return image, draw
+
+
+# ============================================================
+# HOOK CARD
+# ============================================================
+
+def create_hook_card(
+    story,
+    output_path
+):
+
+    image, draw = new_card(story)
 
     draw.text(
         (70, 235),
@@ -435,22 +461,7 @@ def create_facts_card(
     output_path
 ):
 
-    image = Image.new(
-        "RGB",
-        (
-            VIDEO_WIDTH,
-            VIDEO_HEIGHT
-        )
-    )
-
-    add_gradient_background(image)
-
-    draw = ImageDraw.Draw(image)
-
-    add_top_branding(
-        draw,
-        story["category"]
-    )
+    image, draw = new_card(story)
 
     draw.text(
         (70, 225),
@@ -537,22 +548,7 @@ def create_context_card(
     output_path
 ):
 
-    image = Image.new(
-        "RGB",
-        (
-            VIDEO_WIDTH,
-            VIDEO_HEIGHT
-        )
-    )
-
-    add_gradient_background(image)
-
-    draw = ImageDraw.Draw(image)
-
-    add_top_branding(
-        draw,
-        story["category"]
-    )
+    image, draw = new_card(story)
 
     draw.text(
         (70, 230),
@@ -602,7 +598,7 @@ def create_context_card(
 
         y = draw_wrapped_text(
             draw,
-            item,
+            clean_editorial_text(item),
             135,
             y,
             font(37),
@@ -647,9 +643,11 @@ def create_context_card(
 
         for item in unconfirmed[:5]:
 
+            fixed_item = clean_editorial_text(item)
+
             yy = draw_wrapped_text(
                 draw,
-                "• " + item,
+                "• " + fixed_item,
                 115,
                 yy,
                 font(29),
@@ -673,7 +671,7 @@ def create_context_card(
 
 
 # ============================================================
-# IMPACT CARD
+# WHY IT MATTERS CARD
 # ============================================================
 
 def create_impact_card(
@@ -681,22 +679,7 @@ def create_impact_card(
     output_path
 ):
 
-    image = Image.new(
-        "RGB",
-        (
-            VIDEO_WIDTH,
-            VIDEO_HEIGHT
-        )
-    )
-
-    add_gradient_background(image)
-
-    draw = ImageDraw.Draw(image)
-
-    add_top_branding(
-        draw,
-        story["category"]
-    )
+    image, draw = new_card(story)
 
     draw.text(
         (70, 230),
@@ -750,19 +733,9 @@ def create_impact_card(
         17
     )
 
-    draw.text(
-        (80, 1370),
-        "RIFT VALLEY WATCH",
-        font=font(34, True),
-        fill=RED
-    )
-
-    draw.text(
-        (80, 1430),
-        "Tracking verified developments across the region.",
-        font=font(29),
-        fill=LIGHT
-    )
+    # IMPORTANT:
+    # No outro/end-card is embedded in this scene.
+    # The outro is now its own final scene.
 
     add_footer(
         draw,
@@ -785,17 +758,7 @@ def create_source_card(
     output_path
 ):
 
-    image = Image.new(
-        "RGB",
-        (
-            VIDEO_WIDTH,
-            VIDEO_HEIGHT
-        )
-    )
-
-    add_gradient_background(image)
-
-    draw = ImageDraw.Draw(image)
+    image, draw = new_card(story)
 
     draw.text(
         (70, 250),
@@ -885,6 +848,64 @@ def create_source_card(
         "RIFT VALLEY WATCH",
         font=font(34, True),
         fill=LIGHT
+    )
+
+    image.save(
+        output_path,
+        quality=95
+    )
+
+
+# ============================================================
+# OUTRO CARD
+# ============================================================
+
+def create_outro_card(
+    story,
+    output_path
+):
+
+    image, draw = new_card(story)
+
+    draw.text(
+        (70, 650),
+        "RIFT VALLEY WATCH",
+        font=font(58, True),
+        fill=WHITE
+    )
+
+    draw.rectangle(
+        (
+            70,
+            760,
+            600,
+            768
+        ),
+        fill=RED
+    )
+
+    draw_wrapped_text(
+        draw,
+        "Tracking verified developments across the region.",
+        70,
+        850,
+        font(42),
+        LIGHT,
+        VIDEO_WIDTH - 140,
+        15
+    )
+
+    draw.text(
+        (70, 1130),
+        "FOLLOW FOR VERIFIED REGIONAL NEWS",
+        font=font(32, True),
+        fill=RED
+    )
+
+    add_footer(
+        draw,
+        story["source"]["name"],
+        story["date"]
     )
 
     image.save(
@@ -1006,6 +1027,9 @@ def create_card_video(
 
         "-an",
 
+        "-movflags",
+        "+faststart",
+
         str(output_path)
     ]
 
@@ -1013,7 +1037,7 @@ def create_card_video(
 
 
 # ============================================================
-# CONCATENATE
+# CONCATENATE - SAFE TIMELINE VERSION
 # ============================================================
 
 def concatenate_videos(
@@ -1021,49 +1045,98 @@ def concatenate_videos(
     output_path
 ):
 
-    concat_file = (
-        output_path.parent
-        / "concat.txt"
+    if not video_files:
+        raise RuntimeError(
+            "No video scenes supplied."
+        )
+
+    # Re-encode through FFmpeg's concat filter rather than
+    # stream-copying independently encoded files.
+    #
+    # This gives every scene a clean continuous timeline and
+    # prevents timestamp/scene-boundary artifacts.
+
+    inputs = []
+
+    for video in video_files:
+        inputs.extend(
+            [
+                "-i",
+                str(video)
+            ]
+        )
+
+    filter_parts = []
+
+    for index in range(len(video_files)):
+        filter_parts.append(
+            f"[{index}:v]"
+            "settb=AVTB,"
+            "setpts=PTS-STARTPTS,"
+            f"fps={FPS},"
+            f"scale={VIDEO_WIDTH}:{VIDEO_HEIGHT}:"
+            "force_original_aspect_ratio=decrease,"
+            f"pad={VIDEO_WIDTH}:{VIDEO_HEIGHT}:"
+            "(ow-iw)/2:(oh-ih)/2,"
+            "format=yuv420p"
+            f"[v{index}]"
+        )
+
+    concat_inputs = "".join(
+        f"[v{index}]"
+        for index in range(len(video_files))
     )
 
-    with open(
-        concat_file,
-        "w",
-        encoding="utf-8"
-    ) as f:
+    filter_parts.append(
+        concat_inputs
+        + f"concat=n={len(video_files)}:v=1:a=0"
+        "[vout]"
+    )
 
-        for video in video_files:
-
-            path = str(
-                Path(video).resolve()
-            ).replace(
-                "'",
-                "'\\''"
-            )
-
-            f.write(
-                f"file '{path}'\n"
-            )
+    filter_complex = ";".join(
+        filter_parts
+    )
 
     command = [
         "ffmpeg",
-        "-y",
-        "-f",
-        "concat",
-        "-safe",
-        "0",
-        "-i",
-        str(concat_file),
-        "-c",
-        "copy",
-        str(output_path)
+        "-y"
     ]
 
-    run_command(command)
+    command.extend(inputs)
 
-    concat_file.unlink(
-        missing_ok=True
+    command.extend(
+        [
+            "-filter_complex",
+            filter_complex,
+
+            "-map",
+            "[vout]",
+
+            "-an",
+
+            "-r",
+            str(FPS),
+
+            "-c:v",
+            "libx264",
+
+            "-preset",
+            "medium",
+
+            "-crf",
+            "21",
+
+            "-pix_fmt",
+            "yuv420p",
+
+            "-movflags",
+            "+faststart",
+
+            str(output_path)
+        ]
     )
+
+    run_command(command)
 
 
 # ============================================================
@@ -1113,6 +1186,9 @@ def add_audio(
         ),
 
         "-shortest",
+
+        "-movflags",
+        "+faststart",
 
         str(output_path)
     ]
@@ -1425,9 +1501,6 @@ def validate_video(
         "-v",
         "error",
 
-        # FIX:
-        # codec_type MUST be requested so QC can identify
-        # the video and audio streams.
         "-show_entries",
         "stream=codec_type,width,height,codec_name",
 
@@ -1598,6 +1671,7 @@ def generate_video():
         context_image = work_dir / "context.jpg"
         impact_image = work_dir / "impact.jpg"
         source_image = work_dir / "source.jpg"
+        outro_image = work_dir / "outro.jpg"
 
         create_hook_card(
             story,
@@ -1624,6 +1698,11 @@ def generate_video():
             source_image
         )
 
+        create_outro_card(
+            story,
+            outro_image
+        )
+
         print()
         print("[3/7] Generating narration...")
 
@@ -1647,27 +1726,32 @@ def generate_video():
         )
 
         print()
-        print("[4/7] Building dynamic sequence...")
+        print("[4/7] Building explicit scene timeline...")
 
         images = [
             hook_image,
             facts_image,
             context_image,
             impact_image,
-            source_image
+            source_image,
+            outro_image
         ]
 
+        # The outro is intentionally short.
+        # The main reporting scenes receive the majority
+        # of the narration time.
         weights = [
-            0.18,
-            0.25,
-            0.20,
+            0.16,
             0.22,
-            0.15
+            0.18,
+            0.20,
+            0.16,
+            0.08
         ]
 
         durations = [
             max(
-                3.5,
+                2.5,
                 audio_duration * weight
             )
             for weight in weights
@@ -1686,6 +1770,21 @@ def generate_video():
             duration * multiplier
             for duration in durations
         ]
+
+        # Explicit scene timeline.
+        scene_start = 0.0
+
+        for index, duration in enumerate(durations):
+
+            scene_end = scene_start + duration
+
+            print(
+                f"      Scene {index + 1}: "
+                f"{scene_start:.2f}s -> "
+                f"{scene_end:.2f}s"
+            )
+
+            scene_start = scene_end
 
         card_videos = []
 
