@@ -9,7 +9,7 @@ from gtts import gTTS
 
 # ============================================================
 # RIFT VALLEY WATCH
-# REAL-TIME NEWS VIDEO GENERATOR
+# REAL-TIME REGIONAL NEWS VIDEO GENERATOR
 # ============================================================
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -46,6 +46,7 @@ def log(message=""):
 # ============================================================
 
 def prepare_directories():
+
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     SCENES_DIR.mkdir(parents=True, exist_ok=True)
     AUDIO_DIR.mkdir(parents=True, exist_ok=True)
@@ -53,35 +54,37 @@ def prepare_directories():
 
 
 # ============================================================
-# FONT
+# FONTS
 # ============================================================
 
 def get_font(size, bold=False):
-
-    candidates = []
 
     if bold:
         candidates = [
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
             "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
             "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+            str(ROOT / "fonts" / "DejaVuSans-Bold.ttf"),
         ]
     else:
         candidates = [
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
             "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+            str(ROOT / "fonts" / "DejaVuSans.ttf"),
         ]
 
-    candidates += [
-        str(ROOT / "fonts" / "DejaVuSans-Bold.ttf"),
-        str(ROOT / "fonts" / "DejaVuSans.ttf"),
-    ]
+    for candidate in candidates:
 
-    for path in candidates:
-        if Path(path).exists():
+        path = Path(candidate)
+
+        if path.exists():
+
             try:
-                return ImageFont.truetype(path, size)
+                return ImageFont.truetype(
+                    str(path),
+                    size
+                )
             except Exception:
                 pass
 
@@ -95,11 +98,17 @@ def get_font(size, bold=False):
 def load_story_data():
 
     if not STORY_FILE.exists():
+
         raise RuntimeError(
             "data/story.json was not found."
         )
 
-    with open(STORY_FILE, "r", encoding="utf-8") as file:
+    with open(
+        STORY_FILE,
+        "r",
+        encoding="utf-8"
+    ) as file:
+
         return json.load(file)
 
 
@@ -119,9 +128,13 @@ def is_story(item):
         "source",
         "url",
         "published",
+        "score",
     }
 
-    return len(keys.intersection(item.keys())) >= 2
+    return (
+        len(keys.intersection(item.keys()))
+        >= 2
+    )
 
 
 def find_stories(data):
@@ -134,24 +147,30 @@ def find_stories(data):
             found.append(data)
 
         for value in data.values():
-            found.extend(find_stories(value))
+
+            found.extend(
+                find_stories(value)
+            )
 
     elif isinstance(data, list):
 
         for value in data:
-            found.extend(find_stories(value))
+
+            found.extend(
+                find_stories(value)
+            )
 
     return found
 
 
 def get_stories(data):
 
-    stories = find_stories(data)
+    raw_stories = find_stories(data)
 
     unique = []
     seen = set()
 
-    for story in stories:
+    for story in raw_stories:
 
         identifier = (
             story.get("url")
@@ -161,10 +180,16 @@ def get_stories(data):
             or ""
         )
 
-        identifier = str(identifier).strip().lower()
+        identifier = (
+            str(identifier)
+            .strip()
+            .lower()
+        )
 
         if not identifier:
-            identifier = str(len(unique))
+            identifier = str(
+                len(unique)
+            )
 
         if identifier in seen:
             continue
@@ -190,9 +215,16 @@ def text_width(draw, text, font):
     return box[2] - box[0]
 
 
-def wrap_text(draw, text, font, max_width):
+def wrap_text(
+    draw,
+    text,
+    font,
+    max_width
+):
 
-    words = str(text or "").split()
+    words = str(
+        text or ""
+    ).split()
 
     if not words:
         return []
@@ -204,9 +236,19 @@ def wrap_text(draw, text, font, max_width):
 
         test = current + " " + word
 
-        if text_width(draw, test, font) <= max_width:
+        if (
+            text_width(
+                draw,
+                test,
+                font
+            )
+            <= max_width
+        ):
+
             current = test
+
         else:
+
             lines.append(current)
             current = word
 
@@ -235,11 +277,18 @@ def draw_wrapped(
     )
 
     if len(lines) > max_lines:
-        lines = lines[:max_lines]
-        lines[-1] = lines[-1].rstrip(".") + "..."
 
-    bbox = font.getbbox("Ag")
-    line_height = bbox[3] - bbox[1]
+        lines = lines[:max_lines]
+
+        lines[-1] = (
+            lines[-1].rstrip(".")
+            + "..."
+        )
+
+    box = font.getbbox("Ag")
+    line_height = (
+        box[3] - box[1]
+    )
 
     for line in lines:
 
@@ -256,7 +305,7 @@ def draw_wrapped(
 
 
 # ============================================================
-# PHOTO
+# PHOTOS
 # ============================================================
 
 def get_photo_path(story):
@@ -265,7 +314,7 @@ def get_photo_path(story):
         "image_path",
         "photo_path",
         "image_file",
-        "photo_file"
+        "photo_file",
     ]
 
     for key in keys:
@@ -277,14 +326,18 @@ def get_photo_path(story):
 
         value = str(value)
 
-        paths = [
+        candidates = [
             ROOT / value,
             Path(value)
         ]
 
-        for path in paths:
+        for path in candidates:
 
-            if path.exists() and path.is_file():
+            if (
+                path.exists()
+                and path.is_file()
+            ):
+
                 return path
 
     return None
@@ -314,32 +367,57 @@ def load_photo(path):
         return None
 
 
-def crop_photo(image, width, height):
+def crop_photo(
+    image,
+    width,
+    height
+):
 
     if image is None:
         return None
 
-    source_ratio = image.width / image.height
-    target_ratio = width / height
+    source_ratio = (
+        image.width
+        / image.height
+    )
+
+    target_ratio = (
+        width
+        / height
+    )
 
     if source_ratio > target_ratio:
 
         new_height = image.height
-        new_width = int(image.height * target_ratio)
+
+        new_width = int(
+            image.height
+            * target_ratio
+        )
 
     else:
 
         new_width = image.width
-        new_height = int(image.width / target_ratio)
+
+        new_height = int(
+            image.width
+            / target_ratio
+        )
 
     left = max(
         0,
-        (image.width - new_width) // 2
+        (
+            image.width
+            - new_width
+        ) // 2
     )
 
     top = max(
         0,
-        (image.height - new_height) // 2
+        (
+            image.height
+            - new_height
+        ) // 2
     )
 
     image = image.crop(
@@ -358,7 +436,7 @@ def crop_photo(image, width, height):
 
 
 # ============================================================
-# COMMON BRANDING
+# BRANDING
 # ============================================================
 
 def draw_header(draw):
@@ -399,7 +477,10 @@ def draw_header(draw):
     )
 
     draw.text(
-        (WIDTH - tw - 38, 34),
+        (
+            WIDTH - tw - 38,
+            34
+        ),
         label,
         font=small_font,
         fill=(180, 187, 197)
@@ -428,12 +509,17 @@ def draw_footer(draw):
     )
 
 
-def draw_county(draw, county):
+def draw_county(
+    draw,
+    county
+):
 
     if not county:
         return
 
-    county = str(county).upper()
+    county = str(
+        county
+    ).upper()
 
     font = get_font(
         25,
@@ -447,7 +533,12 @@ def draw_county(draw, county):
     )
 
     draw.rounded_rectangle(
-        (38, 125, 38 + tw + 40, 180),
+        (
+            38,
+            125,
+            38 + tw + 40,
+            180
+        ),
         radius=7,
         fill=(220, 35, 45)
     )
@@ -479,25 +570,34 @@ def create_opener():
         fill=(220, 35, 45)
     )
 
-    for y in range(250, 1650, 120):
+    for y in range(
+        250,
+        1650,
+        120
+    ):
 
         draw.line(
-            (60, y, WIDTH - 60, y),
+            (
+                60,
+                y,
+                WIDTH - 60,
+                y
+            ),
             fill=(27, 32, 41),
             width=2
         )
 
-    small = get_font(
+    small_font = get_font(
         34,
         True
     )
 
-    title = get_font(
+    title_font = get_font(
         92,
         True
     )
 
-    subtitle = get_font(
+    subtitle_font = get_font(
         32,
         True
     )
@@ -505,14 +605,14 @@ def create_opener():
     draw.text(
         (70, 610),
         "RIFT VALLEY",
-        font=small,
+        font=small_font,
         fill=(205, 211, 220)
     )
 
     draw.text(
         (65, 670),
         "WATCH",
-        font=title,
+        font=title_font,
         fill=(255, 255, 255)
     )
 
@@ -524,14 +624,17 @@ def create_opener():
     draw.text(
         (70, 850),
         "REGIONAL NEWS BULLETIN",
-        font=subtitle,
+        font=subtitle_font,
         fill=(185, 192, 202)
     )
 
     draw.text(
         (70, 910),
         "POLITICS • BUSINESS • DEVELOPMENT",
-        font=get_font(23, True),
+        font=get_font(
+            23,
+            True
+        ),
         fill=(130, 138, 149)
     )
 
@@ -551,10 +654,18 @@ def create_opener():
 # STORY IMAGE
 # ============================================================
 
-def create_story_image(story, number):
+def create_story_image(
+    story,
+    number
+):
 
-    photo_path = get_photo_path(story)
-    photo = load_photo(photo_path)
+    photo_path = get_photo_path(
+        story
+    )
+
+    photo = load_photo(
+        photo_path
+    )
 
     canvas = Image.new(
         "RGB",
@@ -580,12 +691,21 @@ def create_story_image(story, number):
             (0, 0, 0, 150)
         )
 
-        background = background.convert("RGBA")
-        background.alpha_composite(dark)
+        background = background.convert(
+            "RGBA"
+        )
 
-        canvas = background.convert("RGB")
+        background.alpha_composite(
+            dark
+        )
 
-    draw = ImageDraw.Draw(canvas)
+        canvas = background.convert(
+            "RGB"
+        )
+
+    draw = ImageDraw.Draw(
+        canvas
+    )
 
     draw_header(draw)
 
@@ -600,7 +720,7 @@ def create_story_image(story, number):
     )
 
     # --------------------------------------------------------
-    # Main real photograph
+    # REAL SOURCE PHOTO
     # --------------------------------------------------------
 
     photo_top = 195
@@ -619,14 +739,17 @@ def create_story_image(story, number):
             (40, photo_top)
         )
 
-        draw = ImageDraw.Draw(canvas)
+        draw = ImageDraw.Draw(
+            canvas
+        )
 
         draw.rectangle(
             (
                 40,
                 photo_top,
                 WIDTH - 40,
-                photo_top + photo_height
+                photo_top
+                + photo_height
             ),
             outline=(255, 255, 255),
             width=2
@@ -639,7 +762,8 @@ def create_story_image(story, number):
                 40,
                 photo_top,
                 WIDTH - 40,
-                photo_top + photo_height
+                photo_top
+                + photo_height
             ),
             radius=10,
             fill=(28, 34, 43)
@@ -669,13 +793,18 @@ def create_story_image(story, number):
         )
 
     # --------------------------------------------------------
-    # Information panel
+    # NEWS PANEL
     # --------------------------------------------------------
 
     panel_top = 950
 
     draw.rectangle(
-        (0, panel_top, WIDTH, HEIGHT - 74),
+        (
+            0,
+            panel_top,
+            WIDTH,
+            HEIGHT - 74
+        ),
         fill=(6, 9, 15)
     )
 
@@ -692,7 +821,10 @@ def create_story_image(story, number):
     )
 
     draw.text(
-        (40, panel_top + 38),
+        (
+            40,
+            panel_top + 38
+        ),
         category,
         font=category_font,
         fill=(220, 35, 45)
@@ -734,7 +866,10 @@ def create_story_image(story, number):
     )
 
     draw.text(
-        (40, HEIGHT - 152),
+        (
+            40,
+            HEIGHT - 152
+        ),
         "Source: " + source,
         font=source_font,
         fill=(155, 163, 174)
@@ -743,9 +878,15 @@ def create_story_image(story, number):
     if photo_path is not None:
 
         draw.text(
-            (40, HEIGHT - 116),
+            (
+                40,
+                HEIGHT - 116
+            ),
             "PHOTO: SOURCE ARTICLE",
-            font=get_font(18, True),
+            font=get_font(
+                18,
+                True
+            ),
             fill=(115, 123, 134)
         )
 
@@ -763,7 +904,10 @@ def create_story_image(story, number):
     )
 
     draw.text(
-        (WIDTH - nw - 42, HEIGHT - 150),
+        (
+            WIDTH - nw - 42,
+            HEIGHT - 150
+        ),
         number_text,
         font=number_font,
         fill=(155, 163, 174)
@@ -822,13 +966,18 @@ def create_outro():
     )
 
     draw.text(
-        ((WIDTH - tw) // 2, 700),
+        (
+            (WIDTH - tw) // 2,
+            700
+        ),
         title,
         font=title_font,
         fill=(255, 255, 255)
     )
 
-    subtitle = "MORE REGIONAL NEWS • MORE UPDATES"
+    subtitle = (
+        "MORE REGIONAL NEWS • MORE UPDATES"
+    )
 
     sw = text_width(
         draw,
@@ -837,14 +986,22 @@ def create_outro():
     )
 
     draw.text(
-        ((WIDTH - sw) // 2, 815),
+        (
+            (WIDTH - sw) // 2,
+            815
+        ),
         subtitle,
         font=subtitle_font,
         fill=(180, 187, 198)
     )
 
     draw.rectangle(
-        (340, 900, 740, 908),
+        (
+            340,
+            900,
+            740,
+            908
+        ),
         fill=(220, 35, 45)
     )
 
@@ -866,9 +1023,14 @@ def create_outro():
 
 def build_narration(story):
 
-    if story.get("narration"):
+    existing = story.get(
+        "narration"
+    )
+
+    if existing:
+
         return str(
-            story["narration"]
+            existing
         ).strip()
 
     county = story.get(
@@ -908,7 +1070,10 @@ def build_narration(story):
     )
 
 
-def create_tts(text, number):
+def create_tts(
+    text,
+    number
+):
 
     if not text:
         return None
@@ -939,6 +1104,7 @@ def create_tts(text, number):
             path.exists()
             and path.stat().st_size > 1000
         ):
+
             return path
 
     except Exception as exc:
@@ -962,6 +1128,10 @@ def render_scene(
     audio_path=None
 ):
 
+    # --------------------------------------------------------
+    # ALWAYS CREATE A VIDEO INPUT FIRST.
+    # --------------------------------------------------------
+
     command = [
         "ffmpeg",
         "-y",
@@ -973,42 +1143,51 @@ def render_scene(
         str(image_path)
     ]
 
-    has_audio = (
+    # --------------------------------------------------------
+    # REAL NARRATION INPUT
+    # --------------------------------------------------------
+
+    if (
         audio_path is not None
         and audio_path.exists()
-    )
-
-    if has_audio:
+    ):
 
         command += [
             "-i",
             str(audio_path)
         ]
 
-    command += [
-        "-map",
-        "0:v:0"
-    ]
+        audio_input = "1:a:0"
 
-    if has_audio:
-
-        command += [
-            "-map",
-            "1:a:0"
-        ]
+    # --------------------------------------------------------
+    # SILENT AUDIO INPUT
+    #
+    # IMPORTANT:
+    # anullsrc MUST appear before -map.
+    # --------------------------------------------------------
 
     else:
 
         command += [
             "-f",
             "lavfi",
+            "-t",
+            str(duration),
             "-i",
-            "anullsrc=channel_layout=stereo:sample_rate=44100",
-            "-map",
-            "1:a:0"
+            "anullsrc=channel_layout=stereo:sample_rate=44100"
         ]
 
+        audio_input = "1:a:0"
+
+    # --------------------------------------------------------
+    # MAP INPUTS
+    # --------------------------------------------------------
+
     command += [
+        "-map",
+        "0:v:0",
+        "-map",
+        audio_input,
         "-t",
         str(duration),
         "-vf",
@@ -1038,6 +1217,12 @@ def render_scene(
         "+faststart",
         str(output_path)
     ]
+
+    log("")
+    log(
+        "FFMPEG SCENE COMMAND: "
+        + output_path.name
+    )
 
     result = subprocess.run(
         command,
@@ -1099,10 +1284,13 @@ def inspect_scene(path):
         return None
 
     try:
+
         return json.loads(
             result.stdout
         )
+
     except Exception:
+
         return None
 
 
@@ -1110,7 +1298,9 @@ def inspect_scene(path):
 # CONCAT FILE
 # ============================================================
 
-def create_concat_file(scene_files):
+def create_concat_file(
+    scene_files
+):
 
     path = OUTPUT_DIR / "concat.txt"
 
@@ -1144,7 +1334,9 @@ def create_concat_file(scene_files):
 # FINAL ASSEMBLY
 # ============================================================
 
-def assemble_final(scene_files):
+def assemble_final(
+    scene_files
+):
 
     concat_file = create_concat_file(
         scene_files
@@ -1166,791 +1358,7 @@ def assemble_final(scene_files):
     log("ASSEMBLING FINAL MP4")
     log("=" * 70)
 
-    # --------------------------------------------------------
-    # Every scene already has:
-    # H264 video
-    # AAC audio
-    # 1080x1920
-    # 44100 Hz stereo
-    #
-    # We still FORCE a final encode for reliability.
-    # --------------------------------------------------------
-
     command = [
         "ffmpeg",
         "-y",
-        "-f",
-        "concat",
-        "-safe",
-        "0",
-        "-i",
-        str(concat_file),
-        "-vf",
-        "scale=1080:1920:force_original_aspect_ratio=decrease,"
-        "pad=1080:1920:(ow-iw)/2:(oh-ih)/2,"
-        "setsar=1",
-        "-r",
-        str(FPS),
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-crf",
-        "22",
-        "-pix_fmt",
-        "yuv420p",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "128k",
-        "-ar",
-        "44100",
-        "-ac",
-        "2",
-        "-movflags",
-        "+faststart",
-        str(temp_file)
-    ]
-
-    result = subprocess.run(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True
-    )
-
-    log(result.stdout)
-
-    if result.returncode != 0:
-
-        raise RuntimeError(
-            "Final FFmpeg assembly failed."
-        )
-
-    if not temp_file.exists():
-
-        raise RuntimeError(
-            "Final temporary MP4 was not created."
-        )
-
-    size = temp_file.stat().st_size
-
-    log(
-        "Temporary MP4 size: "
-        + f"{size:,}"
-        + " bytes"
-    )
-
-    if size < 100000:
-
-        raise RuntimeError(
-            "Final MP4 is suspiciously small."
-        )
-
-    temp_file.replace(
-        FINAL_VIDEO
-    )
-
-
-# ============================================================
-# VALIDATION
-# ============================================================
-
-def validate_final_video():
-
-    if not FINAL_VIDEO.exists():
-
-        raise RuntimeError(
-            "Final MP4 does not exist."
-        )
-
-    size = FINAL_VIDEO.stat().st_size
-
-    if size < 100000:
-
-        raise RuntimeError(
-            "Final MP4 is too small: "
-            + str(size)
-            + " bytes"
-        )
-
-    command = [
-        "ffprobe",
-        "-v",
-        "error",
-        "-show_entries",
-        "format=duration,size",
-        "-show_entries",
-        "stream=codec_type,codec_name,width,height,"
-        "pix_fmt,r_frame_rate,sample_rate,channels",
-        "-of",
-        "json",
-        str(FINAL_VIDEO)
-    ]
-
-    result = subprocess.run(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True
-    )
-
-    if result.returncode != 0:
-
-        log(result.stdout)
-
-        raise RuntimeError(
-            "ffprobe could not read final MP4."
-        )
-
-    try:
-        info = json.loads(
-            result.stdout
-        )
-    except Exception:
-
-        raise RuntimeError(
-            "Could not parse ffprobe output."
-        )
-
-    streams = info.get(
-        "streams",
-        []
-    )
-
-    video_stream = None
-    audio_stream = None
-
-    for stream in streams:
-
-        if stream.get("codec_type") == "video":
-            video_stream = stream
-
-        if stream.get("codec_type") == "audio":
-            audio_stream = stream
-
-    if video_stream is None:
-
-        raise RuntimeError(
-            "Final MP4 has no video stream."
-        )
-
-    width = int(
-        video_stream.get(
-            "width",
-            0
-        )
-    )
-
-    height = int(
-        video_stream.get(
-            "height",
-            0
-        )
-    )
-
-    duration = float(
-        info.get(
-            "format",
-            {}
-        ).get(
-            "duration",
-            0
-        )
-        or 0
-    )
-
-    log("")
-    log("=" * 70)
-    log("FINAL MP4 VALIDATION")
-    log("=" * 70)
-
-    log(
-        "File size: "
-        + f"{size:,}"
-        + " bytes"
-    )
-
-    log(
-        "Duration: "
-        + f"{duration:.2f}"
-        + " seconds"
-    )
-
-    log(
-        "Resolution: "
-        + str(width)
-        + "x"
-        + str(height)
-    )
-
-    log(
-        "Video codec: "
-        + str(
-            video_stream.get(
-                "codec_name"
-            )
-        )
-    )
-
-    if audio_stream:
-
-        log(
-            "Audio codec: "
-            + str(
-                audio_stream.get(
-                    "codec_name"
-                )
-            )
-        )
-
-        log(
-            "Audio channels: "
-            + str(
-                audio_stream.get(
-                    "channels"
-                )
-            )
-        )
-
-    if width != WIDTH:
-
-        raise RuntimeError(
-            "Wrong video width."
-        )
-
-    if height != HEIGHT:
-
-        raise RuntimeError(
-            "Wrong video height."
-        )
-
-    if duration <= 1:
-
-        raise RuntimeError(
-            "Invalid video duration."
-        )
-
-    if audio_stream is None:
-
-        raise RuntimeError(
-            "Final MP4 has no audio stream."
-        )
-
-    log(
-        "1080x1920 vertical video confirmed."
-    )
-
-    log(
-        "Audio stream confirmed."
-    )
-
-
-# ============================================================
-# REPORT
-# ============================================================
-
-def write_report(records):
-
-    report = {
-        "project": "Rift Valley Watch",
-        "version": "V3",
-        "resolution": "1080x1920",
-        "fps": FPS,
-        "real_photos_enabled": True,
-        "final_reencode": True,
-        "records": records
-    }
-
-    with open(
-        REPORT_FILE,
-        "w",
-        encoding="utf-8"
-    ) as file:
-
-        json.dump(
-            report,
-            file,
-            indent=2,
-            ensure_ascii=False
-        )
-
-
-# ============================================================
-# CLEAN OLD FILES
-# ============================================================
-
-def clean_old_files():
-
-    for path in SCENES_DIR.glob("*"):
-
-        if path.is_file():
-
-            try:
-                path.unlink()
-            except Exception:
-                pass
-
-    for path in AUDIO_DIR.glob("*"):
-
-        if path.is_file():
-
-            try:
-                path.unlink()
-            except Exception:
-                pass
-
-    for path in [
-        OUTPUT_DIR / "concat.txt",
-        OUTPUT_DIR / "rift_valley_watch_temp.mp4"
-    ]:
-
-        if path.exists():
-
-            try:
-                path.unlink()
-            except Exception:
-                pass
-
-    if FINAL_VIDEO.exists():
-
-        try:
-            FINAL_VIDEO.unlink()
-        except Exception:
-            pass
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-def main():
-
-    log("=" * 70)
-    log("RIFT VALLEY WATCH V3 VIDEO GENERATOR")
-    log("=" * 70)
-
-    prepare_directories()
-    clean_old_files()
-
-    # --------------------------------------------------------
-    # LOAD NEWS
-    # --------------------------------------------------------
-
-    log("")
-    log("Loading story.json")
-
-    data = load_story_data()
-
-    stories = get_stories(data)
-
-    log(
-        "Stories detected: "
-        + str(len(stories))
-    )
-
-    if not stories:
-
-        log(
-            "ERROR: No stories found in story.json."
-        )
-
-        return 1
-
-    scene_files = []
-    records = []
-
-    # --------------------------------------------------------
-    # OPENER
-    # --------------------------------------------------------
-
-    try:
-
-        opener_png = create_opener()
-
-        opener_mp4 = (
-            SCENES_DIR
-            / "scene_00.mp4"
-        )
-
-        render_scene(
-            opener_png,
-            opener_mp4,
-            OPENER_DURATION
-        )
-
-        scene_files.append(
-            opener_mp4
-        )
-
-        records.append(
-            {
-                "scene": "opener",
-                "photo": False
-            }
-        )
-
-        log(
-            "Opener completed."
-        )
-
-    except Exception as exc:
-
-        log(
-            "OPENER ERROR: "
-            + str(exc)
-        )
-
-        return 1
-
-    # --------------------------------------------------------
-    # STORIES
-    # --------------------------------------------------------
-
-    for number, story in enumerate(
-        stories,
-        start=1
-    ):
-
-        log("")
-        log("=" * 70)
-        log(
-            "PROCESSING STORY "
-            + str(number)
-        )
-        log("=" * 70)
-
-        title = (
-            story.get("title")
-            or story.get("headline")
-            or "Untitled story"
-        )
-
-        county = story.get(
-            "county",
-            "Rift Valley"
-        )
-
-        log(
-            "County: "
-            + str(county)
-        )
-
-        log(
-            "Headline: "
-            + str(title)
-        )
-
-        try:
-
-            image_path, photo_path = (
-                create_story_image(
-                    story,
-                    number
-                )
-            )
-
-            if photo_path:
-
-                log(
-                    "REAL SOURCE PHOTO: "
-                    + str(photo_path)
-                )
-
-            else:
-
-                log(
-                    "No source photo found."
-                )
-
-            narration = build_narration(
-                story
-            )
-
-            audio_path = create_tts(
-                narration,
-                number
-            )
-
-            scene_path = (
-                SCENES_DIR
-                / f"scene_{number:02d}.mp4"
-            )
-
-            render_scene(
-                image_path,
-                scene_path,
-                STORY_DURATION,
-                audio_path
-            )
-
-            scene_files.append(
-                scene_path
-            )
-
-            scene_info = inspect_scene(
-                scene_path
-            )
-
-            records.append(
-                {
-                    "scene": number,
-                    "county": county,
-                    "category": story.get(
-                        "category",
-                        "News"
-                    ),
-                    "title": title,
-                    "photo": bool(
-                        photo_path
-                    ),
-                    "photo_path": (
-                        str(photo_path)
-                        if photo_path
-                        else None
-                    ),
-                    "audio": bool(
-                        audio_path
-                    ),
-                    "technical": scene_info
-                }
-            )
-
-            log(
-                "STORY "
-                + str(number)
-                + " COMPLETED."
-            )
-
-        except Exception as exc:
-
-            log(
-                "STORY "
-                + str(number)
-                + " ERROR: "
-                + str(exc)
-            )
-
-            # Continue to the next story.
-            continue
-
-    # --------------------------------------------------------
-    # OUTRO
-    # --------------------------------------------------------
-
-    try:
-
-        outro_png = create_outro()
-
-        outro_mp4 = (
-            SCENES_DIR
-            / "scene_99.mp4"
-        )
-
-        render_scene(
-            outro_png,
-            outro_mp4,
-            OUTRO_DURATION
-        )
-
-        scene_files.append(
-            outro_mp4
-        )
-
-        records.append(
-            {
-                "scene": "outro",
-                "photo": False
-            }
-        )
-
-        log(
-            "Outro completed."
-        )
-
-    except Exception as exc:
-
-        log(
-            "OUTRO ERROR: "
-            + str(exc)
-        )
-
-        return 1
-
-    # --------------------------------------------------------
-    # SCENE CHECK
-    # --------------------------------------------------------
-
-    valid_scenes = []
-
-    log("")
-    log("=" * 70)
-    log("CHECKING GENERATED SCENES")
-    log("=" * 70)
-
-    for scene in scene_files:
-
-        if (
-            scene.exists()
-            and scene.stat().st_size > 5000
-        ):
-
-            valid_scenes.append(scene)
-
-            log(
-                scene.name
-                + " "
-                + f"{scene.stat().st_size:,}"
-                + " bytes"
-            )
-
-        else:
-
-            log(
-                "INVALID SCENE: "
-                + scene.name
-            )
-
-    if len(valid_scenes) < 2:
-
-        log(
-            "ERROR: Not enough valid scenes."
-        )
-
-        return 1
-
-    # --------------------------------------------------------
-    # FINAL ASSEMBLY
-    # --------------------------------------------------------
-
-    try:
-
-        assemble_final(
-            valid_scenes
-        )
-
-    except Exception as exc:
-
-        log("")
-        log("=" * 70)
-        log("FINAL ASSEMBLY FAILED")
-        log("=" * 70)
-        log(str(exc))
-
-        return 1
-
-    # --------------------------------------------------------
-    # FINAL VALIDATION
-    # --------------------------------------------------------
-
-    try:
-
-        validate_final_video()
-
-    except Exception as exc:
-
-        log("")
-        log("=" * 70)
-        log("VALIDATION FAILED")
-        log("=" * 70)
-        log(str(exc))
-
-        return 1
-
-    # --------------------------------------------------------
-    # REPORT
-    # --------------------------------------------------------
-
-    try:
-
-        write_report(records)
-
-    except Exception as exc:
-
-        log(
-            "REPORT WARNING: "
-            + str(exc)
-        )
-
-    # --------------------------------------------------------
-    # SUCCESS
-    # --------------------------------------------------------
-
-    real_photo_count = sum(
-        1
-        for record in records
-        if record.get("photo") is True
-    )
-
-    story_count = sum(
-        1
-        for record in records
-        if isinstance(
-            record.get("scene"),
-            int
-        )
-    )
-
-    log("")
-    log("=" * 70)
-    log("RIFT VALLEY WATCH VIDEO SUCCESSFUL")
-    log("=" * 70)
-
-    log(
-        "Created: "
-        + str(FINAL_VIDEO)
-    )
-
-    log(
-        "Size: "
-        + f"{FINAL_VIDEO.stat().st_size:,}"
-        + " bytes"
-    )
-
-    log(
-        "Stories rendered: "
-        + str(story_count)
-    )
-
-    log(
-        "Real photos used: "
-        + str(real_photo_count)
-    )
-
-    log(
-        "Scenes assembled: "
-        + str(len(valid_scenes))
-    )
-
-    log("=" * 70)
-
-    return 0
-
-
-# ============================================================
-# ENTRY POINT
-# ============================================================
-
-if __name__ == "__main__":
-
-    try:
-
-        sys.exit(
-            main()
-        )
-
-    except KeyboardInterrupt:
-
-        log("Process interrupted.")
-        sys.exit(1)
-
-    except Exception as exc:
-
-        log("")
-        log("=" * 70)
-        log("FATAL ERROR")
-        log("=" * 70)
-        log(str(exc))
-        log("=" * 70)
-
-        sys.exit(1)
+       
