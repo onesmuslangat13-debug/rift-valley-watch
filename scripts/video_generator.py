@@ -1,1425 +1,1663 @@
 import json
-import shutil
-import subprocess
-import sys
-from pathlib import Path
+import re
+import html
+import hashlib
+import urllib.request
+import urllib.parse
+import xml.etree.ElementTree as ET
 
-from PIL import Image, ImageDraw, ImageFont
-from gtts import gTTS
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
 
 
 # ============================================================
 # RIFT VALLEY WATCH
-# REAL-TIME REGIONAL BULLETIN VIDEO GENERATOR
+# REAL-TIME NEWS ENGINE + REAL PHOTO COLLECTION
 # ============================================================
 
 ROOT = Path(__file__).resolve().parent.parent
 
-STORY_FILE = ROOT / "data" / "story.json"
-SCRIPT_FILE = ROOT / "data" / "script.json"
-
-OUTPUT_DIR = ROOT / "output"
-SCENE_DIR = OUTPUT_DIR / "scenes"
-AUDIO_DIR = OUTPUT_DIR / "audio"
-
+DATA_DIR = ROOT / "data"
 ASSET_DIR = ROOT / "assets"
-MUSIC_FILE = ASSET_DIR / "music" / "news_bed.mp3"
+SOURCE_DIR = ASSET_DIR / "source"
 
-OUTPUT_FILE = OUTPUT_DIR / "rift_valley_watch.mp4"
-REPORT_FILE = ROOT / "data" / "visual_report.json"
+STORY_FILE = DATA_DIR / "story.json"
+SCRIPT_FILE = DATA_DIR / "script.json"
 
-WIDTH = 1080
-HEIGHT = 1920
-FPS = 30
+DATA_DIR.mkdir(
+    parents=True,
+    exist_ok=True,
+)
 
-BG = (8, 13, 23)
-PANEL = (19, 29, 45)
-WHITE = (245, 247, 250)
-MUTED = (170, 181, 196)
-RED = (218, 38, 52)
-BLUE = (42, 100, 205)
+SOURCE_DIR.mkdir(
+    parents=True,
+    exist_ok=True,
+)
 
 
 # ============================================================
-# BASIC HELPERS
+# SETTINGS
 # ============================================================
 
-def clean(value):
+MAX_STORIES = 10
+MIN_STORIES = 5
+
+TODAY_HOURS = 24
+RECENT_HOURS = 48
+
+USER_AGENT = (
+    "Mozilla/5.0 "
+    "(Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 "
+    "Chrome/153.0 Safari/537.36"
+)
+
+
+# ============================================================
+# RIFT VALLEY COUNTIES
+# ============================================================
+
+COUNTIES = {
+    "Bomet": [
+        "Bomet",
+        "Chepalungu",
+        "Sotik",
+        "Konoin",
+        "Kipkelion",
+        "Longisa",
+    ],
+    "Kericho": [
+        "Kericho",
+        "Ainamoi",
+        "Belgut",
+        "Bureti",
+        "Kipkelion",
+        "Litein",
+    ],
+    "Nakuru": [
+        "Nakuru",
+        "Naivasha",
+        "Gilgil",
+        "Molo",
+        "Njoro",
+        "Bahati",
+        "Subukia",
+        "Rongai",
+    ],
+    "Narok": [
+        "Narok",
+        "Kilgoris",
+        "Transmara",
+        "Suswa",
+        "Maasai Mara",
+    ],
+    "Nandi": [
+        "Nandi",
+        "Kapsabet",
+        "Aldai",
+        "Chesumei",
+        "Mosop",
+        "Emgwen",
+    ],
+    "Uasin Gishu": [
+        "Uasin Gishu",
+        "Eldoret",
+        "Turbo",
+        "Kesses",
+        "Soy",
+        "Moiben",
+    ],
+    "Elgeyo-Marakwet": [
+        "Elgeyo-Marakwet",
+        "Iten",
+        "Keiyo",
+        "Marakwet",
+        "Kabarnet",
+        "Kapsowar",
+    ],
+    "West Pokot": [
+        "West Pokot",
+        "Kapenguria",
+        "Kacheliba",
+        "Pokot",
+        "Sigor",
+    ],
+    "Trans Nzoia": [
+        "Trans Nzoia",
+        "Kitale",
+        "Endebess",
+        "Kwanza",
+        "Cherangany",
+        "Saboti",
+    ],
+    "Samburu": [
+        "Samburu",
+        "Maralal",
+        "Baragoi",
+        "Wamba",
+    ],
+    "Turkana": [
+        "Turkana",
+        "Lodwar",
+        "Kakuma",
+        "Lokichar",
+    ],
+    "Laikipia": [
+        "Laikipia",
+        "Nanyuki",
+        "Nyahururu",
+        "Rumuruti",
+    ],
+    "Kajiado": [
+        "Kajiado",
+        "Magadi",
+        "Loitokitok",
+        "Kitengela",
+        "Ngong",
+        "Isinya",
+    ],
+}
+
+
+# ============================================================
+# EXCLUSIONS
+# ============================================================
+
+EXCLUDED_TERMS = [
+    "rigathi gachagua",
+    "rigathi",
+    "gachagua",
+]
+
+
+# ============================================================
+# TOPICS
+# ============================================================
+
+TOPICS = {
+    "POLITICS": [
+        "politics",
+        "political",
+        "president",
+        "william ruto",
+        "ruto",
+        "governor",
+        "governors",
+        "senator",
+        "senators",
+        "mp ",
+        "member of parliament",
+        "uda",
+        "party",
+        "election",
+        "2027",
+        "campaign",
+        "rally",
+        "coalition",
+        "alliance",
+        "politician",
+        "politicians",
+        "parliament",
+        "assembly",
+        "cabinet",
+        "deputy president",
+    ],
+    "DEVELOPMENT": [
+        "development",
+        "project",
+        "construction",
+        "government",
+        "launch",
+        "launched",
+        "commissioned",
+        "funding",
+        "investment",
+        "hospital",
+        "school",
+        "water",
+        "electricity",
+    ],
+    "BUSINESS": [
+        "business",
+        "economy",
+        "economic",
+        "investment",
+        "investor",
+        "company",
+        "industry",
+        "factory",
+        "trade",
+        "market",
+        "jobs",
+        "employment",
+        "enterprise",
+    ],
+    "AGRICULTURE": [
+        "agriculture",
+        "farmer",
+        "farmers",
+        "tea",
+        "coffee",
+        "dairy",
+        "livestock",
+        "maize",
+        "fertilizer",
+        "crops",
+        "farming",
+        "milk",
+    ],
+    "INFRASTRUCTURE": [
+        "road",
+        "roads",
+        "highway",
+        "bridge",
+        "railway",
+        "airport",
+        "transport",
+        "infrastructure",
+        "drainage",
+    ],
+    "HEALTH": [
+        "health",
+        "hospital",
+        "doctor",
+        "doctors",
+        "nurse",
+        "nurses",
+        "clinic",
+        "medical",
+        "disease",
+        "patients",
+        "healthcare",
+    ],
+    "EDUCATION": [
+        "education",
+        "school",
+        "schools",
+        "university",
+        "students",
+        "teachers",
+        "teacher",
+        "college",
+        "exam",
+    ],
+    "SECURITY": [
+        "security",
+        "police",
+        "crime",
+        "arrest",
+        "arrests",
+        "robbery",
+        "accident",
+        "fire",
+        "missing",
+        "killed",
+        "death",
+        "attack",
+        "flood",
+        "disaster",
+    ],
+    "COMMUNITY": [
+        "community",
+        "residents",
+        "residents say",
+        "locals",
+        "county",
+        "public",
+        "citizens",
+    ],
+}
+
+
+# ============================================================
+# SEARCH QUERIES
+# ============================================================
+
+GENERAL_QUERIES = [
+    "Rift Valley Kenya today",
+    "Rift Valley Kenya latest news",
+    "Rift Valley politics Kenya today",
+    "Rift Valley development Kenya today",
+    "Rift Valley government Kenya today",
+    "Rift Valley business Kenya today",
+    "Rift Valley agriculture Kenya today",
+    "Rift Valley roads Kenya today",
+    "Rift Valley health Kenya today",
+    "Rift Valley security Kenya today",
+    "William Ruto Rift Valley today",
+    "Ruto South Rift today",
+    "Kericho politics today",
+    "Bomet politics today",
+    "Nakuru politics today",
+    "Narok politics today",
+    "Nandi politics today",
+    "Uasin Gishu politics today",
+    "Trans Nzoia politics today",
+]
+
+
+# ============================================================
+# HTTP
+# ============================================================
+
+def request_bytes(url, timeout=15):
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": USER_AGENT,
+            "Accept": "*/*",
+        },
+    )
+
+    with urllib.request.urlopen(
+        request,
+        timeout=timeout,
+    ) as response:
+
+        return response.read()
+
+
+def request_text(url, timeout=15):
+    data = request_bytes(
+        url,
+        timeout,
+    )
+
+    return data.decode(
+        "utf-8",
+        errors="ignore",
+    )
+
+
+# ============================================================
+# TEXT HELPERS
+# ============================================================
+
+def clean_text(value):
     if value is None:
         return ""
 
-    return " ".join(
+    value = html.unescape(
         str(value)
-        .replace("&amp;", "&")
-        .replace("&quot;", '"')
-        .replace("&#39;", "'")
-        .replace("&apos;", "'")
-        .split()
     )
 
-
-def run(cmd, allow_failure=False):
-    print("")
-    print("RUNNING:")
-    print(" ".join(str(x) for x in cmd))
-    print("")
-
-    result = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
+    value = re.sub(
+        r"<[^>]+>",
+        " ",
+        value,
     )
 
-    print(result.stdout)
-
-    if result.returncode != 0 and not allow_failure:
-        raise RuntimeError(
-            "Command failed with exit code "
-            + str(result.returncode)
-        )
-
-    return result
-
-
-def load_json(path):
-    if not path.exists():
-        return {}
-
-    try:
-        with open(
-            path,
-            "r",
-            encoding="utf-8",
-        ) as f:
-            return json.load(f)
-    except Exception as exc:
-        print("WARNING: Could not read", path)
-        print(exc)
-        return {}
-
-
-def get_font(size, bold=False):
-    if bold:
-        candidates = [
-            ROOT / "fonts" / "Inter-Bold.ttf",
-            ROOT / "fonts" / "Montserrat-Bold.ttf",
-            Path(
-                "/usr/share/fonts/truetype/dejavu/"
-                "DejaVuSans-Bold.ttf"
-            ),
-        ]
-    else:
-        candidates = [
-            ROOT / "fonts" / "Inter-Regular.ttf",
-            ROOT / "fonts" / "Montserrat-Regular.ttf",
-            Path(
-                "/usr/share/fonts/truetype/dejavu/"
-                "DejaVuSans.ttf"
-            ),
-        ]
-
-    for candidate in candidates:
-        if candidate.exists():
-            try:
-                return ImageFont.truetype(
-                    str(candidate),
-                    size,
-                )
-            except Exception:
-                pass
-
-    return ImageFont.load_default()
-
-
-def text_width(draw, text, fnt):
-    box = draw.textbbox(
-        (0, 0),
-        text,
-        font=fnt,
-    )
-    return box[2] - box[0]
-
-
-def wrap_text(draw, text, fnt, width):
-    text = clean(text)
-
-    if not text:
-        return []
-
-    words = text.split()
-    lines = []
-    current = ""
-
-    for word in words:
-        candidate = word
-
-        if current:
-            candidate = current + " " + word
-
-        if text_width(
-            draw,
-            candidate,
-            fnt,
-        ) <= width:
-            current = candidate
-        else:
-            if current:
-                lines.append(current)
-
-            current = word
-
-    if current:
-        lines.append(current)
-
-    return lines
-
-
-def draw_wrapped(
-    draw,
-    text,
-    x,
-    y,
-    fnt,
-    fill,
-    width,
-    spacing=12,
-):
-    lines = wrap_text(
-        draw,
-        text,
-        fnt,
-        width,
+    value = re.sub(
+        r"\s+",
+        " ",
+        value,
     )
 
-    bbox = fnt.getbbox("Ag")
+    return value.strip()
 
-    line_height = (
-        bbox[3]
-        - bbox[1]
-        + spacing
-    )
 
-    for line in lines:
-        draw.text(
-            (x, y),
-            line,
-            font=fnt,
-            fill=fill,
-        )
+def normalize(value):
+    return re.sub(
+        r"[^a-z0-9]+",
+        " ",
+        clean_text(value).lower(),
+    ).strip()
 
-        y += line_height
 
-    return y
+def contains_excluded(text):
+    value = normalize(text)
+
+    for term in EXCLUDED_TERMS:
+        if normalize(term) in value:
+            return True
+
+    return False
 
 
 # ============================================================
-# DIRECTORIES
+# COUNTY DETECTION
 # ============================================================
 
-def prepare():
-    OUTPUT_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+def detect_county(text):
+    value = normalize(text)
 
-    SCENE_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    # Specific counties first.
+    for county, places in COUNTIES.items():
 
-    AUDIO_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+        if normalize(county) in value:
+            return county
 
-    (ASSET_DIR / "music").mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+        for place in places:
+            if normalize(place) in value:
+                return county
 
-    for folder in [
-        SCENE_DIR,
-        AUDIO_DIR,
-    ]:
-        for item in folder.glob("*"):
-            if item.is_file():
-                try:
-                    item.unlink()
-                except Exception:
-                    pass
-
-    if OUTPUT_FILE.exists():
-        OUTPUT_FILE.unlink()
-
-    print("Output directories prepared.")
+    return ""
 
 
 # ============================================================
-# STORY LOADING
+# TOPIC DETECTION
 # ============================================================
 
-def get_stories(data):
-    stories = data.get(
-        "stories",
-        [],
+def detect_topic(text):
+    value = normalize(text)
+
+    scores = {}
+
+    for topic, keywords in TOPICS.items():
+
+        score = 0
+
+        for keyword in keywords:
+
+            key = normalize(keyword)
+
+            if key and key in value:
+                score += 1
+
+        scores[topic] = score
+
+    best = max(
+        scores,
+        key=scores.get,
     )
 
-    if isinstance(stories, list):
-        valid = []
+    if scores[best] == 0:
+        return "REGIONAL"
 
-        for story in stories:
-            if not isinstance(story, dict):
-                continue
+    return best
 
-            title = clean(
-                story.get(
-                    "title",
-                    "",
-                )
+
+# ============================================================
+# DATE PARSING
+# ============================================================
+
+def parse_date(value):
+    if not value:
+        return None
+
+    value = value.strip()
+
+    formats = [
+        "%a, %d %b %Y %H:%M:%S %z",
+        "%a, %d %b %Y %H:%M:%S GMT",
+        "%a, %d %b %Y %H:%M GMT",
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%SZ",
+    ]
+
+    for fmt in formats:
+
+        try:
+
+            result = datetime.strptime(
+                value,
+                fmt,
             )
 
-            if title:
-                valid.append(story)
+            if result.tzinfo is None:
+                result = result.replace(
+                    tzinfo=timezone.utc
+                )
 
-        if valid:
-            return valid[:10]
+            return result.astimezone(
+                timezone.utc
+            )
 
-    title = clean(
-        data.get(
+        except Exception:
+            pass
+
+    return None
+
+
+# ============================================================
+# GOOGLE NEWS RSS
+# ============================================================
+
+def google_news_url(query):
+    encoded = urllib.parse.quote(
+        query
+    )
+
+    return (
+        "https://news.google.com/rss/search?"
+        f"q={encoded}&"
+        "hl=en-KE&"
+        "gl=KE&"
+        "ceid=KE:en"
+    )
+
+
+def parse_google_news(xml_text):
+    stories = []
+
+    try:
+        root = ET.fromstring(
+            xml_text
+        )
+    except Exception as exc:
+        print(
+            "RSS parse error:",
+            exc,
+        )
+        return stories
+
+    channel = root.find("channel")
+
+    if channel is None:
+        return stories
+
+    for item in channel.findall("item"):
+
+        title = clean_text(
+            item.findtext(
+                "title",
+                "",
+            )
+        )
+
+        link = clean_text(
+            item.findtext(
+                "link",
+                "",
+            )
+        )
+
+        description = clean_text(
+            item.findtext(
+                "description",
+                "",
+            )
+        )
+
+        published_raw = clean_text(
+            item.findtext(
+                "pubDate",
+                "",
+            )
+        )
+
+        published = parse_date(
+            published_raw
+        )
+
+        source_node = item.find(
+            "{http://search.yahoo.com/mrss/}source"
+        )
+
+        source = ""
+
+        if source_node is not None:
+            source = clean_text(
+                source_node.text
+            )
+
+        if not source:
+            source = "News source"
+
+        if not title or not link:
+            continue
+
+        stories.append(
+            {
+                "title": title,
+                "url": link,
+                "description": description,
+                "source": source,
+                "published": published,
+            }
+        )
+
+    return stories
+
+
+# ============================================================
+# IMAGE EXTRACTION
+# ============================================================
+
+def extract_image_url(article_url):
+    try:
+
+        request = urllib.request.Request(
+            article_url,
+            headers={
+                "User-Agent": USER_AGENT,
+                "Accept": "text/html",
+            },
+        )
+
+        with urllib.request.urlopen(
+            request,
+            timeout=15,
+        ) as response:
+
+            content_type = response.headers.get(
+                "Content-Type",
+                "",
+            )
+
+            if "text/html" not in content_type:
+                return ""
+
+            page = response.read(
+                800000
+            ).decode(
+                "utf-8",
+                errors="ignore",
+            )
+
+    except Exception as exc:
+
+        print(
+            "Image page fetch failed:",
+            exc,
+        )
+
+        return ""
+
+    # --------------------------------------------------------
+    # OpenGraph
+    # --------------------------------------------------------
+
+    patterns = [
+        r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
+        r'<meta[^>]+property=["\']og:image:url["\'][^>]+content=["\']([^"\']+)',
+        r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:image["\']',
+    ]
+
+    for pattern in patterns:
+
+        match = re.search(
+            pattern,
+            page,
+            flags=re.I,
+        )
+
+        if match:
+
+            image_url = html.unescape(
+                match.group(1)
+            ).strip()
+
+            if image_url:
+
+                return urllib.parse.urljoin(
+                    article_url,
+                    image_url,
+                )
+
+    # --------------------------------------------------------
+    # JSON-LD image
+    # --------------------------------------------------------
+
+    jsonld_patterns = [
+        r'"image"\s*:\s*"([^"]+)"',
+        r'"thumbnailUrl"\s*:\s*"([^"]+)"',
+    ]
+
+    for pattern in jsonld_patterns:
+
+        match = re.search(
+            pattern,
+            page,
+            flags=re.I,
+        )
+
+        if match:
+
+            image_url = html.unescape(
+                match.group(1)
+            ).strip()
+
+            if image_url.startswith(
+                "http"
+            ):
+
+                return image_url
+
+    return ""
+
+
+# ============================================================
+# DOWNLOAD PHOTO
+# ============================================================
+
+def download_image(image_url, story_id):
+    if not image_url:
+        return ""
+
+    try:
+
+        request = urllib.request.Request(
+            image_url,
+            headers={
+                "User-Agent": USER_AGENT,
+                "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            },
+        )
+
+        with urllib.request.urlopen(
+            request,
+            timeout=20,
+        ) as response:
+
+            data = response.read(
+                5000000
+            )
+
+            content_type = response.headers.get(
+                "Content-Type",
+                "",
+            ).lower()
+
+        if len(data) < 5000:
+            return ""
+
+        extension = ".jpg"
+
+        if "png" in content_type:
+            extension = ".png"
+
+        elif "webp" in content_type:
+            extension = ".webp"
+
+        filename = (
+            "story_"
+            + story_id
+            + extension
+        )
+
+        output = (
+            SOURCE_DIR
+            / filename
+        )
+
+        with open(
+            output,
+            "wb",
+        ) as f:
+
+            f.write(data)
+
+        print(
+            "PHOTO SAVED:",
+            output,
+            f"({len(data) / 1024:.1f} KB)",
+        )
+
+        return str(
+            output.relative_to(ROOT)
+        ).replace(
+            "\\",
+            "/",
+        )
+
+    except Exception as exc:
+
+        print(
+            "Photo download failed:",
+            exc,
+        )
+
+        return ""
+
+
+# ============================================================
+# SOURCE PHOTO
+# ============================================================
+
+def get_story_photo(story):
+    url = story.get(
+        "url",
+        "",
+    )
+
+    if not url:
+        return ""
+
+    image_url = extract_image_url(
+        url
+    )
+
+    if not image_url:
+        print(
+            "No article photo found:"
+        )
+        print(
+            story.get(
+                "title",
+                "",
+            )
+        )
+
+        return ""
+
+    story_id = hashlib.sha1(
+        (
+            story.get(
+                "title",
+                "",
+            )
+            + url
+        ).encode(
+            "utf-8"
+        )
+    ).hexdigest()[:12]
+
+    return download_image(
+        image_url,
+        story_id,
+    )
+
+
+# ============================================================
+# STORY SCORING
+# ============================================================
+
+def score_story(story, now):
+    title = story.get(
+        "title",
+        "",
+    )
+
+    description = story.get(
+        "description",
+        "",
+    )
+
+    source = story.get(
+        "source",
+        "",
+    )
+
+    combined = (
+        title
+        + " "
+        + description
+    )
+
+    county = detect_county(
+        combined
+    )
+
+    topic = detect_topic(
+        combined
+    )
+
+    published = story.get(
+        "published"
+    )
+
+    score = 0
+
+    # --------------------------------------------------------
+    # County relevance
+    # --------------------------------------------------------
+
+    if county:
+        score += 35
+
+    # --------------------------------------------------------
+    # Freshness
+    # --------------------------------------------------------
+
+    if published:
+
+        age = (
+            now - published
+        ).total_seconds() / 3600
+
+        if age <= 3:
+            score += 60
+
+        elif age <= 6:
+            score += 50
+
+        elif age <= 12:
+            score += 40
+
+        elif age <= 24:
+            score += 30
+
+        elif age <= 48:
+            score += 15
+
+        else:
+            score -= 30
+
+    # --------------------------------------------------------
+    # Topic
+    # --------------------------------------------------------
+
+    topic_weights = {
+        "POLITICS": 35,
+        "DEVELOPMENT": 28,
+        "BUSINESS": 24,
+        "INFRASTRUCTURE": 24,
+        "AGRICULTURE": 20,
+        "HEALTH": 18,
+        "SECURITY": 18,
+        "EDUCATION": 17,
+        "COMMUNITY": 12,
+        "REGIONAL": 5,
+    }
+
+    score += topic_weights.get(
+        topic,
+        5,
+    )
+
+    # --------------------------------------------------------
+    # Political priority
+    # --------------------------------------------------------
+
+    normalized = normalize(
+        combined
+    )
+
+    political_terms = [
+        "william ruto",
+        "president ruto",
+        "ruto",
+        "governor",
+        "senator",
+        "member of parliament",
+        "uda",
+        "2027",
+        "election",
+        "party",
+        "rally",
+    ]
+
+    political_hits = 0
+
+    for term in political_terms:
+
+        if normalize(term) in normalized:
+            political_hits += 1
+
+    score += min(
+        political_hits * 8,
+        32,
+    )
+
+    # --------------------------------------------------------
+    # Official / major media sources
+    # --------------------------------------------------------
+
+    source_lower = normalize(
+        source
+    )
+
+    trusted_sources = [
+        "nation",
+        "standard",
+        "star",
+        "citizen",
+        "kbc",
+        "capital fm",
+        "people daily",
+        "ntv",
+        "business daily",
+        "the east african",
+        "reuters",
+        "associated press",
+    ]
+
+    for trusted in trusted_sources:
+
+        if normalize(trusted) in source_lower:
+            score += 12
+            break
+
+    # --------------------------------------------------------
+    # Photo availability
+    # --------------------------------------------------------
+
+    if story.get(
+        "image_path"
+    ):
+        score += 15
+
+    return score
+
+
+# ============================================================
+# DEDUPLICATION
+# ============================================================
+
+def story_key(story):
+    title = normalize(
+        story.get(
             "title",
             "",
         )
     )
 
-    if title:
-        return [
-            {
-                "title": title,
-                "county": clean(
-                    data.get(
-                        "county",
-                        "Rift Valley",
+    title = re.sub(
+        r"\b(today|latest|update)\b",
+        "",
+        title,
+    )
+
+    return title[:180]
+
+
+def deduplicate(stories):
+    result = []
+    seen = set()
+
+    for story in stories:
+
+        key = story_key(
+            story
+        )
+
+        if not key:
+            continue
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        result.append(story)
+
+    return result
+
+
+# ============================================================
+# BUILD SEARCH LIST
+# ============================================================
+
+def build_queries():
+    queries = list(
+        GENERAL_QUERIES
+    )
+
+    for county in COUNTIES:
+
+        queries.extend(
+            [
+                f"{county} Kenya today",
+                f"{county} politics today",
+                f"{county} development today",
+                f"{county} business today",
+                f"{county} government today",
+            ]
+        )
+
+    return queries
+
+
+# ============================================================
+# COLLECT STORIES
+# ============================================================
+
+def collect_news():
+    print("")
+    print("=" * 60)
+    print("RIFT VALLEY WATCH")
+    print("REAL-TIME NEWS COLLECTION")
+    print("=" * 60)
+
+    now = datetime.now(
+        timezone.utc
+    )
+
+    all_stories = []
+
+    queries = build_queries()
+
+    print(
+        "Search queries:",
+        len(queries),
+    )
+
+    for number, query in enumerate(
+        queries,
+        1,
+    ):
+
+        print("")
+        print(
+            f"[{number}/{len(queries)}]",
+            query,
+        )
+
+        try:
+
+            feed_url = google_news_url(
+                query
+            )
+
+            xml = request_text(
+                feed_url,
+                timeout=15,
+            )
+
+            results = parse_google_news(
+                xml
+            )
+
+            print(
+                "Results:",
+                len(results),
+            )
+
+            for story in results:
+
+                combined = (
+                    story.get(
+                        "title",
+                        "",
                     )
-                ),
-                "category": clean(
-                    data.get(
-                        "category",
-                        "NEWS",
-                    )
-                ),
-                "description": clean(
-                    data.get(
+                    + " "
+                    + story.get(
                         "description",
                         "",
                     )
-                ),
-                "source": clean(
-                    data.get(
-                        "source",
-                        "",
-                    )
-                ),
-            }
-        ]
+                )
 
-    return []
+                # Hard exclusion
+                if contains_excluded(
+                    combined
+                ):
+                    continue
 
+                county = detect_county(
+                    combined
+                )
 
-# ============================================================
-# VISUAL FOUNDATION
-# ============================================================
+                # We only want Rift Valley relevance.
+                if not county:
+                    continue
 
-def make_background():
-    image = Image.new(
-        "RGB",
-        (WIDTH, HEIGHT),
-        BG,
-    )
+                published = story.get(
+                    "published"
+                )
 
-    draw = ImageDraw.Draw(image)
+                # Reject stories older than 48 hours.
+                if published:
 
-    for y in range(HEIGHT):
-        ratio = y / HEIGHT
+                    age = (
+                        now - published
+                    ).total_seconds() / 3600
 
-        r = int(
-            8 + 12 * ratio
-        )
+                    if age > RECENT_HOURS:
+                        continue
 
-        g = int(
-            13 + 13 * ratio
-        )
+                story["county"] = county
 
-        b = int(
-            23 + 20 * ratio
-        )
+                story["category"] = detect_topic(
+                    combined
+                )
 
-        draw.line(
-            (0, y, WIDTH, y),
-            fill=(r, g, b),
-        )
+                all_stories.append(
+                    story
+                )
 
-    return image
+        except Exception as exc:
 
+            print(
+                "Search failed:",
+                exc,
+            )
 
-def draw_header(draw, label):
-    draw.rectangle(
-        (0, 0, WIDTH, 16),
-        fill=RED,
-    )
-
-    logo = get_font(
-        46,
-        True,
-    )
-
-    small = get_font(
-        23,
-        True,
-    )
-
-    draw.text(
-        (55, 48),
-        "RIFT VALLEY",
-        font=logo,
-        fill=WHITE,
-    )
-
-    draw.text(
-        (55, 105),
-        "WATCH",
-        font=logo,
-        fill=RED,
-    )
-
-    draw.text(
-        (55, 172),
-        clean(label).upper(),
-        font=small,
-        fill=MUTED,
-    )
-
-    draw.ellipse(
-        (875, 65, 902, 92),
-        fill=RED,
-    )
-
-    draw.text(
-        (918, 58),
-        "LIVE",
-        font=small,
-        fill=WHITE,
-    )
-
-
-def draw_footer(draw, source=""):
-    y = HEIGHT - 145
-
-    draw.rectangle(
-        (45, y, WIDTH - 45, HEIGHT - 45),
-        fill=(12, 19, 31),
-    )
-
-    fnt = get_font(
-        21,
-        False,
-    )
-
-    draw.text(
-        (70, y + 17),
-        "RIFT VALLEY WATCH",
-        font=fnt,
-        fill=WHITE,
-    )
-
-    if source:
-        draw.text(
-            (70, y + 53),
-            "Source: " + clean(source)[:72],
-            font=fnt,
-            fill=MUTED,
-        )
+    return all_stories
 
 
 # ============================================================
-# SCENE IMAGES
+# PREPARE STORIES
 # ============================================================
 
-def opener():
-    image = make_background()
-    draw = ImageDraw.Draw(image)
-
-    draw_header(
-        draw,
-        "LIVE REGIONAL BULLETIN",
+def prepare_stories(stories):
+    now = datetime.now(
+        timezone.utc
     )
 
-    draw.rounded_rectangle(
-        (50, 470, WIDTH - 50, 1170),
-        radius=32,
-        fill=PANEL,
+    stories = deduplicate(
+        stories
     )
 
-    draw.text(
-        (90, 545),
-        "LATEST",
-        font=get_font(
-            30,
-            True,
+    print("")
+    print(
+        "Unique stories:",
+        len(stories),
+    )
+
+    for story in stories:
+
+        story["score"] = score_story(
+            story,
+            now,
+        )
+
+    stories.sort(
+        key=lambda item: item.get(
+            "score",
+            0,
         ),
-        fill=RED,
+        reverse=True,
     )
 
-    draw_wrapped(
-        draw,
-        "RIFT VALLEY WATCH",
-        90,
-        625,
-        get_font(
-            76,
-            True,
-        ),
-        WHITE,
-        850,
-        15,
-    )
+    # --------------------------------------------------------
+    # County diversity
+    # --------------------------------------------------------
 
-    draw_wrapped(
-        draw,
-        "Fresh developments from across "
-        "Kenya's Rift Valley.",
-        90,
-        850,
-        get_font(
-            34,
-            False,
-        ),
-        MUTED,
-        820,
-        16,
-    )
+    selected = []
+    used_counties = set()
 
-    draw.rectangle(
-        (0, 1300, WIDTH, 1385),
-        fill=RED,
-    )
+    # First pass: one story per county.
+    for story in stories:
 
-    draw.text(
-        (55, 1322),
-        "POLITICS  •  BUSINESS  •  DEVELOPMENT",
-        font=get_font(
-            27,
-            True,
-        ),
-        fill=WHITE,
-    )
+        county = story.get(
+            "county",
+            "",
+        )
 
-    draw_footer(
-        draw,
-        "Live regional news feeds",
-    )
+        if county in used_counties:
+            continue
 
-    return image
+        selected.append(
+            story
+        )
+
+        used_counties.add(
+            county
+        )
+
+        if len(selected) >= MAX_STORIES:
+            break
+
+    # Second pass: fill remaining slots.
+    if len(selected) < MAX_STORIES:
+
+        selected_keys = {
+            story_key(story)
+            for story in selected
+        }
+
+        for story in stories:
+
+            if story_key(
+                story
+            ) in selected_keys:
+                continue
+
+            selected.append(
+                story
+            )
+
+            if len(selected) >= MAX_STORIES:
+                break
+
+    return selected
 
 
-def coverage(counties, date):
-    image = make_background()
-    draw = ImageDraw.Draw(image)
+# ============================================================
+# DOWNLOAD PHOTOS
+# ============================================================
 
-    draw_header(
-        draw,
-        "REGIONAL COVERAGE",
-    )
+def attach_photos(stories):
+    print("")
+    print("=" * 60)
+    print("COLLECTING REAL ARTICLE PHOTOS")
+    print("=" * 60)
 
-    draw.text(
-        (60, 310),
-        "TODAY'S RIFT VALLEY",
-        font=get_font(
-            52,
-            True,
-        ),
-        fill=WHITE,
-    )
+    successful = 0
 
-    draw.text(
-        (60, 385),
-        clean(date),
-        font=get_font(
-            29,
-            False,
-        ),
-        fill=MUTED,
-    )
-
-    for i, county in enumerate(
-        counties[:12]
+    for number, story in enumerate(
+        stories,
+        1,
     ):
-        row = i // 2
-        col = i % 2
 
-        x = 55 + col * 490
-        y = 490 + row * 165
-
-        draw.rounded_rectangle(
-            (
-                x,
-                y,
-                x + 455,
-                y + 125,
-            ),
-            radius=18,
-            fill=PANEL,
+        print("")
+        print(
+            f"[PHOTO {number}/{len(stories)}]"
         )
 
-        draw.ellipse(
-            (
-                x + 25,
-                y + 43,
-                x + 58,
-                y + 76,
-            ),
-            fill=RED,
+        print(
+            story.get(
+                "title",
+                "",
+            )
         )
 
-        draw.text(
-            (x + 78, y + 27),
-            clean(county).upper(),
-            font=get_font(
-                26,
-                True,
-            ),
-            fill=WHITE,
+        image_path = get_story_photo(
+            story
         )
 
-        draw.text(
-            (x + 78, y + 70),
-            "FRESH UPDATE",
-            font=get_font(
-                20,
-                False,
-            ),
-            fill=MUTED,
+        story["image_path"] = (
+            image_path
         )
 
-    draw_footer(
-        draw,
-        "Regional coverage",
+        if image_path:
+            successful += 1
+
+    print("")
+    print(
+        "Photos collected:",
+        successful,
+        "/",
+        len(stories),
     )
 
-    return image
+    return stories
 
 
-def story_card(story, index, total):
-    image = make_background()
-    draw = ImageDraw.Draw(image)
+# ============================================================
+# NARRATION
+# ============================================================
 
-    county = clean(
+def make_narration(story):
+    county = clean_text(
         story.get(
             "county",
             "Rift Valley",
         )
     )
 
-    category = clean(
+    category = clean_text(
         story.get(
             "category",
             "NEWS",
         )
     )
 
-    title = clean(
+    title = clean_text(
         story.get(
             "title",
-            "Regional Update",
+            "",
         )
     )
 
-    description = clean(
+    description = clean_text(
         story.get(
             "description",
             "",
         )
     )
 
-    source = clean(
-        story.get(
-            "source",
-            "",
-        )
-    )
+    if description:
+        description = description[:350]
 
-    draw_header(
-        draw,
-        category,
-    )
-
-    draw.text(
-        (870, 180),
-        f"{index:02d}/{total:02d}",
-        font=get_font(
-            23,
-            True,
-        ),
-        fill=MUTED,
-    )
-
-    # DATA/VISUAL PANEL
-    draw.rounded_rectangle(
-        (45, 300, WIDTH - 45, 700),
-        radius=28,
-        fill=(22, 34, 53),
-    )
-
-    # grid
-    for x in range(80, 1030, 120):
-        draw.line(
-            (x, 325, x, 675),
-            fill=(40, 57, 80),
-            width=1,
-        )
-
-    for y in range(350, 680, 75):
-        draw.line(
-            (65, y, 1015, y),
-            fill=(40, 57, 80),
-            width=1,
-        )
-
-    draw.text(
-        (85, 365),
-        "REGIONAL UPDATE",
-        font=get_font(
-            24,
-            True,
-        ),
-        fill=RED,
-    )
-
-    draw.text(
-        (85, 425),
-        county.upper(),
-        font=get_font(
-            46,
-            True,
-        ),
-        fill=WHITE,
-    )
-
-    draw.text(
-        (85, 500),
-        category.upper(),
-        font=get_font(
-            27,
-            True,
-        ),
-        fill=MUTED,
-    )
-
-    draw.text(
-        (870, 410),
-        "LIVE",
-        font=get_font(
-            29,
-            True,
-        ),
-        fill=RED,
-    )
-
-    # HEADLINE PANEL
-    draw.rounded_rectangle(
-        (45, 755, WIDTH - 45, HEIGHT - 205),
-        radius=30,
-        fill=PANEL,
-    )
-
-    draw.text(
-        (85, 815),
-        "HEADLINE",
-        font=get_font(
-            24,
-            True,
-        ),
-        fill=RED,
-    )
-
-    title_y = draw_wrapped(
-        draw,
-        title,
-        85,
-        875,
-        get_font(
-            51,
-            True,
-        ),
-        WHITE,
-        850,
-        14,
-    )
-
-    body_y = max(
-        title_y + 45,
-        1190,
+    text = (
+        f"{county}. "
+        f"{category}. "
+        f"{title}."
     )
 
     if description:
-        draw_wrapped(
-            draw,
-            description[:480],
-            85,
-            body_y,
-            get_font(
-                29,
-                False,
-            ),
-            MUTED,
-            850,
-            14,
+        text += (
+            " "
+            + description
+            + "."
         )
 
-    draw_footer(
-        draw,
-        source,
-    )
-
-    return image
-
-
-def empty_card():
-    image = make_background()
-    draw = ImageDraw.Draw(image)
-
-    draw_header(
-        draw,
-        "LIVE REGIONAL UPDATE",
-    )
-
-    draw.text(
-        (70, 620),
-        "NO FRESH UPDATE",
-        font=get_font(
-            58,
-            True,
-        ),
-        fill=WHITE,
-    )
-
-    draw_wrapped(
-        draw,
-        "No qualifying regional stories "
-        "were retrieved during this automated run.",
-        70,
-        750,
-        get_font(
-            32,
-            False,
-        ),
-        MUTED,
-        850,
-        15,
-    )
-
-    draw_footer(
-        draw,
-        "Live news feeds",
-    )
-
-    return image
-
-
-def outro():
-    image = make_background()
-    draw = ImageDraw.Draw(image)
-
-    draw_header(
-        draw,
-        "END OF BULLETIN",
-    )
-
-    draw.text(
-        (70, 650),
-        "RIFT VALLEY",
-        font=get_font(
-            64,
-            True,
-        ),
-        fill=WHITE,
-    )
-
-    draw.text(
-        (70, 735),
-        "WATCH",
-        font=get_font(
-            64,
-            True,
-        ),
-        fill=RED,
-    )
-
-    draw_wrapped(
-        draw,
-        "Fresh regional developments. "
-        "Follow Rift Valley Watch.",
-        70,
-        900,
-        get_font(
-            34,
-            False,
-        ),
-        MUTED,
-        830,
-        15,
-    )
-
-    draw.rectangle(
-        (70, 1090, 850, 1098),
-        fill=RED,
-    )
-
-    draw_footer(
-        draw,
-        "Rift Valley Watch",
-    )
-
-    return image
+    return text
 
 
 # ============================================================
-# AUDIO
+# DATE DISPLAY
 # ============================================================
 
-def create_voice(text, path):
-    text = clean(text)
-
-    if not text:
-        return False
-
-    try:
-        print("Creating narration...")
-
-        tts = gTTS(
-            text=text,
-            lang="en",
-            slow=False,
-        )
-
-        tts.save(
-            str(path)
-        )
-
-        if path.exists() and path.stat().st_size > 1000:
-            print(
-                "Narration created:",
-                path,
-            )
-            return True
-
-    except Exception as exc:
-        print(
-            "WARNING: Narration unavailable:"
-        )
-        print(exc)
-
-    return False
-
-
-def get_duration(path):
-    result = run(
-        [
-            "ffprobe",
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            str(path),
-        ],
-        allow_failure=True,
+def kenya_date():
+    now = datetime.now(
+        timezone.utc
     )
 
-    try:
-        return float(
-            result.stdout.strip()
-        )
-    except Exception:
-        return 5.0
+    kenya = now + timedelta(
+        hours=3
+    )
+
+    return kenya.strftime(
+        "%A, %d %B %Y"
+    )
+
+
+def iso_now():
+    return datetime.now(
+        timezone.utc
+    ).isoformat()
 
 
 # ============================================================
-# RENDER ONE SCENE
+# SAVE STORY.JSON
 # ============================================================
 
-def render_scene(image, narration, number):
-    png = (
-        SCENE_DIR
-        / f"scene_{number:02d}.png"
-    )
-
-    silent = (
-        SCENE_DIR
-        / f"scene_{number:02d}_silent.mp4"
-    )
-
-    final = (
-        SCENE_DIR
-        / f"scene_{number:02d}.mp4"
-    )
-
-    audio = (
-        AUDIO_DIR
-        / f"scene_{number:02d}.mp3"
-    )
-
-    print("")
-    print("=" * 50)
-    print(
-        f"RENDERING SCENE {number}"
-    )
-    print("=" * 50)
-
-    image.save(
-        str(png),
-        format="PNG",
-    )
-
-    # --------------------------------------------------------
-    # Try narration.
-    # Failure MUST NOT stop video creation.
-    # --------------------------------------------------------
-
-    has_audio = create_voice(
-        narration,
-        audio,
-    )
-
-    length = 5.0
-
-    if has_audio:
-        length = get_duration(
-            audio
-        ) + 0.7
-
-        length = max(
-            4.0,
-            min(
-                length,
-                12.0,
-            ),
-        )
-
-    print(
-        "Scene duration:",
-        length,
-    )
-
-    # --------------------------------------------------------
-    # Create video-only scene
-    # --------------------------------------------------------
-
-    run(
-        [
-            "ffmpeg",
-            "-y",
-            "-loop",
-            "1",
-            "-i",
-            str(png),
-            "-t",
-            f"{length:.2f}",
-            "-r",
-            str(FPS),
-            "-vf",
-            (
-                f"scale={WIDTH}:{HEIGHT}:"
-                "force_original_aspect_ratio=decrease,"
-                f"pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2"
-            ),
-            "-c:v",
-            "libx264",
-            "-preset",
-            "ultrafast",
-            "-crf",
-            "23",
-            "-pix_fmt",
-            "yuv420p",
-            "-an",
-            str(silent),
-        ]
-    )
-
-    if not silent.exists():
-        raise RuntimeError(
-            f"Scene {number} video was not created."
-        )
-
-    # --------------------------------------------------------
-    # Add narration
-    # --------------------------------------------------------
-
-    if has_audio:
-
-        run(
-            [
-                "ffmpeg",
-                "-y",
-                "-i",
-                str(silent),
-                "-i",
-                str(audio),
-                "-map",
-                "0:v:0",
-                "-map",
-                "1:a:0",
-                "-c:v",
-                "copy",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "128k",
-                "-shortest",
-                "-movflags",
-                "+faststart",
-                str(final),
-            ],
-            allow_failure=True,
-        )
-
-    # --------------------------------------------------------
-    # If audio rendering failed, use silent scene.
-    # --------------------------------------------------------
-
-    if not final.exists():
-        shutil.copy2(
-            silent,
-            final,
-        )
-
-        print(
-            "Narration unavailable; "
-            "using video-only scene."
-        )
-
-    if not final.exists():
-        raise RuntimeError(
-            f"Scene {number} final MP4 was not created."
-        )
-
-    print(
-        "SCENE CREATED:",
-        final,
-    )
-
-    print(
-        "SIZE:",
-        final.stat().st_size,
-        "bytes",
-    )
-
-    return final
-
-
-# ============================================================
-# CONCATENATION
-# ============================================================
-
-def concatenate(scene_files):
-    print("")
-    print("=" * 50)
-    print("ASSEMBLING FINAL MP4")
-    print("=" * 50)
-
-    if not scene_files:
-        raise RuntimeError(
-            "No scene MP4 files exist."
-        )
-
-    concat_file = (
-        OUTPUT_DIR
-        / "concat.txt"
-    )
-
-    with open(
-        concat_file,
-        "w",
-        encoding="utf-8",
-    ) as f:
-
-        for scene in scene_files:
-            f.write(
-                "file '"
-                + str(
-                    scene.resolve()
-                )
-                .replace(
-                    "'",
-                    "'\\''",
-                )
-                + "'\n"
-            )
-
-    print(
-        "Scenes to concatenate:",
-        len(scene_files),
-    )
-
-    for scene in scene_files:
-        print(
-            scene,
-            scene.stat().st_size,
-            "bytes",
-        )
-
-    # --------------------------------------------------------
-    # First attempt: stream copy
-    # --------------------------------------------------------
-
-    temp = (
-        OUTPUT_DIR
-        / "final_temp.mp4"
-    )
-
-    result = run(
-        [
-            "ffmpeg",
-            "-y",
-            "-f",
-            "concat",
-            "-safe",
-            "0",
-            "-i",
-            str(concat_file),
-            "-c",
-            "copy",
-            "-movflags",
-            "+faststart",
-            str(temp),
-        ],
-        allow_failure=True,
-    )
-
-    # --------------------------------------------------------
-    # Second attempt: re-encode if stream copy fails.
-    # --------------------------------------------------------
-
-    if not temp.exists() or temp.stat().st_size < 10000:
-
-        print(
-            "Stream-copy concatenation failed."
-        )
-
-        if temp.exists():
-            temp.unlink()
-
-        run(
-            [
-                "ffmpeg",
-                "-y",
-                "-f",
-                "concat",
-                "-safe",
-                "0",
-                "-i",
-                str(concat_file),
-                "-vf",
-                (
-                    f"scale={WIDTH}:{HEIGHT}"
-                ),
-                "-r",
-                str(FPS),
-                "-c:v",
-                "libx264",
-                "-preset",
-                "veryfast",
-                "-crf",
-                "22",
-                "-pix_fmt",
-                "yuv420p",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "128k",
-                "-movflags",
-                "+faststart",
-                str(temp),
-            ]
-        )
-
-    if not temp.exists():
-        raise RuntimeError(
-            "FFmpeg failed to create final_temp.mp4."
-        )
-
-    if temp.stat().st_size < 10000:
-        raise RuntimeError(
-            "final_temp.mp4 is invalid or too small."
-        )
-
-    if OUTPUT_FILE.exists():
-        OUTPUT_FILE.unlink()
-
-    temp.replace(
-        OUTPUT_FILE
-    )
-
-    print(
-        "FINAL MP4 CREATED:",
-        OUTPUT_FILE,
-    )
-
-    print(
-        "FINAL SIZE:",
-        OUTPUT_FILE.stat().st_size,
-        "bytes",
-    )
-
-
-# ============================================================
-# VALIDATION
-# ============================================================
-
-def validate():
-    print("")
-    print("=" * 50)
-    print("VALIDATING FINAL MP4")
-    print("=" * 50)
-
-    if not OUTPUT_FILE.exists():
-        raise RuntimeError(
-            "Final MP4 does not exist."
-        )
-
-    if OUTPUT_FILE.stat().st_size < 10000:
-        raise RuntimeError(
-            "Final MP4 is too small."
-        )
-
-    result = run(
-        [
-            "ffprobe",
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration,size",
-            "-show_entries",
-            "stream=codec_type,codec_name,width,height",
-            "-of",
-            "json",
-            str(OUTPUT_FILE),
-        ],
-        allow_failure=False,
-    )
-
-    info = json.loads(
-        result.stdout
-    )
-
-    streams = info.get(
-        "streams",
-        [],
-    )
-
-    video = None
-    audio = None
-
-    for stream in streams:
-        if stream.get(
-            "codec_type"
-        ) == "video":
-            video = stream
-
-        if stream.get(
-            "codec_type"
-        ) == "audio":
-            audio = stream
-
-    if video is None:
-        raise RuntimeError(
-            "Final MP4 contains no video stream."
-        )
-
-    print(
-        "Video:",
-        video.get("width"),
-        "x",
-        video.get("height"),
-    )
-
-    print(
-        "Video codec:",
-        video.get("codec_name"),
-    )
-
-    if audio:
-        print(
-            "Audio codec:",
-            audio.get("codec_name"),
-        )
-    else:
-        print(
-            "WARNING: Final video has no audio."
-        )
-
-    if video.get("width") != WIDTH:
-        raise RuntimeError(
-            "Final video width is not 1080."
-        )
-
-    if video.get("height") != HEIGHT:
-        raise RuntimeError(
-            "Final video height is not 1920."
-        )
-
-    print("")
-    print(
-        "FINAL MP4 VALIDATION PASSED"
-    )
-    print(
-        "FILE:",
-        OUTPUT_FILE,
-    )
-    print(
-        "SIZE:",
-        f"{OUTPUT_FILE.stat().st_size / 1024 / 1024:.2f} MB",
-    )
-
-
-# ============================================================
-# REPORT
-# ============================================================
-
-def save_report(stories, scenes):
-    counties = []
+def save_story_json(stories):
+    output_stories = []
 
     for story in stories:
-        county = clean(
-            story.get(
-                "county",
-                "",
-            )
+
+        published = story.get(
+            "published"
         )
 
-        if county and county not in counties:
-            counties.append(county)
+        published_text = ""
 
-    report = {
-        "generator": "Rift Valley Watch V3",
-        "output": "output/rift_valley_watch.mp4",
-        "resolution": "1080x1920",
-        "fps": FPS,
-        "stories": len(stories),
-        "scenes": len(scenes),
-        "counties": counties,
-        "music_file_available": MUSIC_FILE.exists(),
+        if published:
+            published_text = published.isoformat()
+
+        output_stories.append(
+            {
+                "title": clean_text(
+                    story.get(
+                        "title",
+                        "",
+                    )
+                ),
+                "county": clean_text(
+                    story.get(
+                        "county",
+                        "",
+                    )
+                ),
+                "category": clean_text(
+                    story.get(
+                        "category",
+                        "NEWS",
+                    )
+                ),
+                "description": clean_text(
+                    story.get(
+                        "description",
+                        "",
+                    )
+                ),
+                "source": clean_text(
+                    story.get(
+                        "source",
+                        "",
+                    )
+                ),
+                "url": clean_text(
+                    story.get(
+                        "url",
+                        "",
+                    )
+                ),
+                "published": published_text,
+                "score": story.get(
+                    "score",
+                    0,
+                ),
+                "image_path": story.get(
+                    "image_path",
+                    "",
+                ),
+                "narration": make_narration(
+                    story
+                ),
+            }
+        )
+
+    output = {
+        "project": "Rift Valley Watch",
+        "date": kenya_date(),
+        "generated_at": iso_now(),
+        "stories": output_stories,
+        "story_count": len(
+            output_stories
+        ),
     }
 
+    # Keep compatibility with older generator.
+    if output_stories:
+
+        first = output_stories[0]
+
+        output["title"] = first[
+            "title"
+        ]
+
+        output["county"] = first[
+            "county"
+        ]
+
+        output["category"] = first[
+            "category"
+        ]
+
+        output["source"] = first[
+            "source"
+        ]
+
     with open(
-        REPORT_FILE,
+        STORY_FILE,
         "w",
         encoding="utf-8",
     ) as f:
 
         json.dump(
-            report,
+            output,
+            f,
+            indent=2,
+            ensure_ascii=False,
+        )
+
+    return output
+
+
+# ============================================================
+# SAVE SCRIPT.JSON
+# ============================================================
+
+def save_script_json(stories):
+    script_stories = []
+
+    for story in stories:
+
+        script_stories.append(
+            {
+                "county": story.get(
+                    "county",
+                    "",
+                ),
+                "category": story.get(
+                    "category",
+                    "NEWS",
+                ),
+                "headline": story.get(
+                    "title",
+                    "",
+                ),
+                "narration": make_narration(
+                    story
+                ),
+                "source": story.get(
+                    "source",
+                    "",
+                ),
+                "source_url": story.get(
+                    "url",
+                    "",
+                ),
+                "image_path": story.get(
+                    "image_path",
+                    "",
+                ),
+                "published": (
+                    story.get(
+                        "published"
+                    ).isoformat()
+                    if story.get(
+                        "published"
+                    )
+                    else ""
+                ),
+            }
+        )
+
+    output = {
+        "project": "Rift Valley Watch",
+        "date": kenya_date(),
+        "generated_at": iso_now(),
+        "stories": script_stories,
+    }
+
+    with open(
+        SCRIPT_FILE,
+        "w",
+        encoding="utf-8",
+    ) as f:
+
+        json.dump(
+            output,
+            f,
+            indent=2,
+            ensure_ascii=False,
+        )
+
+
+# ============================================================
+# FALLBACK
+# ============================================================
+
+def fallback():
+    print("")
+    print(
+        "WARNING: No fresh qualifying "
+        "Rift Valley stories found."
+    )
+
+    output = {
+        "project": "Rift Valley Watch",
+        "date": kenya_date(),
+        "generated_at": iso_now(),
+        "story_count": 0,
+        "stories": [],
+        "title": "Rift Valley Watch",
+        "county": "Rift Valley",
+        "category": "NEWS",
+        "source": "Live news feeds",
+    }
+
+    with open(
+        STORY_FILE,
+        "w",
+        encoding="utf-8",
+    ) as f:
+
+        json.dump(
+            output,
+            f,
+            indent=2,
+        )
+
+    with open(
+        SCRIPT_FILE,
+        "w",
+        encoding="utf-8",
+    ) as f:
+
+        json.dump(
+            {
+                "project": "Rift Valley Watch",
+                "date": kenya_date(),
+                "stories": [],
+            },
             f,
             indent=2,
         )
@@ -1432,263 +1670,152 @@ def save_report(stories, scenes):
 def main():
 
     print("")
-    print("=" * 60)
-    print("RIFT VALLEY WATCH")
-    print("REAL-TIME REGIONAL VIDEO GENERATOR")
-    print("=" * 60)
+    print("=" * 70)
+    print("RIFT VALLEY WATCH NEWS ENGINE")
+    print("LIVE NEWS + REAL PHOTOS")
+    print("=" * 70)
 
-    if shutil.which("ffmpeg") is None:
-        raise RuntimeError(
-            "FFmpeg is not installed."
-        )
-
-    if shutil.which("ffprobe") is None:
-        raise RuntimeError(
-            "FFprobe is not installed."
-        )
-
-    prepare()
-
-    story_data = load_json(
-        STORY_FILE
+    print(
+        "Bulletin date:",
+        kenya_date(),
     )
 
-    # script.json is not required for rendering,
-    # but load it if available.
-    script_data = load_json(
-        SCRIPT_FILE
+    print(
+        "Generated:",
+        iso_now(),
     )
 
-    stories = get_stories(
-        story_data
+    print(
+        "Excluded:",
+        ", ".join(
+            EXCLUDED_TERMS
+        ),
+    )
+
+    raw = collect_news()
+
+    print("")
+    print(
+        "Raw qualifying stories:",
+        len(raw),
+    )
+
+    selected = prepare_stories(
+        raw
     )
 
     print("")
     print(
-        "STORIES LOADED:",
-        len(stories),
+        "Selected stories:",
+        len(selected),
     )
 
-    for i, story in enumerate(
-        stories,
+    if not selected:
+        fallback()
+        return
+
+    # --------------------------------------------------------
+    # Photos
+    # --------------------------------------------------------
+
+    selected = attach_photos(
+        selected
+    )
+
+    # --------------------------------------------------------
+    # Save
+    # --------------------------------------------------------
+
+    save_story_json(
+        selected
+    )
+
+    save_script_json(
+        selected
+    )
+
+    print("")
+    print("=" * 70)
+    print("FINAL BULLETIN")
+    print("=" * 70)
+
+    for number, story in enumerate(
+        selected,
         1,
     ):
-        print(
-            f"{i}. "
-            f"[{clean(story.get('county', 'Rift Valley'))}] "
-            f"{clean(story.get('title', ''))}"
+
+        published = story.get(
+            "published"
         )
 
-    scenes = []
-
-    # --------------------------------------------------------
-    # SCENE 1
-    # --------------------------------------------------------
-
-    scene_number = 1
-
-    scenes.append(
-        render_scene(
-            opener(),
-            (
-                "Rift Valley Watch. "
-                "Here are the latest major developments "
-                "from across Kenya's Rift Valley."
-            ),
-            scene_number,
-        )
-    )
-
-    scene_number += 1
-
-    # --------------------------------------------------------
-    # COVERAGE SCENE
-    # --------------------------------------------------------
-
-    counties = []
-
-    for story in stories:
-        county = clean(
-            story.get(
-                "county",
-                "",
+        if published:
+            published_text = (
+                published.isoformat()
             )
-        )
-
-        if county and county not in counties:
-            counties.append(county)
-
-    if counties:
-
-        date = clean(
-            story_data.get(
-                "date",
-                "",
-            )
-        )
-
-        scenes.append(
-            render_scene(
-                coverage(
-                    counties,
-                    date,
-                ),
-                (
-                    "Today's bulletin brings "
-                    "fresh developments from across "
-                    "the Rift Valley."
-                ),
-                scene_number,
-            )
-        )
-
-        scene_number += 1
-
-    # --------------------------------------------------------
-    # STORY SCENES
-    # --------------------------------------------------------
-
-    if stories:
-
-        total = len(stories)
-
-        for index, story in enumerate(
-            stories,
-            1,
-        ):
-
-            county = clean(
-                story.get(
-                    "county",
-                    "Rift Valley",
-                )
-            )
-
-            title = clean(
-                story.get(
-                    "title",
-                    "Regional update",
-                )
-            )
-
-            description = clean(
-                story.get(
-                    "description",
-                    "",
-                )
-            )
-
-            narration = (
-                county
-                + ". "
-                + title
-                + ". "
-                + description[:320]
-            )
-
-            scenes.append(
-                render_scene(
-                    story_card(
-                        story,
-                        index,
-                        total,
-                    ),
-                    narration,
-                    scene_number,
-                )
-            )
-
-            scene_number += 1
-
-    else:
-
-        scenes.append(
-            render_scene(
-                empty_card(),
-                (
-                    "Rift Valley Watch. "
-                    "No qualifying fresh regional "
-                    "story was retrieved during this run."
-                ),
-                scene_number,
-            )
-        )
-
-        scene_number += 1
-
-    # --------------------------------------------------------
-    # OUTRO
-    # --------------------------------------------------------
-
-    scenes.append(
-        render_scene(
-            outro(),
-            (
-                "That is the latest regional "
-                "roundup from Rift Valley Watch."
-            ),
-            scene_number,
-        )
-    )
-
-    # --------------------------------------------------------
-    # VERIFY SCENES
-    # --------------------------------------------------------
-
-    print("")
-    print("=" * 60)
-    print("SCENE VERIFICATION")
-    print("=" * 60)
-
-    valid_scenes = []
-
-    for scene in scenes:
-
-        if scene.exists() and scene.stat().st_size > 10000:
-
-            print(
-                "VALID:",
-                scene.name,
-                f"{scene.stat().st_size / 1024:.1f} KB",
-            )
-
-            valid_scenes.append(scene)
-
         else:
+            published_text = "unknown"
 
-            print(
-                "INVALID:",
-                scene,
-            )
-
-    if not valid_scenes:
-        raise RuntimeError(
-            "ZERO VALID SCENE MP4 FILES WERE CREATED."
+        print("")
+        print(
+            f"{number}. "
+            f"{story.get('county', '')} | "
+            f"{story.get('category', '')}"
         )
 
-    # --------------------------------------------------------
-    # FINAL ASSEMBLY
-    # --------------------------------------------------------
+        print(
+            story.get(
+                "title",
+                "",
+            )
+        )
 
-    concatenate(
-        valid_scenes
-    )
+        print(
+            "Source:",
+            story.get(
+                "source",
+                "",
+            )
+        )
 
-    validate()
+        print(
+            "Published:",
+            published_text,
+        )
 
-    save_report(
-        stories,
-        valid_scenes,
-    )
+        print(
+            "Score:",
+            story.get(
+                "score",
+                0,
+            )
+        )
+
+        print(
+            "Photo:",
+            story.get(
+                "image_path",
+                "NONE",
+            )
+        )
 
     print("")
-    print("=" * 60)
-    print("VIDEO GENERATION SUCCESSFUL")
-    print("=" * 60)
+    print("=" * 70)
+    print("NEWS ENGINE SUCCESSFUL")
+    print("=" * 70)
 
     print(
-        "OUTPUT:",
-        OUTPUT_FILE,
+        "Created:",
+        STORY_FILE,
+    )
+
+    print(
+        "Created:",
+        SCRIPT_FILE,
+    )
+
+    print(
+        "Photo directory:",
+        SOURCE_DIR,
     )
 
 
@@ -1699,39 +1826,18 @@ def main():
 if __name__ == "__main__":
 
     try:
-
         main()
 
     except Exception as exc:
 
         print("")
-        print("=" * 60)
-        print("VIDEO GENERATOR FAILED")
-        print("=" * 60)
+        print("=" * 70)
+        print("NEWS ENGINE FAILED")
+        print("=" * 70)
 
         print(
             "ERROR:",
             str(exc),
         )
 
-        print("")
-        print("OUTPUT DIRECTORY:")
-
-        if OUTPUT_DIR.exists():
-
-            for item in OUTPUT_DIR.rglob("*"):
-
-                if item.is_file():
-
-                    print(
-                        item,
-                        item.stat().st_size,
-                        "bytes",
-                    )
-
-        print("")
-        print(
-            "END OF VIDEO GENERATOR ERROR"
-        )
-
-        sys.exit(1)
+        raise
