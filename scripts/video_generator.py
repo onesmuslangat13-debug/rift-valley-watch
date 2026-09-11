@@ -5,6 +5,9 @@ import re
 import shutil
 import subprocess
 import tempfile
+import textwrap
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
@@ -12,62 +15,99 @@ from gtts import gTTS
 
 
 # ============================================================
-# RIFT VALLEY WATCH V3
-# BROADCAST-STYLE VERTICAL NEWS VIDEO GENERATOR
+# RIFT VALLEY WATCH — VIDEO GENERATOR V4
+# ============================================================
+#
+# Visual pipeline:
+#   verified story
+#        ↓
+#   official-source visual discovery
+#        ↓
+#   real source image when available
+#        ↓
+#   professional newsroom graphics fallback
+#        ↓
+#   narration
+#        ↓
+#   captions
+#        ↓
+#   MP4 QC
+#
+# Output:
+#   1080x1920
+#   30 FPS
+#   H.264
+#   AAC
 # ============================================================
 
-BASE_DIR = Path(__file__).resolve().parent.parent
 
-SCRIPT_FILE = BASE_DIR / "data" / "script.json"
-OUTPUT_DIR = BASE_DIR / "output"
-
-VIDEO_FILE = OUTPUT_DIR / "rift_valley_watch.mp4"
-
-VIDEO_WIDTH = 1080
-VIDEO_HEIGHT = 1920
+WIDTH = 1080
+HEIGHT = 1920
 FPS = 30
 
-BG = (7, 16, 29)
-BG2 = (12, 28, 47)
-WHITE = (245, 248, 252)
-LIGHT = (190, 202, 216)
-MUTED = (120, 142, 163)
-RED = (220, 40, 48)
-RED_DARK = (115, 24, 32)
-BLUE = (25, 76, 125)
-CYAN = (45, 170, 205)
-GREEN = (52, 170, 105)
-GOLD = (225, 174, 62)
-BLACK = (2, 6, 12)
+ROOT = Path(__file__).resolve().parents[1]
+DATA_DIR = ROOT / "data"
+OUTPUT_DIR = ROOT / "output"
+ASSET_DIR = ROOT / "assets"
+SOURCE_IMAGE_DIR = ASSET_DIR / "source_images"
+TEMP_DIR = ROOT / "tmp_video"
+
+SCRIPT_FILE = DATA_DIR / "script.json"
+OUTPUT_FILE = OUTPUT_DIR / "rift_valley_watch.mp4"
 
 FONT_DIR = Path("/usr/share/fonts/truetype/dejavu")
 
-REGULAR_FONT = (
-    FONT_DIR / "DejaVuSans.ttf"
-)
+FONT_BOLD = FONT_DIR / "DejaVuSans-Bold.ttf"
+FONT_REGULAR = FONT_DIR / "DejaVuSans.ttf"
 
-BOLD_FONT = (
-    FONT_DIR / "DejaVuSans-Bold.ttf"
-)
+# Network timeout for official-source image discovery.
+NETWORK_TIMEOUT = 15
+
+# Never allow an external image to dominate the story.
+MAX_SOURCE_IMAGE_BYTES = 12 * 1024 * 1024
 
 
 # ============================================================
-# BASIC HELPERS
+# BRAND
+# ============================================================
+
+BRAND = "RIFT VALLEY WATCH"
+TAGLINE = "TRACKING VERIFIED DEVELOPMENTS ACROSS THE REGION"
+
+BG = (8, 15, 27)
+BG_2 = (13, 24, 42)
+WHITE = (248, 250, 252)
+LIGHT = (211, 220, 231)
+MUTED = (145, 158, 176)
+RED = (218, 38, 48)
+RED_DARK = (120, 25, 33)
+BLUE = (32, 105, 175)
+BLUE_DARK = (15, 51, 91)
+GREEN = (46, 156, 96)
+BLACK = (0, 0, 0)
+
+
+# ============================================================
+# COMMAND HELPERS
 # ============================================================
 
 def run_command(command, check=True):
-    print("RUN:", " ".join(map(str, command)))
+    print("\n$ " + " ".join(str(x) for x in command))
 
     result = subprocess.run(
         command,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True
+        text=True,
     )
 
+    if result.stdout.strip():
+        print(result.stdout[-5000:])
+
+    if result.stderr.strip():
+        print(result.stderr[-5000:])
+
     if check and result.returncode != 0:
-        print(result.stdout)
-        print(result.stderr)
         raise RuntimeError(
             f"Command failed with exit code {result.returncode}"
         )
@@ -75,91 +115,1740 @@ def run_command(command, check=True):
     return result
 
 
-def load_script():
+def ensure_directories():
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    ASSET_DIR.mkdir(parents=True, exist_ok=True)
+    SOURCE_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+    TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
-    if not SCRIPT_FILE.exists():
-        raise RuntimeError(
-            f"Missing {SCRIPT_FILE}"
-        )
 
-    with open(
-        SCRIPT_FILE,
-        "r",
-        encoding="utf-8"
-    ) as f:
+# ============================================================
+# STORY / SCRIPT
+# ============================================================
+
+def load_json(path):
+    with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
-def font(size, bold=False):
-
-    path = BOLD_FONT if bold else REGULAR_FONT
-
-    if path.exists():
-        return ImageFont.truetype(
-            str(path),
-            size
+def load_script():
+    if not SCRIPT_FILE.exists():
+        raise FileNotFoundError(
+            f"Missing generated script: {SCRIPT_FILE}"
         )
 
-    return ImageFont.load_default()
+    data = load_json(SCRIPT_FILE)
+
+    if not data.get("qc", {}).get("ready_for_video", False):
+        raise RuntimeError(
+            "Editorial QC rejected the story. "
+            "Video generation stopped."
+        )
+
+    return data
 
 
 def clean_text(value):
-
     if value is None:
         return ""
 
-    text = str(value)
+    value = str(value)
 
-    text = text.replace(
-        "Road lenght",
-        "Road length"
+    replacements = {
+        "Road lenght": "Road length",
+        "road lenght": "road length",
+        "Ksh": "KSh",
+        "KSH": "KSh",
+        "  ": " ",
+        "\n\n": "\n",
+    }
+
+    for old, new in replacements.items():
+        value = value.replace(old, new)
+
+    return value.strip()
+
+
+def get_fact(script, label, default=""):
+    for fact in script.get("verified_facts", []):
+        if fact.get("label") == label:
+            return clean_text(fact.get("value", default))
+
+    return default
+
+
+def get_section(script, name, default=""):
+    return clean_text(
+        script.get("sections", {}).get(name, default)
     )
 
-    text = text.replace(
-        "road lenght",
-        "road length"
-    )
 
-    text = re.sub(
-        r"\s+",
-        " ",
-        text
-    )
-
-    return text.strip()
+def story_meta(script):
+    return {
+        "title": clean_text(script.get("title", "")),
+        "county": clean_text(script.get("county", "")),
+        "category": clean_text(script.get("category", "NEWS")),
+        "date": clean_text(script.get("date", "")),
+    }
 
 
-def wrap_text(
+# ============================================================
+# FONT / DRAWING
+# ============================================================
+
+def font(size, bold=False):
+    path = FONT_BOLD if bold else FONT_REGULAR
+
+    if not path.exists():
+        return ImageFont.load_default()
+
+    return ImageFont.truetype(str(path), size)
+
+
+def text_width(draw, text, fnt):
+    box = draw.textbbox((0, 0), text, font=fnt)
+    return box[2] - box[0]
+
+
+def wrap_text(draw, text, fnt, max_width):
+    words = clean_text(text).split()
+
+    if not words:
+        return []
+
+    lines = []
+    current = words[0]
+
+    for word in words[1:]:
+        candidate = current + " " + word
+
+        if text_width(draw, candidate, fnt) <= max_width:
+            current = candidate
+        else:
+            lines.append(current)
+            current = word
+
+    lines.append(current)
+
+    return lines
+
+
+def draw_wrapped(
     draw,
     text,
+    xy,
     fnt,
-    max_width
+    fill,
+    max_width,
+    line_spacing=12,
+    max_lines=None,
 ):
+    x, y = xy
+    lines = wrap_text(draw, text, fnt, max_width)
 
+    if max_lines:
+        if len(lines) > max_lines:
+            lines = lines[:max_lines]
+
+            last = lines[-1]
+
+            while (
+                text_width(draw, last + "...", fnt)
+                > max_width
+                and len(last) > 3
+            ):
+                last = last[:-1]
+
+            lines[-1] = last.rstrip() + "..."
+
+    for line in lines:
+        draw.text(
+            (x, y),
+            line,
+            font=fnt,
+            fill=fill,
+        )
+
+        box = draw.textbbox((x, y), line, font=fnt)
+        y += (box[3] - box[1]) + line_spacing
+
+    return y
+
+
+def rounded_rectangle(draw, box, radius, fill, outline=None, width=1):
+    draw.rounded_rectangle(
+        box,
+        radius=radius,
+        fill=fill,
+        outline=outline,
+        width=width,
+    )
+
+
+def gradient_background():
+    image = Image.new("RGB", (WIDTH, HEIGHT), BG)
+    pixels = image.load()
+
+    for y in range(HEIGHT):
+        ratio = y / HEIGHT
+
+        r = int(BG[0] * (1 - ratio) + BG_2[0] * ratio)
+        g = int(BG[1] * (1 - ratio) + BG_2[1] * ratio)
+        b = int(BG[2] * (1 - ratio) + BG_2[2] * ratio)
+
+        for x in range(WIDTH):
+            pixels[x, y] = (r, g, b)
+
+    return image
+
+
+# ============================================================
+# BRAND ELEMENTS
+# ============================================================
+
+def add_brand_header(draw, category="NEWS"):
+    draw.rectangle(
+        (0, 0, WIDTH, 115),
+        fill=(5, 10, 19),
+    )
+
+    draw.rectangle(
+        (0, 112, WIDTH, 116),
+        fill=RED,
+    )
+
+    draw.text(
+        (60, 34),
+        BRAND,
+        font=font(40, True),
+        fill=WHITE,
+    )
+
+    cat = clean_text(category).upper()
+
+    draw.text(
+        (WIDTH - 60 - text_width(draw, cat, font(25, True)), 43),
+        cat,
+        font=font(25, True),
+        fill=RED,
+    )
+
+
+def add_footer(draw, date_text=""):
+    draw.rectangle(
+        (0, HEIGHT - 105, WIDTH, HEIGHT),
+        fill=(5, 10, 19),
+    )
+
+    draw.text(
+        (55, HEIGHT - 78),
+        TAGLINE,
+        font=font(19, True),
+        fill=MUTED,
+    )
+
+    if date_text:
+        date_text = clean_text(date_text)
+
+        w = text_width(draw, date_text, font(19, True))
+
+        draw.text(
+            (WIDTH - 55 - w, HEIGHT - 78),
+            date_text,
+            font=font(19, True),
+            fill=WHITE,
+        )
+
+
+def add_red_line(draw, y):
+    draw.rectangle(
+        (60, y, WIDTH - 60, y + 5),
+        fill=RED,
+    )
+
+
+def add_section_label(draw, label, y=150):
+    label = clean_text(label).upper()
+
+    draw.text(
+        (60, y),
+        label,
+        font=font(25, True),
+        fill=RED,
+    )
+
+
+# ============================================================
+# SOURCE IMAGE DISCOVERY
+# ============================================================
+
+def safe_filename(text):
+    text = re.sub(r"[^a-zA-Z0-9_-]+", "_", text)
+    return text[:100].strip("_") or "source_image"
+
+
+def source_image_path(script):
+    title = safe_filename(script.get("title", "story"))
+    return SOURCE_IMAGE_DIR / f"{title}.jpg"
+
+
+def download_url(url, destination):
+    try:
+        request = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 "
+                    "(compatible; RiftValleyWatch/4.0)"
+                )
+            },
+        )
+
+        with urllib.request.urlopen(
+            request,
+            timeout=NETWORK_TIMEOUT,
+        ) as response:
+
+            content_type = response.headers.get(
+                "Content-Type",
+                "",
+            ).lower()
+
+            if "image" not in content_type:
+                return False
+
+            data = response.read(MAX_SOURCE_IMAGE_BYTES + 1)
+
+            if len(data) > MAX_SOURCE_IMAGE_BYTES:
+                return False
+
+        with open(destination, "wb") as f:
+            f.write(data)
+
+        return True
+
+    except Exception as exc:
+        print(
+            f"Source image download failed: {exc}"
+        )
+
+        return False
+
+
+def validate_image(path):
+    try:
+        with Image.open(path) as image:
+            image.verify()
+
+        with Image.open(path) as image:
+            width, height = image.size
+
+        if width < 300 or height < 200:
+            return False
+
+        return True
+
+    except Exception:
+        return False
+
+
+def extract_image_urls_from_html(html, base_url):
+    urls = []
+
+    patterns = [
+        r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image',
+        r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:image',
+        r'<img[^>]+src=["\']([^"\']+)',
+        r'<img[^>]+data-src=["\']([^"\']+)',
+    ]
+
+    for pattern in patterns:
+        matches = re.findall(
+            pattern,
+            html,
+            flags=re.IGNORECASE,
+        )
+
+        for item in matches:
+            item = item.strip()
+
+            if not item:
+                continue
+
+            absolute = urllib.parse.urljoin(
+                base_url,
+                item,
+            )
+
+            if absolute not in urls:
+                urls.append(absolute)
+
+    return urls
+
+
+def fetch_source_html(url):
+    try:
+        request = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 "
+                    "(compatible; RiftValleyWatch/4.0)"
+                )
+            },
+        )
+
+        with urllib.request.urlopen(
+            request,
+            timeout=NETWORK_TIMEOUT,
+        ) as response:
+
+            content_type = response.headers.get(
+                "Content-Type",
+                "",
+            ).lower()
+
+            if "text/html" not in content_type:
+                return ""
+
+            data = response.read(3 * 1024 * 1024)
+
+        return data.decode(
+            "utf-8",
+            errors="ignore",
+        )
+
+    except Exception as exc:
+        print(
+            f"Official source request failed: {exc}"
+        )
+
+        return ""
+
+
+def discover_source_image(script):
+    source = script.get("source", {})
+
+    source_url = clean_text(
+        source.get("url", "")
+    )
+
+    if not source_url.startswith(
+        ("http://", "https://")
+    ):
+        print(
+            "No valid official source URL. "
+            "Using newsroom graphics."
+        )
+        return None
+
+    destination = source_image_path(script)
+
+    if destination.exists() and validate_image(destination):
+        print(
+            f"Using cached source image: {destination}"
+        )
+        return destination
+
+    print("\n==========================================")
+    print("SOURCE VISUAL DISCOVERY")
+    print("==========================================")
+    print(f"Official source: {source_url}")
+
+    html = fetch_source_html(source_url)
+
+    if not html:
+        print(
+            "Official source could not be read."
+        )
+        print(
+            "Fallback: professional newsroom graphics."
+        )
+        return None
+
+    image_urls = extract_image_urls_from_html(
+        html,
+        source_url,
+    )
+
+    print(
+        f"Candidate image URLs found: "
+        f"{len(image_urls)}"
+    )
+
+    for index, image_url in enumerate(
+        image_urls[:12],
+        start=1,
+    ):
+        print(
+            f"[{index}] {image_url}"
+        )
+
+        temporary = destination.with_suffix(
+            f".candidate{index}.jpg"
+        )
+
+        if download_url(
+            image_url,
+            temporary,
+        ):
+            if validate_image(temporary):
+                try:
+                    normalize_source_image(
+                        temporary,
+                        destination,
+                    )
+
+                    temporary.unlink(
+                        missing_ok=True
+                    )
+
+                    if validate_image(destination):
+                        print(
+                            "REAL SOURCE IMAGE FOUND."
+                        )
+
+                        return destination
+
+                except Exception as exc:
+                    print(
+                        f"Image normalization failed: {exc}"
+                    )
+
+        temporary.unlink(
+            missing_ok=True
+        )
+
+    print(
+        "No usable official-source image found."
+    )
+
+    print(
+        "Fallback: professional newsroom graphics."
+    )
+
+    return None
+
+
+def normalize_source_image(source_path, destination):
+    with Image.open(source_path) as original:
+        image = original.convert("RGB")
+
+        # Preserve the photograph while ensuring
+        # reasonable resolution.
+        max_dimension = 2200
+
+        if max(image.size) > max_dimension:
+            scale = max_dimension / max(image.size)
+
+            new_size = (
+                max(1, int(image.width * scale)),
+                max(1, int(image.height * scale)),
+            )
+
+            image = image.resize(
+                new_size,
+                Image.Resampling.LANCZOS,
+            )
+
+        image.save(
+            destination,
+            "JPEG",
+            quality=92,
+            optimize=True,
+        )
+
+
+# ============================================================
+# PHOTO PROCESSING
+# ============================================================
+
+def crop_cover(image, width, height):
+    image = image.convert("RGB")
+
+    source_ratio = image.width / image.height
+    target_ratio = width / height
+
+    if source_ratio > target_ratio:
+        new_height = image.height
+        new_width = int(new_height * target_ratio)
+
+        left = (image.width - new_width) // 2
+
+        image = image.crop(
+            (
+                left,
+                0,
+                left + new_width,
+                new_height,
+            )
+        )
+
+    else:
+        new_width = image.width
+        new_height = int(new_width / target_ratio)
+
+        top = (image.height - new_height) // 2
+
+        image = image.crop(
+            (
+                0,
+                top,
+                new_width,
+                top + new_height,
+            )
+        )
+
+    return image.resize(
+        (width, height),
+        Image.Resampling.LANCZOS,
+    )
+
+
+def photo_background(path):
+    with Image.open(path) as source:
+        photo = crop_cover(
+            source,
+            WIDTH,
+            HEIGHT,
+        )
+
+    # Slight blur keeps text readable.
+    photo = photo.filter(
+        ImageFilter.GaussianBlur(radius=0.7)
+    )
+
+    overlay = Image.new(
+        "RGBA",
+        (WIDTH, HEIGHT),
+        (0, 0, 0, 0),
+    )
+
+    overlay_draw = ImageDraw.Draw(overlay)
+
+    # Professional newsroom darkening.
+    for y in range(HEIGHT):
+        alpha = int(
+            65 +
+            125 *
+            (y / HEIGHT)
+        )
+
+        overlay_draw.line(
+            (0, y, WIDTH, y),
+            fill=(3, 8, 15, alpha),
+        )
+
+    photo = photo.convert("RGBA")
+    photo.alpha_composite(overlay)
+
+    return photo.convert("RGB")
+
+
+# ============================================================
+# REAL PHOTO CARD
+# ============================================================
+
+def create_photo_card(script, image_path):
+    image = photo_background(image_path)
+    draw = ImageDraw.Draw(image)
+
+    meta = story_meta(script)
+
+    add_brand_header(
+        draw,
+        meta["category"],
+    )
+
+    # Breaking-news tag.
+    rounded_rectangle(
+        draw,
+        (55, 155, 325, 215),
+        18,
+        RED,
+    )
+
+    draw.text(
+        (80, 171),
+        "DEVELOPMENT UPDATE",
+        font=font(20, True),
+        fill=WHITE,
+    )
+
+    # Lower-third.
+    panel_top = 1320
+
+    rounded_rectangle(
+        draw,
+        (
+            35,
+            panel_top,
+            WIDTH - 35,
+            1760,
+        ),
+        30,
+        (4, 10, 18),
+    )
+
+    add_red_line(
+        draw,
+        panel_top + 35,
+    )
+
+    title = meta["title"]
+
+    draw_wrapped(
+        draw,
+        title,
+        (70, panel_top + 75),
+        font(49, True),
+        WHITE,
+        WIDTH - 140,
+        line_spacing=12,
+        max_lines=4,
+    )
+
+    county = meta["county"]
+
+    draw.text(
+        (70, 1685),
+        county.upper(),
+        font=font(27, True),
+        fill=RED,
+    )
+
+    add_footer(
+        draw,
+        meta["date"],
+    )
+
+    return image
+
+
+# ============================================================
+# GRAPHIC FALLBACK CARDS
+# ============================================================
+
+def create_hook_card(script):
+    image = gradient_background()
+    draw = ImageDraw.Draw(image)
+
+    meta = story_meta(script)
+
+    add_brand_header(
+        draw,
+        meta["category"],
+    )
+
+    add_section_label(
+        draw,
+        "THE LATEST",
+        170,
+    )
+
+    add_red_line(
+        draw,
+        225,
+    )
+
+    draw_wrapped(
+        draw,
+        meta["title"],
+        (60, 320),
+        font(67, True),
+        WHITE,
+        WIDTH - 120,
+        line_spacing=18,
+        max_lines=5,
+    )
+
+    summary = get_section(
+        script,
+        "hook",
+        "",
+    )
+
+    if summary:
+        draw_wrapped(
+            draw,
+            summary,
+            (65, 780),
+            font(31, False),
+            LIGHT,
+            WIDTH - 130,
+            line_spacing=16,
+            max_lines=5,
+        )
+
+    rounded_rectangle(
+        draw,
+        (60, 1110, WIDTH - 60, 1310),
+        28,
+        (15, 30, 52),
+        outline=RED,
+        width=3,
+    )
+
+    draw.text(
+        (95, 1160),
+        "VERIFIED REPORT",
+        font=font(29, True),
+        fill=RED,
+    )
+
+    draw_wrapped(
+        draw,
+        f"{meta['county']} • {meta['date']}",
+        (95, 1210),
+        font(27, True),
+        WHITE,
+        WIDTH - 190,
+        line_spacing=8,
+    )
+
+    add_footer(
+        draw,
+        meta["date"],
+    )
+
+    return image
+
+
+def create_location_card(script):
+    image = gradient_background()
+    draw = ImageDraw.Draw(image)
+
+    meta = story_meta(script)
+
+    add_brand_header(
+        draw,
+        meta["category"],
+    )
+
+    add_section_label(
+        draw,
+        "WHERE IT IS",
+        170,
+    )
+
+    add_red_line(
+        draw,
+        225,
+    )
+
+    county = meta["county"]
+    location = get_fact(
+        script,
+        "LOCATION",
+        county,
+    )
+
+    rounded_rectangle(
+        draw,
+        (55, 330, WIDTH - 55, 1040),
+        35,
+        (10, 25, 43),
+        outline=(43, 76, 112),
+        width=3,
+    )
+
+    # Stylized Kenya locator.
+    kenya = [
+        (470, 430),
+        (560, 390),
+        (650, 440),
+        (705, 530),
+        (670, 650),
+        (735, 760),
+        (665, 885),
+        (545, 930),
+        (485, 850),
+        (430, 730),
+        (450, 600),
+    ]
+
+    draw.polygon(
+        kenya,
+        fill=(19, 54, 82),
+        outline=(84, 123, 157),
+    )
+
+    # Bomet marker.
+    marker_x = 575
+    marker_y = 600
+
+    draw.ellipse(
+        (
+            marker_x - 18,
+            marker_y - 18,
+            marker_x + 18,
+            marker_y + 18,
+        ),
+        fill=RED,
+    )
+
+    draw.ellipse(
+        (
+            marker_x - 8,
+            marker_y - 8,
+            marker_x + 8,
+            marker_y + 8,
+        ),
+        fill=WHITE,
+    )
+
+    draw.line(
+        (
+            marker_x,
+            marker_y + 18,
+            marker_x,
+            marker_y + 80,
+        ),
+        fill=RED,
+        width=5,
+    )
+
+    draw_wrapped(
+        draw,
+        location,
+        (70, 1100),
+        font(42, True),
+        WHITE,
+        WIDTH - 140,
+        line_spacing=14,
+        max_lines=4,
+    )
+
+    draw.text(
+        (70, 1390),
+        county.upper(),
+        font=font(28, True),
+        fill=RED,
+    )
+
+    add_footer(
+        draw,
+        meta["date"],
+    )
+
+    return image
+
+
+def create_data_card(script):
+    image = gradient_background()
+    draw = ImageDraw.Draw(image)
+
+    meta = story_meta(script)
+
+    add_brand_header(
+        draw,
+        meta["category"],
+    )
+
+    add_section_label(
+        draw,
+        "KEY FACTS",
+        170,
+    )
+
+    add_red_line(
+        draw,
+        225,
+    )
+
+    road_length = get_fact(
+        script,
+        "ROAD_LENGTH",
+        "—",
+    )
+
+    cost = get_fact(
+        script,
+        "COST",
+        "—",
+    )
+
+    status = get_fact(
+        script,
+        "STATUS",
+        "—",
+    )
+
+    cards = [
+        ("ROAD LENGTH", road_length),
+        ("PROJECT COST", cost),
+        ("STATUS", status),
+    ]
+
+    y = 330
+
+    for label, value in cards:
+        rounded_rectangle(
+            draw,
+            (55, y, WIDTH - 55, y + 270),
+            28,
+            (12, 29, 48),
+            outline=(41, 73, 106),
+            width=2,
+        )
+
+        draw.text(
+            (90, y + 45),
+            label,
+            font=font(23, True),
+            fill=RED,
+        )
+
+        draw_wrapped(
+            draw,
+            value,
+            (90, y + 95),
+            font(44, True),
+            WHITE,
+            WIDTH - 180,
+            line_spacing=10,
+            max_lines=3,
+        )
+
+        y += 315
+
+    add_footer(
+        draw,
+        meta["date"],
+    )
+
+    return image
+
+
+def create_route_card(script):
+    image = gradient_background()
+    draw = ImageDraw.Draw(image)
+
+    meta = story_meta(script)
+
+    add_brand_header(
+        draw,
+        meta["category"],
+    )
+
+    add_section_label(
+        draw,
+        "THE ROUTE",
+        170,
+    )
+
+    add_red_line(
+        draw,
+        225,
+    )
+
+    route = get_fact(
+        script,
+        "PROJECT",
+        "",
+    )
+
+    rounded_rectangle(
+        draw,
+        (50, 320, WIDTH - 50, 1420),
+        32,
+        (8, 22, 38),
+    )
+
+    # Route line.
+    points = [
+        (140, 520),
+        (350, 700),
+        (590, 610),
+        (800, 830),
+        (900, 1080),
+        (700, 1250),
+        (420, 1180),
+    ]
+
+    draw.line(
+        points,
+        fill=RED,
+        width=12,
+        joint="curve",
+    )
+
+    labels = [
+        "Kyogong",
+        "Kapkesosio",
+        "Sigor",
+        "Chebunyo",
+        "Lelaitich",
+        "Kipreres",
+        "Longisa",
+    ]
+
+    for index, point in enumerate(points):
+        x, y = point
+
+        draw.ellipse(
+            (
+                x - 17,
+                y - 17,
+                x + 17,
+                y + 17,
+            ),
+            fill=WHITE,
+        )
+
+        label = labels[index]
+
+        draw.text(
+            (x + 25, y - 18),
+            label,
+            font=font(22, True),
+            fill=WHITE,
+        )
+
+    draw_wrapped(
+        draw,
+        route,
+        (70, 1480),
+        font(31, True),
+        WHITE,
+        WIDTH - 140,
+        line_spacing=12,
+        max_lines=5,
+    )
+
+    add_footer(
+        draw,
+        meta["date"],
+    )
+
+    return image
+
+
+def create_impact_card(script):
+    image = gradient_background()
+    draw = ImageDraw.Draw(image)
+
+    meta = story_meta(script)
+
+    add_brand_header(
+        draw,
+        meta["category"],
+    )
+
+    add_section_label(
+        draw,
+        "WHY IT MATTERS",
+        170,
+    )
+
+    add_red_line(
+        draw,
+        225,
+    )
+
+    impact = get_fact(
+        script,
+        "IMPACT",
+        "",
+    )
+
+    if not impact:
+        impact = get_section(
+            script,
+            "impact",
+            "The project is expected to support connectivity and economic activity in the affected area.",
+        )
+
+    rounded_rectangle(
+        draw,
+        (55, 350, WIDTH - 55, 1250),
+        35,
+        (11, 29, 48),
+        outline=(42, 75, 108),
+        width=3,
+    )
+
+    draw.text(
+        (90, 420),
+        "ECONOMIC IMPACT",
+        font=font(27, True),
+        fill=RED,
+    )
+
+    draw_wrapped(
+        draw,
+        impact,
+        (90, 510),
+        font(44, True),
+        WHITE,
+        WIDTH - 180,
+        line_spacing=18,
+        max_lines=8,
+    )
+
+    context = get_section(
+        script,
+        "context",
+        "",
+    )
+
+    if context:
+        rounded_rectangle(
+            draw,
+            (55, 1320, WIDTH - 55, 1600),
+            30,
+            (7, 18, 31),
+        )
+
+        draw.text(
+            (90, 1370),
+            "CONTEXT",
+            font=font(24, True),
+            fill=RED,
+        )
+
+        draw_wrapped(
+            draw,
+            context,
+            (90, 1430),
+            font(29, False),
+            LIGHT,
+            WIDTH - 180,
+            line_spacing=10,
+            max_lines=4,
+        )
+
+    add_footer(
+        draw,
+        meta["date"],
+    )
+
+    return image
+
+
+def create_source_card(script):
+    image = gradient_background()
+    draw = ImageDraw.Draw(image)
+
+    meta = story_meta(script)
+
+    add_brand_header(
+        draw,
+        meta["category"],
+    )
+
+    add_section_label(
+        draw,
+        "SOURCE",
+        170,
+    )
+
+    add_red_line(
+        draw,
+        225,
+    )
+
+    source = script.get("source", {})
+
+    source_name = clean_text(
+        source.get(
+            "name",
+            "Official source",
+        )
+    )
+
+    source_url = clean_text(
+        source.get(
+            "url",
+            "",
+        )
+    )
+
+    rounded_rectangle(
+        draw,
+        (55, 360, WIDTH - 55, 1150),
+        35,
+        (11, 29, 48),
+        outline=(42, 75, 108),
+        width=3,
+    )
+
+    draw.text(
+        (90, 430),
+        "REPORTING SOURCE",
+        font=font(26, True),
+        fill=RED,
+    )
+
+    draw_wrapped(
+        draw,
+        source_name,
+        (90, 510),
+        font(48, True),
+        WHITE,
+        WIDTH - 180,
+        line_spacing=15,
+        max_lines=3,
+    )
+
+    draw.text(
+        (90, 700),
+        "PUBLISHED / REPORTED",
+        font=font(23, True),
+        fill=RED,
+    )
+
+    draw.text(
+        (90, 750),
+        meta["date"],
+        font=font(38, True),
+        fill=WHITE,
+    )
+
+    draw.text(
+        (90, 850),
+        "OFFICIAL SOURCE URL",
+        font=font(23, True),
+        fill=RED,
+    )
+
+    display_url = source_url
+
+    if len(display_url) > 55:
+        display_url = display_url[:52] + "..."
+
+    draw_wrapped(
+        draw,
+        display_url,
+        (90, 900),
+        font(25, False),
+        LIGHT,
+        WIDTH - 180,
+        line_spacing=8,
+        max_lines=4,
+    )
+
+    draw.text(
+        (90, 1210),
+        "VERIFIED FACTS ONLY",
+        font=font(28, True),
+        fill=WHITE,
+    )
+
+    draw_wrapped(
+        draw,
+        "This report is generated from verified editorial data. Unconfirmed details are not presented as facts.",
+        (90, 1280),
+        font(29, False),
+        LIGHT,
+        WIDTH - 180,
+        line_spacing=12,
+        max_lines=5,
+    )
+
+    add_footer(
+        draw,
+        meta["date"],
+    )
+
+    return image
+
+
+def create_outro_card(script):
+    image = gradient_background()
+    draw = ImageDraw.Draw(image)
+
+    draw.rectangle(
+        (0, 0, WIDTH, 9),
+        fill=RED,
+    )
+
+    draw.text(
+        (60, 500),
+        BRAND,
+        font=font(64, True),
+        fill=WHITE,
+    )
+
+    add_red_line(
+        draw,
+        620,
+    )
+
+    draw_wrapped(
+        draw,
+        TAGLINE,
+        (60, 700),
+        font(34, True),
+        LIGHT,
+        WIDTH - 120,
+        line_spacing=15,
+        max_lines=4,
+    )
+
+    draw.text(
+        (60, 1050),
+        "FOLLOW FOR VERIFIED REGIONAL NEWS",
+        font=font(27, True),
+        fill=RED,
+    )
+
+    add_footer(
+        draw,
+        story_meta(script)["date"],
+    )
+
+    return image
+
+
+# ============================================================
+# SCENE MANAGEMENT
+# ============================================================
+
+def create_scenes(script, source_image=None):
+    scenes = []
+
+    if source_image:
+        print(
+            "\nREAL PHOTO SCENE ENABLED."
+        )
+
+        scenes.append(
+            (
+                "REAL SOURCE PHOTO",
+                create_photo_card(
+                    script,
+                    source_image,
+                ),
+            )
+        )
+
+    scenes.extend(
+        [
+            (
+                "THE LATEST",
+                create_hook_card(script),
+            ),
+            (
+                "LOCATION",
+                create_location_card(script),
+            ),
+            (
+                "KEY FACTS",
+                create_data_card(script),
+            ),
+            (
+                "THE ROUTE",
+                create_route_card(script),
+            ),
+            (
+                "WHY IT MATTERS",
+                create_impact_card(script),
+            ),
+            (
+                "SOURCE",
+                create_source_card(script),
+            ),
+            (
+                "OUTRO",
+                create_outro_card(script),
+            ),
+        ]
+    )
+
+    return scenes
+
+
+# ============================================================
+# NARRATION
+# ============================================================
+
+def create_narration(script, work_dir):
+    narration_text = clean_text(
+        script.get("full_script", "")
+    )
+
+    if not narration_text:
+        raise RuntimeError(
+            "No narration text found."
+        )
+
+    output = work_dir / "narration.mp3"
+
+    print("\n==========================================")
+    print("CREATING NARRATION")
+    print("==========================================")
+
+    tts = gTTS(
+        text=narration_text,
+        lang="en",
+        slow=False,
+    )
+
+    tts.save(str(output))
+
+    if not output.exists():
+        raise RuntimeError(
+            "Narration file was not created."
+        )
+
+    return output
+
+
+# ============================================================
+# IMAGE → VIDEO
+# ============================================================
+
+def still_to_video(image_path, duration, output_path):
+    run_command(
+        [
+            "ffmpeg",
+            "-y",
+            "-loop",
+            "1",
+            "-i",
+            str(image_path),
+            "-t",
+            f"{duration:.3f}",
+            "-r",
+            str(FPS),
+            "-vf",
+            (
+                f"scale={WIDTH}:{HEIGHT}:"
+                "force_original_aspect_ratio=decrease,"
+                f"pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2"
+            ),
+            "-c:v",
+            "libx264",
+            "-preset",
+            "medium",
+            "-crf",
+            "19",
+            "-pix_fmt",
+            "yuv420p",
+            "-an",
+            str(output_path),
+        ]
+    )
+
+
+def get_duration(path):
+    result = run_command(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ]
+    )
+
+    try:
+        return float(result.stdout.strip())
+    except Exception:
+        return 0.0
+
+
+def get_audio_duration(path):
+    return get_duration(path)
+
+
+# ============================================================
+# TIMELINE
+# ============================================================
+
+def calculate_scene_durations(scene_count, narration_duration):
+    if scene_count <= 0:
+        return []
+
+    # Professional short-form pacing.
+    # Minimum duration prevents unreadable cards.
+    minimum = 2.8
+
+    if narration_duration <= 0:
+        base = 3.8
+    else:
+        # Leave room for source and outro.
+        base = narration_duration / max(
+            1,
+            scene_count - 1,
+        )
+
+    base = max(minimum, base)
+
+    weights = [
+        0.15,
+        0.14,
+        0.14,
+        0.15,
+        0.15,
+        0.15,
+        0.12,
+    ]
+
+    if scene_count == 8:
+        weights = [
+            0.13,
+            0.12,
+            0.12,
+            0.13,
+            0.14,
+            0.14,
+            0.12,
+            0.10,
+        ]
+
+    weights = weights[:scene_count]
+
+    total = sum(weights)
+
+    weights = [
+        w / total
+        for w in weights
+    ]
+
+    target = max(
+        narration_duration + 3.5,
+        22.0,
+    )
+
+    durations = [
+        max(
+            minimum,
+            target * weight,
+        )
+        for weight in weights
+    ]
+
+    return durations
+
+
+# ============================================================
+# CONCATENATION
+# ============================================================
+
+def concatenate_scenes(scene_files, output_path):
+    if not scene_files:
+        raise RuntimeError(
+            "No scene files available."
+        )
+
+    inputs = []
+
+    for path in scene_files:
+        inputs.extend(
+            [
+                "-i",
+                str(path),
+            ]
+        )
+
+    concat_inputs = "".join(
+        f"[{i}:v:0]"
+        for i in range(len(scene_files))
+    )
+
+    filter_complex = (
+        f"{concat_inputs}"
+        f"concat=n={len(scene_files)}:v=1:a=0,"
+        "format=yuv420p,"
+        "settb=AVTB,"
+        "setpts=N/FRAME_RATE/TB[v]"
+    )
+
+    run_command(
+        [
+            "ffmpeg",
+            "-y",
+            *inputs,
+            "-filter_complex",
+            filter_complex,
+            "-map",
+            "[v]",
+            "-r",
+            str(FPS),
+            "-c:v",
+            "libx264",
+            "-preset",
+            "medium",
+            "-crf",
+            "19",
+            "-pix_fmt",
+            "yuv420p",
+            str(output_path),
+        ]
+    )
+
+
+# ============================================================
+# AUDIO
+# ============================================================
+
+def add_narration(video_path, narration_path, output_path):
+    run_command(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(video_path),
+            "-i",
+            str(narration_path),
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "medium",
+            "-crf",
+            "19",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-af",
+            (
+                "loudnorm="
+                "I=-16:"
+                "TP=-1.5:"
+                "LRA=11"
+            ),
+            "-shortest",
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ]
+    )
+
+
+# ============================================================
+# CAPTIONS
+# ============================================================
+
+def split_caption_text(text, max_chars=42):
     words = clean_text(text).split()
 
     lines = []
     current = ""
 
     for word in words:
-
-        test = (
-            f"{current} {word}"
-        ).strip()
-
-        bbox = draw.textbbox(
-            (0, 0),
-            test,
-            font=fnt
+        candidate = (
+            word
+            if not current
+            else current + " " + word
         )
 
-        width = bbox[2] - bbox[0]
-
-        if width <= max_width:
-            current = test
-
+        if len(candidate) <= max_chars:
+            current = candidate
         else:
-
             if current:
                 lines.append(current)
 
@@ -171,1671 +1860,108 @@ def wrap_text(
     return lines
 
 
-def draw_wrapped(
-    draw,
-    text,
-    x,
-    y,
-    fnt,
-    fill,
-    max_width,
-    spacing=12
-):
-
-    lines = wrap_text(
-        draw,
-        text,
-        fnt,
-        max_width
-    )
-
-    line_height = (
-        fnt.getbbox("Ag")[3]
-        - fnt.getbbox("Ag")[1]
-        + spacing
-    )
-
-    for line in lines:
-
-        draw.text(
-            (x, y),
-            line,
-            font=fnt,
-            fill=fill
-        )
-
-        y += line_height
-
-    return y
-
-
-def gradient_background():
-
-    image = Image.new(
-        "RGB",
-        (VIDEO_WIDTH, VIDEO_HEIGHT)
-    )
-
-    pixels = image.load()
-
-    for y in range(VIDEO_HEIGHT):
-
-        ratio = y / VIDEO_HEIGHT
-
-        r = int(
-            BG[0] * (1 - ratio)
-            + BG2[0] * ratio
-        )
-
-        g = int(
-            BG[1] * (1 - ratio)
-            + BG2[1] * ratio
-        )
-
-        b = int(
-            BG[2] * (1 - ratio)
-            + BG2[2] * ratio
-        )
-
-        for x in range(VIDEO_WIDTH):
-            pixels[x, y] = (
-                r,
-                g,
-                b
-            )
-
-    return image
-
-
-def add_brand_header(
-    draw,
-    section,
-    category="DEVELOPMENT"
-):
-
-    draw.rectangle(
-        (0, 0, VIDEO_WIDTH, 155),
-        fill=BLACK
-    )
-
-    draw.text(
-        (55, 38),
-        "RIFT VALLEY WATCH",
-        font=font(40, True),
-        fill=WHITE
-    )
-
-    draw.text(
-        (55, 91),
-        section.upper(),
-        font=font(23, True),
-        fill=RED
-    )
-
-    category_text = clean_text(
-        category
-    ).upper()
-
-    bbox = draw.textbbox(
-        (0, 0),
-        category_text,
-        font=font(22, True)
-    )
-
-    badge_width = (
-        bbox[2] - bbox[0] + 46
-    )
-
-    draw.rounded_rectangle(
-        (
-            VIDEO_WIDTH - badge_width - 45,
-            45,
-            VIDEO_WIDTH - 45,
-            92
-        ),
-        radius=22,
-        fill=RED_DARK,
-        outline=RED,
-        width=2
-    )
-
-    draw.text(
-        (
-            VIDEO_WIDTH
-            - badge_width
-            - 22,
-            57
-        ),
-        category_text,
-        font=font(22, True),
-        fill=WHITE
-    )
-
-
-def add_footer(
-    draw,
-    source,
-    date
-):
-
-    draw.rectangle(
-        (
-            0,
-            VIDEO_HEIGHT - 100,
-            VIDEO_WIDTH,
-            VIDEO_HEIGHT
-        ),
-        fill=BLACK
-    )
-
-    source = clean_text(source)
-
-    draw.text(
-        (50, VIDEO_HEIGHT - 78),
-        f"SOURCE: {source}",
-        font=font(21, True),
-        fill=LIGHT
-    )
-
-    draw.text(
-        (
-            VIDEO_WIDTH - 280,
-            VIDEO_HEIGHT - 78
-        ),
-        clean_text(date),
-        font=font(21),
-        fill=MUTED
-    )
-
-
-def add_red_line(
-    draw,
-    y,
-    width=360
-):
-
-    draw.rectangle(
-        (
-            55,
-            y,
-            55 + width,
-            y + 8
-        ),
-        fill=RED
-    )
-
-
-# ============================================================
-# STORY HELPERS
-# ============================================================
-
-def get_fact(
-    script,
-    label
-):
-
-    for fact in script.get(
-        "verified_facts",
-        []
-    ):
-
-        if str(
-            fact.get("label", "")
-        ).upper() == label.upper():
-
-            return clean_text(
-                fact.get("value", "")
-            )
-
-    return ""
-
-
-def get_section(
-    script,
-    key
-):
-
-    return clean_text(
-        script.get(
-            "sections",
-            {}
-        ).get(
-            key,
-            ""
-        )
-    )
-
-
-def story_meta(script):
-
+def escape_drawtext(text):
     return (
-        clean_text(
-            script.get(
-                "source",
-                {}
-            ).get(
-                "name",
-                "Official Source"
-            )
-        ),
-        clean_text(
-            script.get(
-                "date",
-                ""
-            )
-        ),
-        clean_text(
-            script.get(
-                "category",
-                "NEWS"
-            )
-        )
+        clean_text(text)
+        .replace("\\", "\\\\")
+        .replace(":", "\\:")
+        .replace("'", "\\'")
+        .replace("%", "\\%")
+        .replace(",", "\\,")
+        .replace("[", "\\[")
+        .replace("]", "\\]")
     )
 
 
-# ============================================================
-# SCENE 1 — BREAKING HOOK
-# ============================================================
-
-def create_hook_card(
-    script,
-    output
-):
-
-    image = gradient_background()
-    draw = ImageDraw.Draw(image)
-
-    source, date, category = story_meta(
-        script
-    )
-
-    add_brand_header(
-        draw,
-        "THE LATEST",
-        category
-    )
-
-    draw.text(
-        (60, 245),
-        "DEVELOPMENT",
-        font=font(30, True),
-        fill=RED
-    )
-
-    add_red_line(
-        draw,
-        305,
-        300
-    )
-
-    title = clean_text(
-        script.get(
-            "title",
-            ""
-        )
-    )
-
-    draw_wrapped(
-        draw,
-        title,
-        60,
-        390,
-        font(64, True),
-        WHITE,
-        VIDEO_WIDTH - 120,
-        18
-    )
-
-    county = clean_text(
-        script.get(
-            "county",
-            ""
-        )
-    )
-
-    draw.rounded_rectangle(
-        (60, 1050, 600, 1140),
-        radius=18,
-        fill=RED
-    )
-
-    draw.text(
-        (88, 1074),
-        county.upper(),
-        font=font(32, True),
-        fill=WHITE
-    )
-
-    draw.text(
-        (60, 1270),
-        "VERIFIED DEVELOPMENT UPDATE",
-        font=font(26, True),
-        fill=CYAN
-    )
-
-    draw.text(
-        (60, 1330),
-        "Tracking verified developments across the region.",
-        font=font(28),
-        fill=LIGHT
-    )
-
-    add_footer(
-        draw,
-        source,
-        date
-    )
-
-    image.save(
-        output,
-        quality=95
-    )
-
-
-# ============================================================
-# SCENE 2 — PROJECT / LOCATION
-# ============================================================
-
-def create_location_card(
-    script,
-    output
-):
-
-    image = gradient_background()
-    draw = ImageDraw.Draw(image)
-
-    source, date, category = story_meta(
-        script
-    )
-
-    add_brand_header(
-        draw,
-        "WHERE IT IS",
-        category
-    )
-
-    county = clean_text(
-        script.get(
-            "county",
-            ""
-        )
-    )
-
-    location = get_fact(
-        script,
-        "LOCATION"
-    )
-
-    project = get_fact(
-        script,
-        "PROJECT"
-    )
-
-    draw.text(
-        (60, 235),
-        "LOCATION",
-        font=font(30, True),
-        fill=RED
-    )
-
-    add_red_line(
-        draw,
-        290,
-        230
-    )
-
-    # Stylized county map panel.
-    draw.rounded_rectangle(
-        (55, 380, 1025, 1060),
-        radius=35,
-        fill=(10, 31, 50),
-        outline=(43, 77, 103),
-        width=3
-    )
-
-    # Abstract Kenya silhouette / regional locator.
-    points = [
-        (470, 460),
-        (560, 430),
-        (640, 485),
-        (680, 570),
-        (645, 660),
-        (690, 760),
-        (620, 875),
-        (530, 920),
-        (450, 835),
-        (430, 735),
-        (385, 650),
-        (420, 550)
-    ]
-
-    draw.polygon(
-        points,
-        fill=(21, 53, 76),
-        outline=CYAN
-    )
-
-    # Bomet locator.
-    cx = 525
-    cy = 675
-
-    for radius in (
-        80,
-        55,
-        30
-    ):
-
-        draw.ellipse(
-            (
-                cx - radius,
-                cy - radius,
-                cx + radius,
-                cy + radius
-            ),
-            outline=RED,
-            width=4
-        )
-
-    draw.ellipse(
-        (
-            cx - 12,
-            cy - 12,
-            cx + 12,
-            cy + 12
-        ),
-        fill=RED
-    )
-
-    draw.text(
-        (700, 620),
-        county.upper(),
-        font=font(36, True),
-        fill=WHITE
-    )
-
-    draw.text(
-        (700, 680),
-        "PROJECT AREA",
-        font=font(23, True),
-        fill=RED
-    )
-
-    draw_wrapped(
-        draw,
-        location,
-        700,
-        730,
-        font(28),
-        LIGHT,
-        280,
-        10
-    )
-
-    draw.text(
-        (60, 1120),
-        "PROJECT",
-        font=font(25, True),
-        fill=RED
-    )
-
-    draw_wrapped(
-        draw,
-        project,
-        60,
-        1170,
-        font(32, True),
-        WHITE,
-        VIDEO_WIDTH - 120,
-        12
-    )
-
-    add_footer(
-        draw,
-        source,
-        date
-    )
-
-    image.save(
-        output,
-        quality=95
-    )
-
-
-# ============================================================
-# SCENE 3 — KEY DATA
-# ============================================================
-
-def create_data_card(
-    script,
-    output
-):
-
-    image = gradient_background()
-    draw = ImageDraw.Draw(image)
-
-    source, date, category = story_meta(
-        script
-    )
-
-    add_brand_header(
-        draw,
-        "KEY FACTS",
-        category
-    )
-
-    length = get_fact(
-        script,
-        "ROAD_LENGTH"
-    )
-
-    cost = get_fact(
-        script,
-        "COST"
-    )
-
-    status = get_fact(
-        script,
-        "STATUS"
-    )
-
-    draw.text(
-        (60, 235),
-        "THE NUMBERS",
-        font=font(30, True),
-        fill=RED
-    )
-
-    add_red_line(
-        draw,
-        290,
-        250
-    )
-
-    # 65 KM card.
-    draw.rounded_rectangle(
-        (55, 375, 1025, 680),
-        radius=32,
-        fill=(11, 39, 61),
-        outline=BLUE,
-        width=3
-    )
-
-    draw.text(
-        (90, 425),
-        "ROAD LENGTH",
-        font=font(25, True),
-        fill=CYAN
-    )
-
-    draw.text(
-        (90, 480),
-        length or "Not specified",
-        font=font(76, True),
-        fill=WHITE
-    )
-
-    # Cost card.
-    draw.rounded_rectangle(
-        (55, 725, 1025, 1030),
-        radius=32,
-        fill=(35, 28, 32),
-        outline=RED_DARK,
-        width=3
-    )
-
-    draw.text(
-        (90, 775),
-        "PROJECT COST",
-        font=font(25, True),
-        fill=RED
-    )
-
-    draw.text(
-        (90, 830),
-        cost or "Not specified",
-        font=font(70, True),
-        fill=WHITE
-    )
-
-    # Status strip.
-    draw.rounded_rectangle(
-        (55, 1080, 1025, 1280),
-        radius=25,
-        fill=(17, 48, 38),
-        outline=GREEN,
-        width=3
-    )
-
-    draw.text(
-        (90, 1120),
-        "STATUS",
-        font=font(23, True),
-        fill=GREEN
-    )
-
-    draw_wrapped(
-        draw,
-        status or "Status not specified",
-        90,
-        1170,
-        font(30, True),
-        WHITE,
-        880,
-        8
-    )
-
-    add_footer(
-        draw,
-        source,
-        date
-    )
-
-    image.save(
-        output,
-        quality=95
-    )
-
-
-# ============================================================
-# SCENE 4 — ROUTE / CONTEXT
-# ============================================================
-
-def create_route_card(
-    script,
-    output
-):
-
-    image = gradient_background()
-    draw = ImageDraw.Draw(image)
-
-    source, date, category = story_meta(
-        script
-    )
-
-    add_brand_header(
-        draw,
-        "THE ROUTE",
-        category
-    )
-
-    project = get_fact(
-        script,
-        "PROJECT"
-    )
-
-    context = get_section(
-        script,
-        "context"
-    )
-
-    draw.text(
-        (60, 235),
-        "PROJECT CORRIDOR",
-        font=font(30, True),
-        fill=RED
-    )
-
-    add_red_line(
-        draw,
-        290,
-        310
-    )
-
-    # Route visualization.
-    x1 = 120
-    x2 = 930
-    y = 600
-
-    draw.line(
-        (x1, y, x2, y),
-        fill=(60, 84, 104),
-        width=18
-    )
-
-    # Red progress/route line.
-    draw.line(
-        (x1, y, 720, y),
-        fill=RED,
-        width=18
-    )
-
-    nodes = [
-        (150, "KYOGONG"),
-        (330, "SIGOR"),
-        (510, "CHEBUNYO"),
-        (690, "KIPRERES"),
-        (880, "LONGISA")
-    ]
-
-    for x, label in nodes:
-
-        draw.ellipse(
-            (
-                x - 18,
-                y - 18,
-                x + 18,
-                y + 18
-            ),
-            fill=WHITE,
-            outline=RED,
-            width=5
-        )
-
-        draw.text(
-            (x - 55, y + 45),
-            label,
-            font=font(19, True),
-            fill=LIGHT
-        )
-
-    draw.text(
-        (60, 800),
-        "ROUTE",
-        font=font(24, True),
-        fill=CYAN
-    )
-
-    draw_wrapped(
-        draw,
-        project,
-        60,
-        850,
-        font(32, True),
-        WHITE,
-        VIDEO_WIDTH - 120,
-        12
-    )
-
-    draw.text(
-        (60, 1110),
-        "EDITORIAL NOTE",
-        font=font(24, True),
-        fill=RED
-    )
-
-    draw_wrapped(
-        draw,
-        context,
-        60,
-        1160,
-        font(29),
-        LIGHT,
-        VIDEO_WIDTH - 120,
-        10
-    )
-
-    add_footer(
-        draw,
-        source,
-        date
-    )
-
-    image.save(
-        output,
-        quality=95
-    )
-
-
-# ============================================================
-# SCENE 5 — IMPACT
-# ============================================================
-
-def create_impact_card(
-    script,
-    output
-):
-
-    image = gradient_background()
-    draw = ImageDraw.Draw(image)
-
-    source, date, category = story_meta(
-        script
-    )
-
-    add_brand_header(
-        draw,
-        "WHY IT MATTERS",
-        category
-    )
-
-    impact = get_section(
-        script,
-        "impact"
-    )
-
-    draw.text(
-        (60, 245),
-        "EXPECTED IMPACT",
-        font=font(30, True),
-        fill=RED
-    )
-
-    add_red_line(
-        draw,
-        300,
-        300
-    )
-
-    # Large quotation-style visual.
-    draw.text(
-        (65, 420),
-        "“",
-        font=font(170, True),
-        fill=RED
-    )
-
-    draw_wrapped(
-        draw,
-        impact,
-        115,
-        520,
-        font(43, True),
-        WHITE,
-        VIDEO_WIDTH - 180,
-        16
-    )
-
-    draw.rounded_rectangle(
-        (60, 1160, 1020, 1370),
-        radius=25,
-        fill=(13, 37, 55),
-        outline=BLUE,
-        width=2
-    )
-
-    draw.text(
-        (95, 1200),
-        "VERIFIED REPORTING",
-        font=font(23, True),
-        fill=CYAN
-    )
-
-    draw_wrapped(
-        draw,
-        "Impact is presented only from information "
-        "confirmed in the source material.",
-        95,
-        1250,
-        font(28),
-        LIGHT,
-        870,
-        8
-    )
-
-    add_footer(
-        draw,
-        source,
-        date
-    )
-
-    image.save(
-        output,
-        quality=95
-    )
-
-
-# ============================================================
-# SCENE 6 — SOURCE
-# ============================================================
-
-def create_source_card(
-    script,
-    output
-):
-
-    image = gradient_background()
-    draw = ImageDraw.Draw(image)
-
-    source, date, category = story_meta(
-        script
-    )
-
-    add_brand_header(
-        draw,
-        "SOURCE",
-        category
-    )
-
-    source_url = clean_text(
-        script.get(
-            "source",
-            {}
-        ).get(
-            "url",
-            ""
-        )
-    )
-
-    statement = script.get(
-        "official_statement",
-        {}
-    )
-
-    speaker = clean_text(
-        statement.get(
-            "speaker",
-            ""
-        )
-    )
-
-    draw.text(
-        (60, 250),
-        "REPORTING SOURCE",
-        font=font(30, True),
-        fill=RED
-    )
-
-    add_red_line(
-        draw,
-        305,
-        280
-    )
-
-    draw.rounded_rectangle(
-        (55, 410, 1025, 760),
-        radius=30,
-        fill=(12, 37, 56),
-        outline=CYAN,
-        width=3
-    )
-
-    draw.text(
-        (95, 470),
-        source,
-        font=font(42, True),
-        fill=WHITE
-    )
-
-    draw.text(
-        (95, 555),
-        "OFFICIAL SOURCE",
-        font=font(25, True),
-        fill=CYAN
-    )
-
-    draw.text(
-        (95, 630),
-        date,
-        font=font(30, True),
-        fill=LIGHT
-    )
-
-    if speaker:
-
-        draw.text(
-            (60, 870),
-            "OFFICIAL STATEMENT",
-            font=font(26, True),
-            fill=RED
-        )
-
-        draw_wrapped(
-            draw,
-            f"{speaker} provided the cited official "
-            "statement associated with this report.",
-            60,
-            925,
-            font(30),
-            LIGHT,
-            VIDEO_WIDTH - 120,
-            10
-        )
-
-    if source_url:
-
-        draw.text(
-            (60, 1190),
-            "SOURCE LINK",
-            font=font(24, True),
-            fill=CYAN
-        )
-
-        draw_wrapped(
-            draw,
-            source_url,
-            60,
-            1240,
-            font(22),
-            LIGHT,
-            VIDEO_WIDTH - 120,
-            8
-        )
-
-    add_footer(
-        draw,
-        source,
-        date
-    )
-
-    image.save(
-        output,
-        quality=95
-    )
-
-
-# ============================================================
-# SCENE 7 — OUTRO
-# ============================================================
-
-def create_outro_card(
-    script,
-    output
-):
-
-    image = gradient_background()
-    draw = ImageDraw.Draw(image)
-
-    source, date, category = story_meta(
-        script
-    )
-
-    draw.rectangle(
-        (0, 0, VIDEO_WIDTH, VIDEO_HEIGHT),
-        fill=BLACK
-    )
-
-    # Broadcast accent.
-    draw.rectangle(
-        (0, 0, 22, VIDEO_HEIGHT),
-        fill=RED
-    )
-
-    draw.text(
-        (75, 610),
-        "RIFT VALLEY",
-        font=font(66, True),
-        fill=WHITE
-    )
-
-    draw.text(
-        (75, 700),
-        "WATCH",
-        font=font(96, True),
-        fill=RED
-    )
-
-    draw.rectangle(
-        (75, 830, 620, 838),
-        fill=WHITE
-    )
-
-    draw_wrapped(
-        draw,
-        "Tracking verified developments "
-        "across the region.",
-        75,
-        910,
-        font(42),
-        LIGHT,
-        850,
-        14
-    )
-
-    draw.text(
-        (75, 1190),
-        "FOLLOW FOR VERIFIED REGIONAL NEWS",
-        font=font(29, True),
-        fill=WHITE
-    )
-
-    draw.text(
-        (75, 1260),
-        "NEWS • DEVELOPMENT • COMMUNITY",
-        font=font(23, True),
-        fill=MUTED
-    )
-
-    add_footer(
-        draw,
-        source,
-        date
-    )
-
-    image.save(
-        output,
-        quality=95
-    )
-
-
-# ============================================================
-# CREATE STILL SCENES
-# ============================================================
-
-def create_scenes(
-    script,
-    scene_dir
-):
-
-    scene_dir.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-    scenes = [
-        (
-            "01_hook.png",
-            create_hook_card
-        ),
-        (
-            "02_location.png",
-            create_location_card
-        ),
-        (
-            "03_data.png",
-            create_data_card
-        ),
-        (
-            "04_route.png",
-            create_route_card
-        ),
-        (
-            "05_impact.png",
-            create_impact_card
-        ),
-        (
-            "06_source.png",
-            create_source_card
-        ),
-        (
-            "07_outro.png",
-            create_outro_card
-        )
-    ]
-
-    paths = []
-
-    for index, (
-        filename,
-        function
-    ) in enumerate(scenes, 1):
-
-        print(
-            f"[SCENE {index}/{len(scenes)}] "
-            f"Creating {filename}"
-        )
-
-        path = scene_dir / filename
-
-        function(
-            script,
-            path
-        )
-
-        paths.append(path)
-
-    return paths
-
-
-# ============================================================
-# TEXT TO SPEECH
-# ============================================================
-
-def create_narration(
-    script,
-    output
-):
-
+def create_caption_file(script, work_dir):
     text = clean_text(
-        script.get(
-            "full_script",
-            ""
-        )
+        script.get("full_script", "")
     )
 
-    if not text:
+    caption_file = work_dir / "captions.txt"
 
-        raise RuntimeError(
-            "No full_script found in script.json."
-        )
+    with open(
+        caption_file,
+        "w",
+        encoding="utf-8",
+    ) as f:
+        for line in split_caption_text(text):
+            f.write(line + "\n")
 
-    print(
-        f"Narration words: {len(text.split())}"
+    return caption_file
+
+
+def burn_captions(video_path, script, output_path):
+    caption_file = create_caption_file(
+        script,
+        TEMP_DIR,
     )
 
-    tts = gTTS(
-        text=text,
-        lang="en",
-        slow=False
+    # Use a timed drawtext stream based on the entire
+    # narration. This produces permanent readable captions.
+    #
+    # The captions are deliberately placed above the
+    # bottom branding bar.
+    filter_text = (
+        f"drawtext="
+        f"fontfile={FONT_BOLD}:"
+        f"textfile={caption_file}:"
+        "fontcolor=white:"
+        "fontsize=34:"
+        "line_spacing=8:"
+        "borderw=3:"
+        "bordercolor=black:"
+        "box=1:"
+        "boxcolor=black@0.62:"
+        "boxborderw=18:"
+        "x=(w-text_w)/2:"
+        "y=h-300"
     )
 
-    tts.save(
-        str(output)
-    )
-
-    if not output.exists():
-        raise RuntimeError(
-            "Narration file was not created."
-        )
-
-
-# ============================================================
-# IMAGE TO VIDEO
-# ============================================================
-
-def still_to_video(
-    image,
-    output,
-    duration
-):
-
-    command = [
-        "ffmpeg",
-        "-y",
-
-        "-loop",
-        "1",
-
-        "-i",
-        str(image),
-
-        "-t",
-        f"{duration:.3f}",
-
-        "-vf",
-        (
-            f"scale={VIDEO_WIDTH}:{VIDEO_HEIGHT}:"
-            "force_original_aspect_ratio=decrease,"
-            f"pad={VIDEO_WIDTH}:{VIDEO_HEIGHT}:"
-            "(ow-iw)/2:(oh-ih)/2,"
-            "format=yuv420p"
-        ),
-
-        "-r",
-        str(FPS),
-
-        "-c:v",
-        "libx264",
-
-        "-preset",
-        "veryfast",
-
-        "-crf",
-        "20",
-
-        "-pix_fmt",
-        "yuv420p",
-
-        "-an",
-
-        str(output)
-    ]
-
-    run_command(command)
-
-
-# ============================================================
-# GET AUDIO DURATION
-# ============================================================
-
-def get_duration(path):
-
-    result = run_command(
+    run_command(
         [
-            "ffprobe",
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            str(path)
-        ]
-    )
-
-    return float(
-        result.stdout.strip()
-    )
-
-
-# ============================================================
-# CONCATENATE SCENES
-# ============================================================
-
-def concatenate_scenes(
-    video_files,
-    output
-):
-
-    if not video_files:
-        raise RuntimeError(
-            "No scene videos supplied."
-        )
-
-    inputs = []
-
-    for video in video_files:
-
-        inputs.extend(
-            [
-                "-i",
-                str(video)
-            ]
-        )
-
-    filter_parts = []
-
-    for index in range(
-        len(video_files)
-    ):
-
-        filter_parts.append(
-            f"[{index}:v]"
-            "settb=AVTB,"
-            "setpts=PTS-STARTPTS,"
-            f"fps={FPS},"
-            f"scale={VIDEO_WIDTH}:{VIDEO_HEIGHT}:"
-            "force_original_aspect_ratio=decrease,"
-            f"pad={VIDEO_WIDTH}:{VIDEO_HEIGHT}:"
-            "(ow-iw)/2:(oh-ih)/2,"
-            "format=yuv420p"
-            f"[v{index}]"
-        )
-
-    concat_inputs = "".join(
-        f"[v{index}]"
-        for index in range(
-            len(video_files)
-        )
-    )
-
-    filter_parts.append(
-        concat_inputs
-        + f"concat=n={len(video_files)}:v=1:a=0"
-        "[vout]"
-    )
-
-    command = [
-        "ffmpeg",
-        "-y"
-    ]
-
-    command.extend(inputs)
-
-    command.extend(
-        [
-            "-filter_complex",
-            ";".join(filter_parts),
-
-            "-map",
-            "[vout]",
-
-            "-r",
-            str(FPS),
-
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(video_path),
+            "-vf",
+            filter_text,
             "-c:v",
             "libx264",
-
             "-preset",
-            "veryfast",
-
+            "medium",
             "-crf",
-            "20",
-
+            "19",
             "-pix_fmt",
             "yuv420p",
-
+            "-c:a",
+            "copy",
             "-movflags",
             "+faststart",
-
-            str(output)
+            str(output_path),
         ]
     )
 
-    run_command(command)
-
 
 # ============================================================
-# AUDIO NORMALIZATION + FINAL MIX
+# VIDEO QC
 # ============================================================
 
-def add_narration(
-    video,
-    narration,
-    output
-):
-
-    command = [
-        "ffmpeg",
-        "-y",
-
-        "-i",
-        str(video),
-
-        "-i",
-        str(narration),
-
-        "-filter_complex",
-        (
-            "[1:a]"
-            "loudnorm="
-            "I=-16:"
-            "TP=-1.5:"
-            "LRA=11,"
-            "aresample=48000"
-            "[voice]"
-        ),
-
-        "-map",
-        "0:v:0",
-
-        "-map",
-        "[voice]",
-
-        "-c:v",
-        "copy",
-
-        "-c:a",
-        "aac",
-
-        "-b:a",
-        "128k",
-
-        "-ar",
-        "48000",
-
-        "-shortest",
-
-        "-movflags",
-        "+faststart",
-
-        str(output)
-    ]
-
-    run_command(command)
-
-
-# ============================================================
-# CAPTION TIMING
-# ============================================================
-
-def split_caption_text(
-    text
-):
-
-    sentences = re.split(
-        r"(?<=[.!?])\s+",
-        clean_text(text)
-    )
-
-    sentences = [
-        s.strip()
-        for s in sentences
-        if s.strip()
-    ]
-
-    return sentences
-
-
-def escape_drawtext(text):
-
-    text = text.replace(
-        "\\",
-        "\\\\"
-    )
-
-    text = text.replace(
-        ":",
-        "\\:"
-    )
-
-    text = text.replace(
-        "'",
-        "\\'"
-    )
-
-    text = text.replace(
-        "%",
-        "\\%"
-    )
-
-    return text
-
-
-# ============================================================
-# BURN CAPTIONS
-# ============================================================
-
-def burn_captions(
-    video,
-    script,
-    output
-):
-
-    narration = clean_text(
-        script.get(
-            "full_script",
-            ""
-        )
-    )
-
-    sentences = split_caption_text(
-        narration
-    )
-
-    if not sentences:
-
-        shutil.copy2(
-            video,
-            output
-        )
-
-        return
-
-    duration = get_duration(
-        video
-    )
-
-    total_words = sum(
-        len(sentence.split())
-        for sentence in sentences
-    )
-
-    if total_words <= 0:
-
-        shutil.copy2(
-            video,
-            output
-        )
-
-        return
-
-    filters = []
-
-    current_time = 0.0
-
-    for sentence in sentences:
-
-        words = len(
-            sentence.split()
-        )
-
-        segment_duration = (
-            duration
-            * words
-            / total_words
-        )
-
-        start = current_time
-        end = (
-            current_time
-            + segment_duration
-        )
-
-        safe = escape_drawtext(
-            sentence
-        )
-
-        filters.append(
-            "drawtext="
-            f"fontfile={BOLD_FONT}:"
-            f"text='{safe}':"
-            "fontcolor=white:"
-            "fontsize=42:"
-            "line_spacing=8:"
-            "box=1:"
-            "boxcolor=black@0.78:"
-            "boxborderw=22:"
-            "x=(w-text_w)/2:"
-            "y=h-280:"
-            f"enable='between(t,{start:.3f},{end:.3f})'"
-        )
-
-        current_time = end
-
-    command = [
-        "ffmpeg",
-        "-y",
-
-        "-i",
-        str(video),
-
-        "-vf",
-        ",".join(filters),
-
-        "-c:v",
-        "libx264",
-
-        "-preset",
-        "veryfast",
-
-        "-crf",
-        "20",
-
-        "-pix_fmt",
-        "yuv420p",
-
-        "-c:a",
-        "copy",
-
-        "-movflags",
-        "+faststart",
-
-        str(output)
-    ]
-
-    run_command(command)
-
-
-# ============================================================
-# FINAL QC
-# ============================================================
-
-def validate_video(
-    path
-):
+def validate_video(path):
+    print("\n==========================================")
+    print("VIDEO QC")
+    print("==========================================")
 
     if not path.exists():
-
         raise RuntimeError(
-            "QC FAILED: output MP4 does not exist."
+            "Final MP4 does not exist."
         )
 
     size = path.stat().st_size
 
-    if size < 100000:
-
+    if size < 100_000:
         raise RuntimeError(
-            "QC FAILED: output MP4 is suspiciously small."
+            "Final MP4 is suspiciously small."
         )
 
     result = run_command(
@@ -1843,234 +1969,236 @@ def validate_video(
             "ffprobe",
             "-v",
             "error",
-
             "-show_entries",
-            "stream=codec_type,width,height,codec_name",
-
-            "-show_entries",
-            "format=duration,size",
-
+            (
+                "format=duration,size:"
+                "stream=codec_type,codec_name,"
+                "width,height,r_frame_rate"
+            ),
             "-of",
             "json",
-
-            str(path)
+            str(path),
         ]
     )
 
-    try:
-        info = json.loads(
-            result.stdout
-        )
-    except json.JSONDecodeError:
+    data = json.loads(
+        result.stdout
+    )
 
-        raise RuntimeError(
-            "QC FAILED: ffprobe returned invalid JSON."
-        )
-
-    streams = info.get(
+    streams = data.get(
         "streams",
-        []
+        [],
     )
 
-    video_stream = None
-    audio_stream = None
+    video_streams = [
+        s for s in streams
+        if s.get("codec_type") == "video"
+    ]
 
-    for stream in streams:
+    audio_streams = [
+        s for s in streams
+        if s.get("codec_type") == "audio"
+    ]
 
-        if stream.get(
-            "codec_type"
-        ) == "video":
-
-            video_stream = stream
-
-        elif stream.get(
-            "codec_type"
-        ) == "audio":
-
-            audio_stream = stream
-
-    if video_stream is None:
-
+    if not video_streams:
         raise RuntimeError(
-            "QC FAILED: video stream missing."
+            "QC failed: no video stream."
         )
 
-    if audio_stream is None:
-
+    if not audio_streams:
         raise RuntimeError(
-            "QC FAILED: audio stream missing."
+            "QC failed: no audio stream."
         )
 
-    width = int(
-        video_stream.get(
-            "width",
-            0
-        )
-    )
+    video = video_streams[0]
 
-    height = int(
-        video_stream.get(
-            "height",
-            0
-        )
-    )
-
-    if width != VIDEO_WIDTH or height != VIDEO_HEIGHT:
-
+    if video.get("codec_name") != "h264":
         raise RuntimeError(
-            "QC FAILED: expected "
-            f"{VIDEO_WIDTH}x{VIDEO_HEIGHT}, "
-            f"got {width}x{height}."
+            "QC failed: video codec is not H.264."
+        )
+
+    if int(video.get("width", 0)) != WIDTH:
+        raise RuntimeError(
+            f"QC failed: width is not {WIDTH}."
+        )
+
+    if int(video.get("height", 0)) != HEIGHT:
+        raise RuntimeError(
+            f"QC failed: height is not {HEIGHT}."
         )
 
     duration = float(
-        info.get(
-            "format",
-            {}
-        ).get(
-            "duration",
-            0
-        )
+        data.get("format", {})
+        .get("duration", 0)
     )
 
-    if duration < 5:
-
+    if duration < 10:
         raise RuntimeError(
-            "QC FAILED: video duration is too short."
+            "QC failed: video is too short."
         )
 
-    print()
-    print("=" * 60)
-    print("FINAL VIDEO QC")
-    print("=" * 60)
+    if duration > 180:
+        raise RuntimeError(
+            "QC failed: video exceeds 180 seconds."
+        )
+
     print(
-        f"Video stream: PASS"
+        f"Duration: {duration:.2f} seconds"
     )
+
     print(
-        f"Audio stream: PASS"
+        f"Resolution: "
+        f"{video.get('width')}x"
+        f"{video.get('height')}"
     )
+
     print(
-        f"Resolution: {width}x{height} PASS"
+        f"Video codec: "
+        f"{video.get('codec_name')}"
     )
+
     print(
-        f"Duration: {duration:.2f}s PASS"
+        f"Audio streams: "
+        f"{len(audio_streams)}"
     )
+
     print(
-        f"File size: {size / 1024 / 1024:.2f} MB PASS"
+        f"File size: "
+        f"{size / 1024 / 1024:.2f} MB"
     )
-    print("=" * 60)
+
+    print(
+        "QC RESULT: PASS"
+    )
+
+    return True
 
 
 # ============================================================
-# MAIN PIPELINE
+# SAVE VISUAL PLAN
+# ============================================================
+
+def write_visual_report(script, source_image, scene_names):
+    report = {
+        "version": "V4",
+        "real_source_visual_used": bool(source_image),
+        "source_image": (
+            str(source_image.relative_to(ROOT))
+            if source_image
+            else None
+        ),
+        "scenes": scene_names,
+        "resolution": f"{WIDTH}x{HEIGHT}",
+        "fps": FPS,
+        "visual_policy": {
+            "real_source_visual_first": True,
+            "professional_graphics_fallback": True,
+            "invented_photographs": False,
+        },
+    }
+
+    output = DATA_DIR / "visual_report.json"
+
+    with open(
+        output,
+        "w",
+        encoding="utf-8",
+    ) as f:
+        json.dump(
+            report,
+            f,
+            indent=2,
+            ensure_ascii=False,
+        )
+
+    return output
+
+
+# ============================================================
+# MAIN
 # ============================================================
 
 def main():
+    print("\n")
+    print("==========================================")
+    print("RIFT VALLEY WATCH — VIDEO GENERATOR V4")
+    print("==========================================")
 
-    print("=" * 70)
-    print("RIFT VALLEY WATCH V3 VIDEO GENERATOR")
-    print("=" * 70)
-
-    OUTPUT_DIR.mkdir(
-        parents=True,
-        exist_ok=True
-    )
+    ensure_directories()
 
     script = load_script()
 
-    title = clean_text(
-        script.get(
-            "title",
-            ""
-        )
-    )
+    meta = story_meta(script)
 
-    print()
-    print("TITLE:")
-    print(title)
-
-    print()
-    print("WORD COUNT:")
     print(
-        script.get(
-            "word_count",
-            "unknown"
+        f"\nTITLE: {meta['title']}"
+    )
+
+    print(
+        f"COUNTY: {meta['county']}"
+    )
+
+    print(
+        f"CATEGORY: {meta['category']}"
+    )
+
+    print(
+        f"DATE: {meta['date']}"
+    )
+
+    print("\nEditorial QC:")
+    print(
+        json.dumps(
+            script.get("qc", {}),
+            indent=2,
         )
     )
 
-    with tempfile.TemporaryDirectory(
-        dir=str(OUTPUT_DIR)
-    ) as temp:
+    # --------------------------------------------------------
+    # REAL SOURCE IMAGE
+    # --------------------------------------------------------
 
-        temp_dir = Path(
-            temp
-        )
+    source_image = discover_source_image(
+        script
+    )
 
-        scene_dir = (
-            temp_dir
-            / "scenes"
-        )
-
-        video_scene_dir = (
-            temp_dir
-            / "scene_videos"
-        )
-
-        video_scene_dir.mkdir(
-            parents=True,
-            exist_ok=True
-        )
-
-        narration_file = (
-            temp_dir
-            / "narration.mp3"
-        )
-
-        concatenated = (
-            temp_dir
-            / "concatenated.mp4"
-        )
-
-        narrated = (
-            temp_dir
-            / "narrated.mp4"
-        )
-
-        captioned = (
-            temp_dir
-            / "captioned.mp4"
-        )
-
-        # ----------------------------------------------------
-        # 1. CREATE VISUAL SCENES
-        # ----------------------------------------------------
-
-        print()
+    if source_image:
         print(
-            "[1/6] Creating broadcast visual scenes..."
+            "\nVISUAL MODE: "
+            "REAL OFFICIAL-SOURCE IMAGE + GRAPHICS"
         )
-
-        images = create_scenes(
-            script,
-            scene_dir
-        )
-
-        # ----------------------------------------------------
-        # 2. CREATE NARRATION
-        # ----------------------------------------------------
-
-        print()
+    else:
         print(
-            "[2/6] Creating narration..."
+            "\nVISUAL MODE: "
+            "PROFESSIONAL GRAPHICS FALLBACK"
         )
 
-        create_narration(
+    # --------------------------------------------------------
+    # WORK DIRECTORY
+    # --------------------------------------------------------
+
+    if TEMP_DIR.exists():
+        shutil.rmtree(TEMP_DIR)
+
+    TEMP_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    scene_files = []
+
+    try:
+        # ----------------------------------------------------
+        # NARRATION
+        # ----------------------------------------------------
+
+        narration_path = create_narration(
             script,
-            narration_file
+            TEMP_DIR,
         )
 
-        narration_duration = get_duration(
-            narration_file
+        narration_duration = get_audio_duration(
+            narration_path
         )
 
         print(
@@ -2079,159 +2207,169 @@ def main():
         )
 
         # ----------------------------------------------------
-        # 3. CALCULATE SCENE TIMELINE
+        # SCENES
         # ----------------------------------------------------
 
-        print()
-        print(
-            "[3/6] Building scene timeline..."
+        scenes = create_scenes(
+            script,
+            source_image,
         )
-
-        weights = [
-            0.13,
-            0.14,
-            0.15,
-            0.16,
-            0.16,
-            0.14,
-            0.12
-        ]
-
-        if len(weights) != len(images):
-
-            raise RuntimeError(
-                "Scene weight count does not match image count."
-            )
-
-        weight_total = sum(
-            weights
-        )
-
-        durations = [
-            narration_duration
-            * weight
-            / weight_total
-            for weight in weights
-        ]
 
         scene_names = [
-            "LATEST",
-            "LOCATION",
-            "KEY FACTS",
-            "ROUTE",
-            "WHY IT MATTERS",
-            "SOURCE",
-            "OUTRO"
+            name
+            for name, _ in scenes
         ]
 
-        current = 0.0
-
-        for name, duration in zip(
-            scene_names,
-            durations
-        ):
-
-            print(
-                f"  {name:<18} "
-                f"{current:7.2f}s - "
-                f"{current + duration:7.2f}s "
-                f"({duration:.2f}s)"
-            )
-
-            current += duration
-
-        # ----------------------------------------------------
-        # 4. RENDER INDIVIDUAL SCENES
-        # ----------------------------------------------------
-
-        print()
-        print(
-            "[4/6] Rendering scene videos..."
+        durations = calculate_scene_durations(
+            len(scenes),
+            narration_duration,
         )
 
-        video_files = []
+        print("\n==========================================")
+        print("SCENE TIMELINE")
+        print("==========================================")
 
         for index, (
+            scene_name,
             image,
-            duration
-        ) in enumerate(
-            zip(
-                images,
-                durations
-            ),
-            1
-        ):
+        ) in enumerate(scenes):
 
-            output = (
-                video_scene_dir
-                / f"scene_{index:02d}.mp4"
+            duration = durations[index]
+
+            image_path = (
+                TEMP_DIR /
+                f"scene_{index + 1:02d}.png"
+            )
+
+            video_path = (
+                TEMP_DIR /
+                f"scene_{index + 1:02d}.mp4"
+            )
+
+            image.save(
+                image_path,
+                "PNG",
             )
 
             still_to_video(
-                image,
-                output,
-                duration
+                image_path,
+                duration,
+                video_path,
             )
 
-            video_files.append(
-                output
+            scene_files.append(
+                video_path
+            )
+
+            print(
+                f"{index + 1:02d}. "
+                f"{scene_name:<22} "
+                f"{duration:.2f}s"
             )
 
         # ----------------------------------------------------
-        # 5. CONCAT + NARRATION + CAPTIONS
+        # VISUAL REPORT
         # ----------------------------------------------------
 
-        print()
+        report_path = write_visual_report(
+            script,
+            source_image,
+            scene_names,
+        )
+
         print(
-            "[5/6] Assembling final video..."
+            f"\nVisual report: {report_path}"
+        )
+
+        # ----------------------------------------------------
+        # CONCAT
+        # ----------------------------------------------------
+
+        silent_video = (
+            TEMP_DIR /
+            "silent_video.mp4"
         )
 
         concatenate_scenes(
-            video_files,
-            concatenated
+            scene_files,
+            silent_video,
+        )
+
+        # ----------------------------------------------------
+        # AUDIO
+        # ----------------------------------------------------
+
+        narrated_video = (
+            TEMP_DIR /
+            "narrated_video.mp4"
         )
 
         add_narration(
-            concatenated,
-            narration_file,
-            narrated
+            silent_video,
+            narration_path,
+            narrated_video,
+        )
+
+        # ----------------------------------------------------
+        # CAPTIONS
+        # ----------------------------------------------------
+
+        captioned_video = (
+            TEMP_DIR /
+            "captioned_video.mp4"
         )
 
         burn_captions(
-            narrated,
+            narrated_video,
             script,
-            captioned
+            captioned_video,
         )
 
         # ----------------------------------------------------
-        # 6. FINAL OUTPUT
+        # FINAL OUTPUT
         # ----------------------------------------------------
 
-        print()
-        print(
-            "[6/6] Finalizing and running QC..."
+        OUTPUT_DIR.mkdir(
+            parents=True,
+            exist_ok=True,
         )
+
+        if OUTPUT_FILE.exists():
+            OUTPUT_FILE.unlink()
 
         shutil.copy2(
-            captioned,
-            VIDEO_FILE
+            captioned_video,
+            OUTPUT_FILE,
         )
 
-    validate_video(
-        VIDEO_FILE
-    )
+        # ----------------------------------------------------
+        # FINAL QC
+        # ----------------------------------------------------
 
-    print()
-    print("=" * 70)
-    print("RIFT VALLEY WATCH V3 COMPLETE")
-    print("=" * 70)
-    print(
-        f"OUTPUT: {VIDEO_FILE}"
-    )
-    print()
-    print(
-        "READY FOR GITHUB ARTIFACT UPLOAD."
-    )
+        validate_video(
+            OUTPUT_FILE
+        )
+
+        print("\n==========================================")
+        print("GENERATION COMPLETE")
+        print("==========================================")
+
+        print(
+            f"MP4: {OUTPUT_FILE}"
+        )
+
+        print(
+            "STATUS: SUCCESS"
+        )
+
+    finally:
+        # Keep downloaded source images and the final MP4,
+        # but remove temporary rendering files.
+        if TEMP_DIR.exists():
+            shutil.rmtree(
+                TEMP_DIR,
+                ignore_errors=True,
+            )
 
 
 if __name__ == "__main__":
