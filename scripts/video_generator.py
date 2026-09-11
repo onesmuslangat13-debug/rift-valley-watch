@@ -1,7 +1,14 @@
+# RIFT VALLEY WATCH
+# REAL-TIME REGIONAL NEWS ENGINE
+# Politics + Development + Business + Agriculture + Infrastructure
+# Health + Education + Security + Community
+#
+# EXCLUSION:
+# Rigathi Gachagua and stories primarily about him are excluded.
+
 import json
 import re
-import sys
-import html
+import time
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -9,13 +16,26 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
+# ============================================================
+# PATHS
+# ============================================================
+
 ROOT = Path(__file__).resolve().parent.parent
-STORY_FILE = ROOT / "data" / "story.json"
-SCRIPT_FILE = ROOT / "data" / "script.json"
 
-TIMEOUT = 25
+DATA_DIR = ROOT / "data"
+STORY_FILE = DATA_DIR / "story.json"
+SCRIPT_FILE = DATA_DIR / "script.json"
+
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# ============================================================
+# SETTINGS
+# ============================================================
+
 MAX_STORIES = 12
-
+MAX_STORIES_PER_COUNTY = 2
+REQUEST_TIMEOUT = 20
 
 COUNTIES = [
     "Bomet",
@@ -30,268 +50,537 @@ COUNTIES = [
     "Samburu",
     "Turkana",
     "Laikipia",
+    "Kajiado",
+]
+
+# Gachagua exclusion requested by user.
+EXCLUDED_TERMS = [
+    "rigathi gachagua",
+    "gachagua",
+    "former deputy president gachagua",
+    "former deputy president rigathi",
 ]
 
 
-RSS_SOURCES = [
-    {
-        "name": "Google News",
-        "url": (
-            "https://news.google.com/rss/search?"
-            + urllib.parse.urlencode(
-                {
-                    "q": (
-                        "Kenya Rift Valley county development "
-                        "OR roads OR health OR education OR business"
-                    ),
-                    "hl": "en-KE",
-                    "gl": "KE",
-                    "ceid": "KE:en",
-                }
-            )
-        ),
-    },
-    {
-        "name": "Google News",
-        "url": (
-            "https://news.google.com/rss/search?"
-            + urllib.parse.urlencode(
-                {
-                    "q": (
-                        "Bomet OR Kericho OR Nakuru OR Narok OR Nandi "
-                        "OR Uasin Gishu OR Turkana OR Samburu Kenya"
-                    ),
-                    "hl": "en-KE",
-                    "gl": "KE",
-                    "ceid": "KE:en",
-                }
-            )
-        ),
-    },
+# ============================================================
+# TOPIC DEFINITIONS
+# ============================================================
+
+TOPICS = {
+    "POLITICS": [
+        "politics",
+        "political",
+        "president",
+        "william ruto",
+        "ruto",
+        "uda",
+        "government",
+        "governor",
+        "governor's",
+        "governors",
+        "mp ",
+        "mp,",
+        "senator",
+        "senate",
+        "parliament",
+        "assembly",
+        "election",
+        "2027",
+        "party",
+        "campaign",
+        "rally",
+        "political party",
+        "politician",
+        "cabinet",
+        "deputy president",
+    ],
+
+    "INFRASTRUCTURE": [
+        "road",
+        "roads",
+        "highway",
+        "bridge",
+        "bridges",
+        "airport",
+        "railway",
+        "construction",
+        "water project",
+        "water supply",
+        "dam",
+        "housing",
+        "infrastructure",
+        "electricity",
+        "power",
+        "sewer",
+        "drainage",
+        "market construction",
+    ],
+
+    "AGRICULTURE": [
+        "agriculture",
+        "farmer",
+        "farmers",
+        "farming",
+        "tea",
+        "coffee",
+        "maize",
+        "wheat",
+        "potato",
+        "dairy",
+        "livestock",
+        "cattle",
+        "milk",
+        "horticulture",
+        "irrigation",
+        "fertilizer",
+        "fertiliser",
+        "crop",
+        "crops",
+        "food production",
+        "food security",
+    ],
+
+    "BUSINESS": [
+        "business",
+        "economy",
+        "economic",
+        "investment",
+        "investor",
+        "company",
+        "companies",
+        "industry",
+        "industrial",
+        "factory",
+        "manufacturing",
+        "trade",
+        "market",
+        "markets",
+        "jobs",
+        "employment",
+        "enterprise",
+        "tourism",
+        "hotel",
+        "property",
+        "real estate",
+    ],
+
+    "HEALTH": [
+        "health",
+        "hospital",
+        "hospitals",
+        "clinic",
+        "medical",
+        "doctor",
+        "doctors",
+        "nurse",
+        "nurses",
+        "medicine",
+        "disease",
+        "healthcare",
+        "maternal",
+        "vaccination",
+        "ambulance",
+    ],
+
+    "EDUCATION": [
+        "education",
+        "school",
+        "schools",
+        "university",
+        "universities",
+        "college",
+        "tvet",
+        "students",
+        "teachers",
+        "teacher",
+        "classroom",
+        "scholarship",
+        "learning",
+        "education centre",
+    ],
+
+    "SECURITY": [
+        "security",
+        "police",
+        "crime",
+        "arrest",
+        "robbery",
+        "accident",
+        "fire",
+        "flood",
+        "disaster",
+        "rescue",
+        "missing",
+        "death",
+        "killed",
+        "injured",
+        "terror",
+        "bandit",
+        "banditry",
+    ],
+
+    "COMMUNITY": [
+        "community",
+        "residents",
+        "locals",
+        "local residents",
+        "county",
+        "youth",
+        "women",
+        "cooperative",
+        "co-operatives",
+        "church",
+        "community project",
+        "public participation",
+    ],
+}
+
+
+# ============================================================
+# SEARCH QUERIES
+# ============================================================
+
+SEARCH_QUERIES = [
+    "Rift Valley Kenya politics Ruto UDA 2027",
+    "Rift Valley Kenya government development projects",
+    "Rift Valley Kenya roads infrastructure projects",
+    "Rift Valley Kenya agriculture farmers tea coffee maize dairy",
+    "Rift Valley Kenya business economy investment jobs",
+    "Rift Valley Kenya hospitals health",
+    "Rift Valley Kenya schools education universities",
+    "Rift Valley Kenya security accident flood fire",
+    "Bomet Kenya latest news",
+    "Kericho Kenya latest news",
+    "Nakuru Kenya latest news",
+    "Narok Kenya latest news",
+    "Nandi Kenya latest news",
+    "Uasin Gishu Kenya latest news",
+    "Elgeyo Marakwet Kenya latest news",
+    "West Pokot Kenya latest news",
+    "Trans Nzoia Kenya latest news",
+    "Samburu Kenya latest news",
+    "Turkana Kenya latest news",
+    "Laikipia Kenya latest news",
+    "Kajiado Kenya latest news",
 ]
 
+
+# ============================================================
+# HELPERS
+# ============================================================
 
 def clean_text(value):
     if value is None:
         return ""
 
-    value = html.unescape(str(value))
+    value = str(value)
+
     value = re.sub(r"<[^>]+>", " ", value)
-    value = value.replace("\n", " ")
+    value = value.replace("&amp;", "&")
+    value = value.replace("&quot;", '"')
+    value = value.replace("&#39;", "'")
+    value = value.replace("&apos;", "'")
+    value = value.replace("&lt;", "<")
+    value = value.replace("&gt;", ">")
+
     value = re.sub(r"\s+", " ", value)
 
     return value.strip()
 
 
-def fetch_url(url):
+def normalize(value):
+    return re.sub(r"\s+", " ", clean_text(value)).strip().lower()
+
+
+def contains_excluded_term(text):
+    text = normalize(text)
+
+    for term in EXCLUDED_TERMS:
+        if term in text:
+            return True
+
+    return False
+
+
+def detect_county(text):
+    text_lower = normalize(text)
+
+    # Long names first.
+    counties_sorted = sorted(
+        COUNTIES,
+        key=len,
+        reverse=True,
+    )
+
+    for county in counties_sorted:
+        if normalize(county) in text_lower:
+            return county
+
+    # Common regional references.
+    aliases = {
+        "uasingishu": "Uasin Gishu",
+        "uasin gishu": "Uasin Gishu",
+        "elgeyo marakwet": "Elgeyo-Marakwet",
+        "elgeyo-marakwet": "Elgeyo-Marakwet",
+        "west pokot": "West Pokot",
+        "trans nzoia": "Trans Nzoia",
+    }
+
+    for alias, county in aliases.items():
+        if alias in text_lower:
+            return county
+
+    return ""
+
+
+def detect_topic(text):
+    text_lower = normalize(text)
+
+    scores = {}
+
+    for topic, keywords in TOPICS.items():
+        score = 0
+
+        for keyword in keywords:
+            if keyword in text_lower:
+                score += 1
+
+        scores[topic] = score
+
+    best_topic = max(
+        scores,
+        key=scores.get,
+    )
+
+    if scores[best_topic] == 0:
+        return "COMMUNITY"
+
+    return best_topic
+
+
+def parse_date(value):
+    if not value:
+        return ""
+
+    value = clean_text(value)
+
+    try:
+        parsed = time.strptime(
+            value,
+            "%a, %d %b %Y %H:%M:%S %z",
+        )
+
+        return time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ",
+            parsed,
+        )
+
+    except Exception:
+        pass
+
+    return value
+
+
+def request_url(url):
     request = urllib.request.Request(
         url,
         headers={
             "User-Agent": (
                 "Mozilla/5.0 "
-                "RiftValleyWatch/1.0"
+                "RiftValleyWatch/2.0"
             )
         },
     )
 
     with urllib.request.urlopen(
         request,
-        timeout=TIMEOUT,
+        timeout=REQUEST_TIMEOUT,
     ) as response:
+
         return response.read()
 
 
-def parse_date(value):
-    value = clean_text(value)
+# ============================================================
+# GOOGLE NEWS RSS
+# ============================================================
 
-    if not value:
-        return datetime.now(timezone.utc).isoformat()
+def google_news_url(query):
+    encoded = urllib.parse.quote(query)
 
-    formats = [
-        "%a, %d %b %Y %H:%M:%S %Z",
-        "%a, %d %b %Y %H:%M:%S %z",
-        "%Y-%m-%dT%H:%M:%S%z",
-        "%Y-%m-%dT%H:%M:%SZ",
-    ]
-
-    for date_format in formats:
-        try:
-            parsed = datetime.strptime(value, date_format)
-            return parsed.astimezone(timezone.utc).isoformat()
-        except ValueError:
-            continue
-
-    return value
+    return (
+        "https://news.google.com/rss/search"
+        f"?q={encoded}"
+        "&hl=en-KE"
+        "&gl=KE"
+        "&ceid=KE:en"
+    )
 
 
-def parse_rss(xml_bytes, source_name):
+def parse_rss(xml_data):
     stories = []
 
     try:
-        root = ET.fromstring(xml_bytes)
-    except ET.ParseError as error:
-        print(f"RSS parsing failed: {error}")
+        root = ET.fromstring(xml_data)
+    except Exception as exc:
+        print(
+            f"RSS parse error: {exc}"
+        )
         return stories
 
     for item in root.findall(".//item"):
-        title = clean_text(
-            item.findtext("title")
-        )
 
-        link = clean_text(
-            item.findtext("link")
+        title = clean_text(
+            item.findtext("title", "")
         )
 
         description = clean_text(
-            item.findtext("description")
+            item.findtext("description", "")
         )
+
+        link = clean_text(
+            item.findtext("link", "")
+        )
+
+        source_node = item.find("source")
+
+        source = ""
+
+        if source_node is not None:
+            source = clean_text(
+                source_node.text
+            )
 
         published = parse_date(
-            item.findtext("pubDate")
-            or item.findtext("published")
-            or ""
+            item.findtext("pubDate", "")
         )
 
-        if not title or not link:
+        combined = (
+            f"{title} "
+            f"{description}"
+        )
+
+        if not title:
             continue
+
+        # Hard exclusion.
+        if contains_excluded_term(combined):
+            continue
+
+        county = detect_county(combined)
+
+        if not county:
+            continue
+
+        topic = detect_topic(combined)
 
         stories.append(
             {
                 "title": title,
-                "url": link,
+                "county": county,
+                "category": topic,
                 "description": description,
+                "source": source or "Google News",
+                "url": link,
                 "published": published,
-                "source": source_name,
             }
         )
 
     return stories
 
 
-def fetch_live_stories():
-    all_stories = []
+# ============================================================
+# STORY QUALITY
+# ============================================================
 
-    for source in RSS_SOURCES:
-        print(f"Fetching live source: {source['name']}")
+def score_story(story):
+    title = normalize(
+        story.get("title", "")
+    )
 
-        try:
-            xml_bytes = fetch_url(source["url"])
-            stories = parse_rss(
-                xml_bytes,
-                source["name"],
-            )
-            all_stories.extend(stories)
-        except Exception as error:
-            print(
-                f"Could not fetch {source['name']}: {error}"
-            )
+    description = normalize(
+        story.get("description", "")
+    )
 
-    return all_stories
+    text = f"{title} {description}"
 
+    score = 0
 
-def identify_county(text):
-    text = clean_text(text).lower()
+    # Political stories are important.
+    if story["category"] == "POLITICS":
+        score += 9
 
-    for county in COUNTIES:
-        if county.lower() in text:
-            return county
+    # Development and infrastructure.
+    if story["category"] in [
+        "INFRASTRUCTURE",
+        "BUSINESS",
+        "AGRICULTURE",
+    ]:
+        score += 7
 
-    return "Rift Valley"
+    if story["category"] in [
+        "HEALTH",
+        "EDUCATION",
+        "SECURITY",
+    ]:
+        score += 6
 
-
-def classify_story(title, description):
-    text = f"{title} {description}".lower()
-
-    categories = [
-        (
-            "INFRASTRUCTURE",
-            [
-                "road",
-                "bridge",
-                "construction",
-                "water project",
-                "dam",
-                "electricity",
-            ],
-        ),
-        (
-            "HEALTH",
-            [
-                "hospital",
-                "health",
-                "clinic",
-                "medicine",
-                "maternal",
-                "disease",
-            ],
-        ),
-        (
-            "EDUCATION",
-            [
-                "school",
-                "education",
-                "student",
-                "teacher",
-                "university",
-                "classroom",
-            ],
-        ),
-        (
-            "AGRICULTURE",
-            [
-                "farmer",
-                "agriculture",
-                "maize",
-                "tea",
-                "coffee",
-                "livestock",
-                "dairy",
-            ],
-        ),
-        (
-            "BUSINESS",
-            [
-                "business",
-                "investment",
-                "market",
-                "trade",
-                "company",
-                "jobs",
-                "employment",
-            ],
-        ),
-        (
-            "GOVERNANCE",
-            [
-                "county government",
-                "governor",
-                "deputy president",
-                "president",
-                "ministry",
-                "government",
-            ],
-        ),
+    # Strong breaking-news language.
+    urgent_words = [
+        "breaking",
+        "latest",
+        "announces",
+        "launches",
+        "approves",
+        "reveals",
+        "unveils",
+        "new",
+        "major",
+        "billions",
+        "million",
+        "project",
+        "agreement",
+        "investment",
     ]
 
-    for category, keywords in categories:
-        if any(keyword in text for keyword in keywords):
-            return category
+    for word in urgent_words:
+        if word in text:
+            score += 2
 
-    return "DEVELOPMENT"
+    # Stories with a proper source URL are preferred.
+    if story.get("url"):
+        score += 3
+
+    if story.get("source"):
+        score += 2
+
+    # Specific county is already required.
+    if story.get("county"):
+        score += 2
+
+    return score
 
 
-def deduplicate_stories(stories):
-    result = []
+def deduplicate(stories):
     seen = set()
+    result = []
 
     for story in stories:
-        key = re.sub(
-            r"[^a-z0-9]+",
-            "",
-            story["title"].lower(),
+
+        key = normalize(
+            story.get("title", "")
         )
 
-        if not key or key in seen:
+        # Remove common punctuation.
+        key = re.sub(
+            r"[^a-z0-9]+",
+            " ",
+            key,
+        ).strip()
+
+        if not key:
+            continue
+
+        if key in seen:
             continue
 
         seen.add(key)
@@ -300,332 +589,522 @@ def deduplicate_stories(stories):
     return result
 
 
-def select_regional_stories(stories):
-    stories = deduplicate_stories(stories)
+# ============================================================
+# REGIONAL SELECTION
+# ============================================================
 
-    selected = []
-    counties_seen = set()
+def select_stories(stories):
+    stories = deduplicate(stories)
 
-    # First, prioritize county diversity.
     for story in stories:
-        county = identify_county(
-            f"{story['title']} {story['description']}"
+        story["_score"] = score_story(
+            story
         )
 
-        if county not in counties_seen:
-            story["county"] = county
-            story["category"] = classify_story(
-                story["title"],
-                story["description"],
-            )
-            selected.append(story)
-            counties_seen.add(county)
+    stories.sort(
+        key=lambda x: x["_score"],
+        reverse=True,
+    )
+
+    selected = []
+    county_counts = {}
+
+    # First pass:
+    # maximize county diversity.
+    for story in stories:
+
+        county = story["county"]
+
+        if county_counts.get(
+            county,
+            0,
+        ) >= 1:
+            continue
+
+        selected.append(story)
+
+        county_counts[county] = (
+            county_counts.get(
+                county,
+                0,
+            ) + 1
+        )
+
+        if len(selected) >= MAX_STORIES:
+            return selected
+
+    # Second pass:
+    # add stronger additional stories.
+    for story in stories:
+
+        if story in selected:
+            continue
+
+        county = story["county"]
+
+        if county_counts.get(
+            county,
+            0,
+        ) >= MAX_STORIES_PER_COUNTY:
+            continue
+
+        selected.append(story)
+
+        county_counts[county] = (
+            county_counts.get(
+                county,
+                0,
+            ) + 1
+        )
 
         if len(selected) >= MAX_STORIES:
             break
 
-    # Fill remaining slots with other fresh stories.
-    if len(selected) < MAX_STORIES:
-        selected_keys = {
-            story["title"]
-            for story in selected
-        }
-
-        for story in stories:
-            if story["title"] in selected_keys:
-                continue
-
-            story["county"] = identify_county(
-                f"{story['title']} {story['description']}"
-            )
-
-            story["category"] = classify_story(
-                story["title"],
-                story["description"],
-            )
-
-            selected.append(story)
-
-            if len(selected) >= MAX_STORIES:
-                break
-
     return selected
 
 
-def make_fallback_story():
-    return {
-        "title": (
-            "Rift Valley Watch regional update"
-        ),
-        "county": "Rift Valley",
-        "category": "DEVELOPMENT",
-        "date": datetime.now(
-            timezone.utc
-        ).date().isoformat(),
-        "source": "Live regional news feed",
-        "source_url": "",
-        "verified_facts": {
-            "LOCATION": "Rift Valley, Kenya",
-            "STATUS": "Live feed available",
-            "IMPACT": (
-                "Regional developments are being monitored "
-                "across the Rift Valley."
-            ),
-        },
-        "official_statement": {
-            "speaker": "",
-            "quote": "",
-        },
-        "stories": [],
-        "summary": (
-            "Rift Valley Watch is monitoring fresh developments "
-            "across counties in the region."
-        ),
-    }
+# ============================================================
+# NARRATION
+# ============================================================
+
+def make_story_narration(story):
+    title = clean_text(
+        story.get("title", "")
+    )
+
+    county = clean_text(
+        story.get("county", "")
+    )
+
+    category = clean_text(
+        story.get("category", "")
+    )
+
+    description = clean_text(
+        story.get("description", "")
+    )
+
+    if len(description) > 280:
+        description = (
+            description[:277].rstrip()
+            + "..."
+        )
+
+    if description:
+        return (
+            f"{county}. "
+            f"{title}. "
+            f"{description}"
+        )
+
+    return (
+        f"{county}. "
+        f"{title}."
+    )
 
 
-def build_story_payload(stories):
-    if not stories:
-        return make_fallback_story()
-
-    current_date = datetime.now(
-        timezone.utc
-    ).date().isoformat()
-
-    regional_items = []
+def build_script(stories, generated_at):
+    counties = []
 
     for story in stories:
-        regional_items.append(
+        county = story["county"]
+
+        if county not in counties:
+            counties.append(county)
+
+    narration = []
+
+    narration.append(
+        "Rift Valley Watch. "
+        "Here are the latest major developments "
+        "across Kenya's Rift Valley."
+    )
+
+    for story in stories:
+        narration.append(
+            make_story_narration(story)
+        )
+
+    narration.append(
+        "That is the latest regional roundup "
+        "from Rift Valley Watch."
+    )
+
+    scenes = []
+
+    scenes.append(
+        {
+            "type": "opener",
+            "text": (
+                "RIFT VALLEY WATCH\n"
+                "LIVE REGIONAL ROUNDUP"
+            ),
+            "narration": narration[0],
+        }
+    )
+
+    scenes.append(
+        {
+            "type": "coverage",
+            "text": (
+                "REGIONAL COVERAGE\n"
+                + " • ".join(counties)
+            ),
+            "narration": (
+                "Today's bulletin brings together "
+                "fresh developments from across "
+                "the Rift Valley."
+            ),
+        }
+    )
+
+    for index, story in enumerate(
+        stories,
+        start=1,
+    ):
+
+        scenes.append(
             {
+                "type": "story",
+                "index": index,
+                "county": story["county"],
+                "category": story["category"],
                 "title": story["title"],
-                "county": story.get(
-                    "county",
-                    "Rift Valley",
-                ),
-                "category": story.get(
-                    "category",
-                    "DEVELOPMENT",
-                ),
-                "description": story.get(
-                    "description",
-                    "",
-                ),
-                "source": story.get(
-                    "source",
-                    "Live news feed",
-                ),
-                "url": story.get(
-                    "url",
-                    "",
-                ),
-                "published": story.get(
-                    "published",
-                    "",
+                "description": story[
+                    "description"
+                ],
+                "source": story["source"],
+                "url": story["url"],
+                "published": story[
+                    "published"
+                ],
+                "narration": make_story_narration(
+                    story
                 ),
             }
         )
 
-    first = regional_items[0]
+    scenes.append(
+        {
+            "type": "outro",
+            "text": "RIFT VALLEY WATCH",
+            "narration": narration[-1],
+        }
+    )
 
     return {
         "title": (
             "Rift Valley Watch: "
-            f"{len(regional_items)} Fresh Regional Updates"
+            f"{len(stories)} Fresh Regional Updates"
         ),
-        "county": "Rift Valley",
-        "category": "REGIONAL ROUNDUP",
-        "date": current_date,
-        "source": "Live RSS news feeds",
-        "source_url": "",
-        "verified_facts": {
-            "LOCATION": "Rift Valley, Kenya",
-            "STATUS": "Fresh stories collected automatically",
-            "IMPACT": (
-                "The roundup tracks current developments "
-                "across counties in the Rift Valley."
-            ),
-        },
-        "official_statement": {
-            "speaker": "",
-            "quote": "",
-        },
-        "stories": regional_items,
-        "lead_story": first,
-        "summary": (
-            "Fresh regional developments collected from live "
-            "news feeds covering the Rift Valley."
-        ),
-    }
-
-
-def build_script(story):
-    stories = story.get("stories", [])
-
-    if not stories:
-        return {
-            "title": story["title"],
-            "narration": [
-                (
-                    "This is Rift Valley Watch, tracking "
-                    "verified developments across the region."
-                )
-            ],
-            "scenes": [],
-        }
-
-    narration = [
-        (
-            "This is Rift Valley Watch, bringing you fresh "
-            "developments from across Kenya's Rift Valley."
-        )
-    ]
-
-    scenes = []
-
-    for index, item in enumerate(stories, start=1):
-        county = clean_text(
-            item.get("county", "Rift Valley")
-        )
-
-        category = clean_text(
-            item.get("category", "DEVELOPMENT")
-        )
-
-        title = clean_text(
-            item.get("title", "")
-        )
-
-        description = clean_text(
-            item.get("description", "")
-        )
-
-        source = clean_text(
-            item.get("source", "Live news feed")
-        )
-
-        if description:
-            spoken = (
-                f"Update {index}, from {county}. "
-                f"{title}. {description}. "
-                f"Source: {source}."
-            )
-        else:
-            spoken = (
-                f"Update {index}, from {county}. "
-                f"{title}. "
-                f"Source: {source}."
-            )
-
-        narration.append(spoken)
-
-        scenes.append(
-            {
-                "scene": index,
-                "county": county,
-                "category": category,
-                "title": title,
-                "description": description,
-                "source": source,
-                "source_url": item.get("url", ""),
-                "narration": spoken,
-            }
-        )
-
-    narration.append(
-        "That is the latest regional roundup from Rift Valley Watch."
-    )
-
-    return {
-        "title": story["title"],
-        "generated_at": datetime.now(
-            timezone.utc
-        ).isoformat(),
+        "generated_at": generated_at,
+        "counties": counties,
+        "story_count": len(stories),
         "narration": narration,
         "scenes": scenes,
     }
 
 
-def save_json(path, payload):
-    path.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+# ============================================================
+# OUTPUT
+# ============================================================
 
-    with path.open("w", encoding="utf-8") as file:
+def build_story_json(
+    stories,
+    generated_at,
+):
+    counties = []
+
+    for story in stories:
+        if story["county"] not in counties:
+            counties.append(
+                story["county"]
+            )
+
+    lead = stories[0] if stories else None
+
+    story_data = {
+        "title": (
+            "Rift Valley Watch: "
+            f"{len(stories)} Fresh Regional Updates"
+        ),
+        "county": "Rift Valley",
+        "category": "REGIONAL ROUNDUP",
+        "date": generated_at,
+        "source": "Live RSS news feeds",
+        "source_url": "",
+        "verified_facts": {
+            "LOCATION": (
+                "Rift Valley, Kenya"
+            ),
+            "COUNTIES": ", ".join(
+                counties
+            ),
+            "STATUS": (
+                "Fresh stories collected "
+                "automatically from live feeds"
+            ),
+            "STORY_COUNT": len(stories),
+        },
+        "official_statement": {
+            "speaker": "",
+            "quote": "",
+        },
+        "stories": stories,
+        "lead_story": lead,
+        "summary": (
+            "Automated regional news roundup "
+            "covering fresh developments across "
+            "the Rift Valley."
+        ),
+    }
+
+    # Never expose internal scoring.
+    for story in story_data["stories"]:
+        story.pop(
+            "_score",
+            None,
+        )
+
+    if story_data["lead_story"]:
+        story_data[
+            "lead_story"
+        ].pop(
+            "_score",
+            None,
+        )
+
+    return story_data
+
+
+def save_json(path, data):
+    with open(
+        path,
+        "w",
+        encoding="utf-8",
+    ) as file:
+
         json.dump(
-            payload,
+            data,
             file,
             indent=2,
             ensure_ascii=False,
         )
 
 
+# ============================================================
+# FALLBACK
+# ============================================================
+
+def build_empty_story(generated_at):
+    return {
+        "title": (
+            "Rift Valley Watch: "
+            "Live Regional Update"
+        ),
+        "county": "Rift Valley",
+        "category": "REGIONAL ROUNDUP",
+        "date": generated_at,
+        "source": "Live RSS news feeds",
+        "source_url": "",
+        "verified_facts": {
+            "LOCATION": (
+                "Rift Valley, Kenya"
+            ),
+            "STATUS": (
+                "No qualifying fresh stories "
+                "were retrieved during this run"
+            ),
+            "STORY_COUNT": 0,
+        },
+        "official_statement": {
+            "speaker": "",
+            "quote": "",
+        },
+        "stories": [],
+        "lead_story": None,
+        "summary": (
+            "No qualifying fresh regional stories "
+            "were retrieved during this run."
+        ),
+    }
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
 def main():
-    print("=" * 60)
-    print("STARTING REAL-TIME RIFT VALLEY NEWS ENGINE")
-    print("=" * 60)
 
-    print("[1/4] Fetching live news...")
-    live_stories = fetch_live_stories()
+    print("=" * 50)
+    print("RIFT VALLEY WATCH REAL-TIME NEWS ENGINE")
+    print("=" * 50)
 
-    print(
-        f"Stories collected: {len(live_stories)}"
-    )
-
-    print("[2/4] Selecting regional coverage...")
-    selected_stories = select_regional_stories(
-        live_stories
+    generated_at = datetime.now(
+        timezone.utc
+    ).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
     )
 
     print(
-        f"Stories selected: {len(selected_stories)}"
+        f"Generated: {generated_at}"
     )
 
-    print("[3/4] Building regional story...")
-    story = build_story_payload(
-        selected_stories
+    all_stories = []
+
+    print()
+    print(
+        f"Searching {len(SEARCH_QUERIES)} "
+        "live news feeds..."
     )
 
-    print("[4/4] Building narration script...")
-    script = build_script(story)
+    for index, query in enumerate(
+        SEARCH_QUERIES,
+        start=1,
+    ):
+
+        print(
+            f"[{index}/{len(SEARCH_QUERIES)}] "
+            f"{query}"
+        )
+
+        try:
+            url = google_news_url(
+                query
+            )
+
+            xml_data = request_url(
+                url
+            )
+
+            found = parse_rss(
+                xml_data
+            )
+
+            print(
+                f"    Found {len(found)} "
+                "qualifying items"
+            )
+
+            all_stories.extend(found)
+
+        except Exception as exc:
+
+            print(
+                f"    Feed unavailable: {exc}"
+            )
+
+    print()
+    print(
+        f"Collected: {len(all_stories)} "
+        "candidate stories"
+    )
+
+    # Final hard exclusion.
+    all_stories = [
+        story
+        for story in all_stories
+        if not contains_excluded_term(
+            (
+                story.get("title", "")
+                + " "
+                + story.get(
+                    "description",
+                    "",
+                )
+            )
+        )
+    ]
+
+    selected = select_stories(
+        all_stories
+    )
+
+    print(
+        f"Selected: {len(selected)} "
+        "regional stories"
+    )
+
+    if selected:
+
+        print()
+        print("SELECTED STORIES")
+        print("-" * 50)
+
+        for index, story in enumerate(
+            selected,
+            start=1,
+        ):
+
+            print(
+                f"{index}. "
+                f"[{story['county']}] "
+                f"[{story['category']}]"
+            )
+
+            print(
+                f"   {story['title']}"
+            )
+
+            print(
+                f"   Source: "
+                f"{story['source']}"
+            )
+
+    else:
+        print()
+        print(
+            "No qualifying stories found."
+        )
+
+    # --------------------------------------------------------
+    # STORY JSON
+    # --------------------------------------------------------
+
+    story_data = (
+        build_story_json(
+            selected,
+            generated_at,
+        )
+        if selected
+        else build_empty_story(
+            generated_at
+        )
+    )
 
     save_json(
         STORY_FILE,
-        story,
+        story_data,
+    )
+
+    # --------------------------------------------------------
+    # SCRIPT JSON
+    # --------------------------------------------------------
+
+    script_data = build_script(
+        selected,
+        generated_at,
     )
 
     save_json(
         SCRIPT_FILE,
-        script,
+        script_data,
     )
 
-    print("=" * 60)
-    print("REAL-TIME NEWS ENGINE SUCCESSFUL")
-    print(f"Story file: {STORY_FILE}")
-    print(f"Script file: {SCRIPT_FILE}")
+    print()
     print(
-        "Coverage: "
-        + ", ".join(
-            sorted(
-                {
-                    item.get(
-                        "county",
-                        "Rift Valley",
-                    )
-                    for item in selected_stories
-                }
-            )
-        )
+        f"Saved: {STORY_FILE}"
     )
-    print("=" * 60)
+
+    print(
+        f"Saved: {SCRIPT_FILE}"
+    )
+
+    print()
+    print("=" * 50)
+    print("NEWS ENGINE COMPLETED SUCCESSFULLY")
+    print("=" * 50)
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as error:
-        print("=" * 60)
-        print("NEWS ENGINE FAILED")
-        print(str(error))
-        print("=" * 60)
-        sys.exit(1)
+    main()
