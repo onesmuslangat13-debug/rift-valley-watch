@@ -32,18 +32,18 @@
       "value": "Ongoing construction works"
     },
     {
-      "label": "EXPECTED_IMPACT",
-      "value": "The project is expected to unlock the economic potential of the area and wider Bomet County"
+      "label": "IMPACT",
+      "value": "Expected to unlock economic potential in the area and wider Bomet County"
     }
   ],
 
   "official_statement": {
     "available": true,
     "speaker": "Deputy President Kithure Kindiki",
-    "quote": "The Roads and Transport Ministry has been instructed to closely monitor the performance of road construction to ensure speedy completion and quality works now that the sustainable funding for road construction has been unlocked by the president."
+    "quote": "The Roads and Transport Ministry has been instructed to closely monitor road construction to ensure speedy completion and quality works."
   },
 
-  "summary": "Construction is ongoing on a 65-kilometre road project linking Kyogong, Kapkesosio, Sigor and Chebunyo, with another section running through Sigor, Lelaitich, Kipreres and Longisa in Bomet County. The Bomet County Government says the project is being constructed at a cost of KSh 2.1 billion in Chepalungu Constituency and is expected to unlock the economic potential of the area and the wider county.",
+  "summary": "Construction is ongoing on a 65-kilometre road project linking Kyogong, Kapkesosio, Sigor and Chebunyo, with another section running through Sigor, Lelaitich, Kipreres and Longisa in Bomet County. The Bomet County Government says the project is being constructed at a cost of KSh 2.1 billion in Chepalungu Constituency and is expected to unlock the economic potential of the area and wider county.",
 
   "visuals": [
     {
@@ -52,41 +52,38 @@
     },
     {
       "type": "LOCATION_GRAPHIC",
-      "description": "Bomet County and Chepalungu Constituency location graphic"
+      "description": "Bomet County and Chepalungu Constituency"
     },
     {
       "type": "DATA_CARD",
-      "description": "65 KM road length | KSh 2.1 billion project cost"
+      "description": "65 KM | KSh 2.1 billion"
     },
     {
       "type": "ROUTE_GRAPHIC",
-      "description": "Kyogong-Kapkesosio-Sigor-Chebunyo / Sigor-Lelaitich-Kipreres-Longisa route"
+      "description": "Kyogong-Kapkesosio-Sigor-Chebunyo / Sigor-Lelaitich-Kipreres-Longisa"
     },
     {
       "type": "OFFICIAL_STATEMENT",
-      "description": "Deputy President Kithure Kindiki statement on monitoring road construction"
+      "description": "Deputy President Kithure Kindiki statement on road construction monitoring"
     },
     {
       "type": "SOURCE_CARD",
-      "description": "Bomet County Government, March 18, 2026"
+      "description": "Bomet County Government"
     }
   ],
 
   "editorial": {
     "confirmed": [
-      "Construction works on the road project are ongoing.",
+      "Construction works are ongoing.",
       "The road project covers 65 kilometres.",
       "The reported project cost is KSh 2.1 billion.",
-      "The project is located in Chepalungu Constituency, Bomet County.",
-      "The Bomet County Government says the project is expected to unlock economic potential in the area and wider county.",
-      "Deputy President Kithure Kindiki called for close monitoring of road construction to ensure speedy completion and quality works."
+      "The project is in Chepalungu Constituency, Bomet County.",
+      "The county government says the project is expected to unlock economic potential."
     ],
     "unconfirmed": [
-      "Exact percentage of construction completed.",
-      "Exact completion date.",
-      "Contractor name.",
-      "Exact funding breakdown.",
-      "Exact number of residents or businesses expected to benefit."
+      "Exact completion date",
+      "Contractor name",
+      "Exact funding breakdown"
     ]
   }
 }
