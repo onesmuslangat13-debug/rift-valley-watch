@@ -1425,9 +1425,11 @@ def validate_video(
         "-v",
         "error",
 
+        # FIX:
+        # codec_type MUST be requested so QC can identify
+        # the video and audio streams.
         "-show_entries",
-        "stream="
-        "width,height,codec_name",
+        "stream=codec_type,width,height,codec_name",
 
         "-show_entries",
         "format=duration",
@@ -1451,7 +1453,7 @@ def validate_video(
 
     if not streams:
         raise RuntimeError(
-            "QC FAILED: no video stream."
+            "QC FAILED: no streams detected."
         )
 
     video_stream = None
