@@ -1,8 +1,40 @@
+# ============================================================
+# RIFT VALLEY WATCH
+# VIDEO GENERATOR V7
+#
+# REBUILT FROM SCRATCH
+#
+# OUTPUT:
+#   output/rift_valley_watch.mp4
+#
+# FORMAT:
+#   1080 x 1920
+#   30 FPS
+#   H.264 + AAC
+#   Vertical 9:16
+#
+# DESIGN:
+#   Professional regional-news bulletin
+#   Real photographs
+#   Strong headline presentation
+#   Key facts
+#   Regional/location graphic
+#   Route/project visual
+#   Impact
+#   Official statement
+#   Clean outro
+#
+# IMPORTANT:
+#   NO SOURCE CARD
+#   NO RAW PYTHON DICTIONARIES ON SCREEN
+#   NO SOURCE URL ON SCREEN
+#   NO STATIC SINGLE-CARD FREEZE
+# ============================================================
+
 import os
 import re
 import json
 import math
-import html
 import shutil
 import subprocess
 from pathlib import Path
@@ -13,37 +45,38 @@ from gtts import gTTS
 
 
 # ============================================================
-# RIFT VALLEY WATCH — V4 EDITORIAL VIDEO GENERATOR
+# PATHS
 # ============================================================
 
 ROOT = Path(__file__).resolve().parent.parent
 
-STORY_FILE = ROOT / "data" / "story.json"
-SCRIPT_FILE = ROOT / "data" / "script.json"
-
+DATA_DIR = ROOT / "data"
+ASSETS_DIR = ROOT / "assets"
+SOURCE_DIR = ASSETS_DIR / "source"
+AUDIO_DIR = ROOT / "output" / "audio"
+SCENES_DIR = ROOT / "output" / "scenes"
 OUTPUT_DIR = ROOT / "output"
-SCENES_DIR = OUTPUT_DIR / "scenes"
-AUDIO_DIR = OUTPUT_DIR / "audio"
 
-SOURCE_DIR = ROOT / "assets" / "source"
+STORY_FILE = DATA_DIR / "story.json"
+SCRIPT_FILE = DATA_DIR / "script.json"
 
 FINAL_VIDEO = OUTPUT_DIR / "rift_valley_watch.mp4"
-TEMP_VIDEO = OUTPUT_DIR / "rift_valley_watch_temp.mp4"
+VISUAL_REPORT = DATA_DIR / "visual_report.json"
+
+
+# ============================================================
+# VIDEO SETTINGS
+# ============================================================
 
 WIDTH = 1080
 HEIGHT = 1920
 FPS = 30
 
-BG = (8, 12, 20)
-BG2 = (15, 21, 32)
-WHITE = (245, 247, 250)
-MUTED = (174, 184, 198)
-RED = (215, 45, 45)
-BLUE = (35, 100, 190)
-GOLD = (220, 170, 55)
-GREEN = (55, 160, 100)
-CARD = (19, 27, 40)
-CARD2 = (25, 34, 49)
+VIDEO_CODEC = "libx264"
+AUDIO_CODEC = "aac"
+
+VIDEO_BITRATE = "6500k"
+AUDIO_BITRATE = "192k"
 
 FONT_DIRS = [
     ROOT / "fonts",
@@ -51,34 +84,31 @@ FONT_DIRS = [
     Path("/usr/share/fonts/truetype/liberation2"),
 ]
 
-REGULAR_FONT = None
-BOLD_FONT = None
-
-
 # ============================================================
-# BASIC HELPERS
+# COLORS
 # ============================================================
 
-def log(message):
-    print(message, flush=True)
+BLACK = (7, 10, 15)
+WHITE = (248, 249, 250)
+LIGHT = (220, 225, 232)
+GREY = (150, 158, 170)
+DARK_GREY = (35, 41, 50)
+
+RED = (210, 35, 45)
+YELLOW = (242, 190, 55)
+GREEN = (45, 170, 105)
+BLUE = (45, 105, 190)
+
+# ============================================================
+# UTILITIES
+# ============================================================
 
 
-def ensure_dirs():
-    for directory in [
-        OUTPUT_DIR,
-        SCENES_DIR,
-        AUDIO_DIR,
-        SOURCE_DIR,
-    ]:
-        directory.mkdir(parents=True, exist_ok=True)
-
-
-def run_command(command, label="COMMAND"):
-    log("")
-    log("=" * 70)
-    log(label)
-    log("=" * 70)
-    log(" ".join(str(x) for x in command))
+def run_command(command):
+    print()
+    print("COMMAND:")
+    print(" ".join(str(x) for x in command))
+    print()
 
     result = subprocess.run(
         command,
@@ -88,198 +118,105 @@ def run_command(command, label="COMMAND"):
     )
 
     if result.stdout:
-        print(result.stdout, flush=True)
+        print(result.stdout)
 
     if result.returncode != 0:
         raise RuntimeError(
-            f"{label} failed with exit code {result.returncode}"
+            "Command failed with exit code "
+            f"{result.returncode}"
         )
 
     return result
+
+
+def ffmpeg_exists():
+    return shutil.which("ffmpeg") is not None
+
+
+def ffprobe_exists():
+    return shutil.which("ffprobe") is not None
+
+
+def ensure_directories():
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+    SCENES_DIR.mkdir(parents=True, exist_ok=True)
+    SOURCE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def clean_text(value):
     if value is None:
         return ""
 
-    if isinstance(value, dict):
-        for key in ["text", "description", "summary", "title", "name"]:
-            if key in value and value[key]:
-                return clean_text(value[key])
-        return ""
+    value = str(value)
 
-    if isinstance(value, list):
-        parts = []
-        for item in value:
-            text = clean_text(item)
-            if text:
-                parts.append(text)
-        return " ".join(parts)
+    value = re.sub(r"\s+", " ", value)
 
-    text = str(value)
-    text = html.unescape(text)
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
+    return value.strip()
 
 
-def source_name(story):
-    """
-    NEVER display a Python dictionary representation.
+def safe_filename(value):
+    value = clean_text(value)
 
-    Handles:
-      "Bomet County Government"
-      {"name": "Bomet County Government", "url": "..."}
-      {"source": "..."}
-      [{"name": "..."}]
-    """
-
-    source = story.get("source", "")
-
-    if isinstance(source, dict):
-        for key in [
-            "name",
-            "title",
-            "publisher",
-            "organization",
-            "source",
-        ]:
-            value = source.get(key)
-            if value:
-                return clean_text(value)
-
-        return "Official/source reporting"
-
-    if isinstance(source, list):
-        for item in source:
-            value = clean_text(item)
-            if value:
-                return value
-        return "Official/source reporting"
-
-    text = clean_text(source)
-
-    if text.startswith("{") and text.endswith("}"):
-        try:
-            parsed = json.loads(text.replace("'", '"'))
-            if isinstance(parsed, dict):
-                for key in ["name", "title", "publisher", "source"]:
-                    if parsed.get(key):
-                        return clean_text(parsed[key])
-        except Exception:
-            pass
-
-    return text or "Official/source reporting"
-
-
-def story_url(story):
-    source = story.get("source")
-
-    if isinstance(source, dict):
-        return clean_text(
-            source.get("url")
-            or story.get("url")
-            or ""
-        )
-
-    return clean_text(story.get("url") or "")
-
-
-def county_name(story):
-    value = story.get("county") or story.get("location") or ""
-
-    if isinstance(value, dict):
-        value = value.get("name") or value.get("county") or ""
-
-    text = clean_text(value)
-
-    if text:
-        return text
-
-    return "Rift Valley"
-
-
-def category_name(story):
-    value = story.get("category") or story.get("topic") or "Regional News"
-    return clean_text(value).title()
-
-
-def story_title(story):
-    return clean_text(
-        story.get("title")
-        or story.get("headline")
-        or "Rift Valley News Update"
+    value = re.sub(
+        r"[^A-Za-z0-9_-]+",
+        "_",
+        value,
     )
 
-
-def story_description(story):
-    return clean_text(
-        story.get("description")
-        or story.get("summary")
-        or story.get("narration")
-        or ""
-    )
-
-
-def published_text(story):
-    value = clean_text(
-        story.get("published")
-        or story.get("date")
-        or story.get("published_at")
-        or ""
-    )
-
-    if not value:
-        return "Latest report"
-
-    return value
+    return value[:80]
 
 
 # ============================================================
-# FONT SYSTEM
+# FONT HANDLING
 # ============================================================
 
-def locate_font(names):
+
+def find_font(bold=False):
+    if bold:
+        names = [
+            "DejaVuSans-Bold.ttf",
+            "LiberationSans-Bold.ttf",
+        ]
+    else:
+        names = [
+            "DejaVuSans.ttf",
+            "LiberationSans-Regular.ttf",
+        ]
+
     for directory in FONT_DIRS:
         if not directory.exists():
             continue
 
         for name in names:
-            candidate = directory / name
-            if candidate.exists():
-                return str(candidate)
+            path = directory / name
+
+            if path.exists():
+                return str(path)
 
     return None
 
 
-def setup_fonts():
-    global REGULAR_FONT
-    global BOLD_FONT
-
-    REGULAR_FONT = locate_font([
-        "DejaVuSans.ttf",
-        "LiberationSans-Regular.ttf",
-    ])
-
-    BOLD_FONT = locate_font([
-        "DejaVuSans-Bold.ttf",
-        "LiberationSans-Bold.ttf",
-    ])
-
-    if REGULAR_FONT is None or BOLD_FONT is None:
-        raise RuntimeError("Could not locate system fonts.")
+FONT_REGULAR = find_font(False)
+FONT_BOLD = find_font(True)
 
 
-def font(size, bold=False):
-    path = BOLD_FONT if bold else REGULAR_FONT
-    return ImageFont.truetype(path, size)
+def get_font(size, bold=False):
+    path = FONT_BOLD if bold else FONT_REGULAR
+
+    if path:
+        return ImageFont.truetype(path, size)
+
+    return ImageFont.load_default()
 
 
 # ============================================================
 # TEXT WRAPPING
 # ============================================================
 
-def wrap_text(draw, text, font_obj, max_width):
+
+def wrap_text(draw, text, font, max_width):
     words = clean_text(text).split()
 
     if not words:
@@ -290,7 +227,13 @@ def wrap_text(draw, text, font_obj, max_width):
 
     for word in words[1:]:
         test = current + " " + word
-        bbox = draw.textbbox((0, 0), test, font=font_obj)
+
+        bbox = draw.textbbox(
+            (0, 0),
+            test,
+            font=font,
+        )
+
         width = bbox[2] - bbox[0]
 
         if width <= max_width:
@@ -300,61 +243,376 @@ def wrap_text(draw, text, font_obj, max_width):
             current = word
 
     lines.append(current)
+
     return lines
 
 
-def draw_wrapped(
+def draw_wrapped_text(
     draw,
     text,
-    xy,
-    font_obj,
-    fill,
+    x,
+    y,
     max_width,
+    font,
+    fill,
     line_gap=12,
-    max_lines=None,
 ):
-    x, y = xy
-
     lines = wrap_text(
         draw,
         text,
-        font_obj,
+        font,
         max_width,
     )
 
-    if max_lines:
-        if len(lines) > max_lines:
-            lines = lines[:max_lines]
-
-            last = lines[-1]
-            if not last.endswith("…"):
-                lines[-1] = last.rstrip(" .,;:") + "…"
-
-    bbox = draw.textbbox(
-        (x, y),
-        "Ag",
-        font=font_obj,
-    )
-
-    line_height = bbox[3] - bbox[1]
+    current_y = y
 
     for line in lines:
         draw.text(
-            (x, y),
+            (x, current_y),
             line,
-            font=font_obj,
+            font=font,
             fill=fill,
         )
-        y += line_height + line_gap
 
-    return y
+        bbox = draw.textbbox(
+            (x, current_y),
+            line,
+            font=font,
+        )
+
+        current_y += (
+            bbox[3] - bbox[1] + line_gap
+        )
+
+    return current_y
 
 
 # ============================================================
-# GENERAL GRAPHICS
+# PHOTO HANDLING
 # ============================================================
 
-def rounded_rectangle(draw, box, radius, fill, outline=None, width=1):
+
+def find_story_photo(story):
+    candidates = []
+
+    image_path = story.get("image_path")
+
+    if image_path:
+        candidates.append(ROOT / image_path)
+
+    image_url = story.get("image_url")
+
+    # URL is not downloaded here.
+    # news_engine.py is responsible for downloading it.
+
+    story_id = story.get("id")
+
+    if story_id:
+        candidates.extend(
+            SOURCE_DIR.glob(
+                f"*{safe_filename(story_id)}*"
+            )
+        )
+
+    title = safe_filename(
+        story.get("title", "")
+    )
+
+    if title:
+        candidates.extend(
+            SOURCE_DIR.glob(
+                f"*{title[:30]}*"
+            )
+        )
+
+    candidates.extend(
+        SOURCE_DIR.glob("story_*")
+    )
+
+    seen = set()
+
+    for candidate in candidates:
+        try:
+            candidate = candidate.resolve()
+        except Exception:
+            pass
+
+        if str(candidate) in seen:
+            continue
+
+        seen.add(str(candidate))
+
+        if not candidate.exists():
+            continue
+
+        try:
+            with Image.open(candidate) as image:
+                width, height = image.size
+
+                if width < 300 or height < 300:
+                    continue
+
+                if width * height < 150000:
+                    continue
+
+                return candidate
+
+        except Exception:
+            continue
+
+    return None
+
+
+def crop_photo(photo_path):
+    try:
+        image = Image.open(photo_path).convert("RGB")
+    except Exception:
+        return None
+
+    target_ratio = WIDTH / HEIGHT
+    source_ratio = image.width / image.height
+
+    if source_ratio > target_ratio:
+        new_width = int(
+            image.height * target_ratio
+        )
+
+        left = (
+            image.width - new_width
+        ) // 2
+
+        image = image.crop(
+            (
+                left,
+                0,
+                left + new_width,
+                image.height,
+            )
+        )
+
+    else:
+        new_height = int(
+            image.width / target_ratio
+        )
+
+        top = (
+            image.height - new_height
+        ) // 2
+
+        image = image.crop(
+            (
+                0,
+                top,
+                image.width,
+                top + new_height,
+            )
+        )
+
+    image = image.resize(
+        (WIDTH, HEIGHT),
+        Image.Resampling.LANCZOS,
+    )
+
+    return image
+
+
+def create_photo_background(photo_path):
+    if not photo_path:
+        return None
+
+    image = crop_photo(photo_path)
+
+    if image is None:
+        return None
+
+    # Slightly darken photo so typography remains broadcast-clean.
+    overlay = Image.new(
+        "RGBA",
+        image.size,
+        (0, 0, 0, 90),
+    )
+
+    image = image.convert("RGBA")
+
+    image.alpha_composite(overlay)
+
+    return image.convert("RGB")
+
+
+# ============================================================
+# GRAPHIC BACKGROUNDS
+# ============================================================
+
+
+def create_news_background():
+    image = Image.new(
+        "RGB",
+        (WIDTH, HEIGHT),
+        BLACK,
+    )
+
+    draw = ImageDraw.Draw(image)
+
+    # Broadcast-style horizontal bands
+    for y in range(0, HEIGHT, 120):
+        shade = int(
+            12 + (y / HEIGHT) * 15
+        )
+
+        draw.rectangle(
+            (0, y, WIDTH, y + 118),
+            fill=(
+                shade,
+                shade + 3,
+                shade + 8,
+            ),
+        )
+
+    # Fine grid
+    for x in range(0, WIDTH, 90):
+        draw.line(
+            (x, 0, x, HEIGHT),
+            fill=(24, 29, 36),
+            width=1,
+        )
+
+    for y in range(0, HEIGHT, 90):
+        draw.line(
+            (0, y, WIDTH, y),
+            fill=(24, 29, 36),
+            width=1,
+        )
+
+    # Red broadcast accent
+    draw.rectangle(
+        (0, 0, WIDTH, 16),
+        fill=RED,
+    )
+
+    return image
+
+
+def add_header(
+    image,
+    section,
+    county="",
+    breaking=False,
+):
+    draw = ImageDraw.Draw(image)
+
+    # Header
+    draw.rectangle(
+        (0, 16, WIDTH, 135),
+        fill=(8, 12, 18),
+    )
+
+    draw.rectangle(
+        (0, 135, WIDTH, 141),
+        fill=RED,
+    )
+
+    logo_font = get_font(
+        44,
+        bold=True,
+    )
+
+    draw.text(
+        (55, 48),
+        "RIFT VALLEY",
+        font=logo_font,
+        fill=WHITE,
+    )
+
+    draw.text(
+        (55, 91),
+        "WATCH",
+        font=get_font(
+            25,
+            bold=True,
+        ),
+        fill=YELLOW,
+    )
+
+    section_font = get_font(
+        27,
+        bold=True,
+    )
+
+    section_text = clean_text(
+        section
+    ).upper()
+
+    bbox = draw.textbbox(
+        (0, 0),
+        section_text,
+        font=section_font,
+    )
+
+    section_width = (
+        bbox[2] - bbox[0]
+    )
+
+    draw.text(
+        (
+            WIDTH - section_width - 55,
+            53,
+        ),
+        section_text,
+        font=section_font,
+        fill=WHITE,
+    )
+
+    if county:
+        county_font = get_font(
+            23,
+            bold=True,
+        )
+
+        draw.text(
+            (55, 150),
+            clean_text(county).upper(),
+            font=county_font,
+            fill=YELLOW,
+        )
+
+    if breaking:
+        draw.rectangle(
+            (
+                WIDTH - 245,
+                150,
+                WIDTH - 35,
+                198,
+            ),
+            fill=RED,
+        )
+
+        draw.text(
+            (
+                WIDTH - 220,
+                159,
+            ),
+            "LATEST",
+            font=get_font(
+                22,
+                bold=True,
+            ),
+            fill=WHITE,
+        )
+
+
+# ============================================================
+# CARD / PANEL HELPERS
+# ============================================================
+
+
+def rounded_panel(
+    draw,
+    box,
+    fill=(15, 20, 28),
+    outline=(55, 63, 74),
+    radius=28,
+    width=2,
+):
     draw.rounded_rectangle(
         box,
         radius=radius,
@@ -364,983 +622,1181 @@ def rounded_rectangle(draw, box, radius, fill, outline=None, width=1):
     )
 
 
-def draw_header(draw, county, category, story_number=None):
-    draw.rectangle(
-        (0, 0, WIDTH, 145),
-        fill=(6, 10, 17),
-    )
-
-    draw.rectangle(
-        (0, 140, WIDTH, 145),
-        fill=RED,
-    )
-
-    draw.text(
-        (55, 28),
-        "RIFT VALLEY WATCH",
-        font=font(42, True),
-        fill=WHITE,
-    )
-
-    right = f"{county.upper()}  •  {category.upper()}"
-
-    if story_number is not None:
-        right = f"STORY {story_number:02d}  •  {right}"
-
-    bbox = draw.textbbox(
-        (0, 0),
-        right,
-        font=font(22, True),
-    )
-
-    draw.text(
+def accent_bar(
+    draw,
+    x,
+    y,
+    width=90,
+    height=8,
+):
+    draw.rounded_rectangle(
         (
-            WIDTH - 55 - (bbox[2] - bbox[0]),
-            88,
+            x,
+            y,
+            x + width,
+            y + height,
         ),
-        right,
-        font=font(22, True),
-        fill=MUTED,
-    )
-
-
-def draw_footer(draw):
-    y = HEIGHT - 105
-
-    draw.rectangle(
-        (0, y, WIDTH, HEIGHT),
-        fill=(6, 10, 17),
-    )
-
-    draw.rectangle(
-        (0, y, WIDTH, y + 4),
+        radius=4,
         fill=RED,
     )
 
+
+# ============================================================
+# INTRO
+# ============================================================
+
+
+def create_intro():
+    image = create_news_background()
+
+    draw = ImageDraw.Draw(image)
+
+    draw.rectangle(
+        (0, 0, WIDTH, HEIGHT),
+        fill=(7, 10, 15),
+    )
+
+    draw.rectangle(
+        (0, 0, WIDTH, 18),
+        fill=RED,
+    )
+
+    # Large broadcast mark
     draw.text(
-        (55, y + 35),
-        "RIFT VALLEY WATCH",
-        font=font(24, True),
+        (70, 610),
+        "RIFT VALLEY",
+        font=get_font(
+            82,
+            bold=True,
+        ),
         fill=WHITE,
     )
 
     draw.text(
-        (WIDTH - 320, y + 35),
-        "REGIONAL NEWS",
-        font=font(22, True),
-        fill=MUTED,
+        (70, 710),
+        "WATCH",
+        font=get_font(
+            105,
+            bold=True,
+        ),
+        fill=YELLOW,
     )
 
-
-def save_image(image, path):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    image.convert("RGB").save(
-        path,
-        quality=94,
-        optimize=True,
+    accent_bar(
+        draw,
+        75,
+        850,
+        180,
+        10,
     )
 
-
-# ============================================================
-# PHOTO HANDLING
-# ============================================================
-
-def find_story_photo(story):
-    candidates = []
-
-    for key in [
-        "image_path",
-        "photo",
-        "image",
-        "image_url",
-        "photo_url",
-    ]:
-        value = story.get(key)
-
-        if value:
-            if isinstance(value, dict):
-                value = (
-                    value.get("path")
-                    or value.get("url")
-                    or value.get("src")
-                )
-
-            if value:
-                candidates.append(str(value))
-
-    for candidate in candidates:
-        path = Path(candidate)
-
-        if not path.is_absolute():
-            path = ROOT / candidate
-
-        if path.exists() and path.is_file():
-            return path
-
-    return None
-
-
-def crop_photo(photo_path, target_size=(WIDTH, 1050)):
-    target_w, target_h = target_size
-
-    try:
-        image = Image.open(photo_path).convert("RGB")
-    except Exception:
-        return None
-
-    image.thumbnail(
-        (target_w * 2, target_h * 2),
-        Image.Resampling.LANCZOS,
+    draw.text(
+        (75, 900),
+        "REGIONAL NEWS BULLETIN",
+        font=get_font(
+            34,
+            bold=True,
+        ),
+        fill=LIGHT,
     )
 
-    source_ratio = image.width / image.height
-    target_ratio = target_w / target_h
-
-    if source_ratio > target_ratio:
-        new_height = image.height
-        new_width = int(new_height * target_ratio)
-    else:
-        new_width = image.width
-        new_height = int(new_width / target_ratio)
-
-    left = max(0, (image.width - new_width) // 2)
-    top = max(0, (image.height - new_height) // 2)
-
-    image = image.crop(
-        (
-            left,
-            top,
-            left + new_width,
-            top + new_height,
-        )
+    draw.text(
+        (75, 955),
+        "Bomet • Kericho • Nakuru • Narok • Nandi",
+        font=get_font(
+            25,
+            bold=False,
+        ),
+        fill=GREY,
     )
 
-    image = image.resize(
-        (target_w, target_h),
-        Image.Resampling.LANCZOS,
+    draw.text(
+        (75, 1000),
+        "Uasin Gishu • Trans Nzoia • Turkana • Samburu",
+        font=get_font(
+            25,
+            bold=False,
+        ),
+        fill=GREY,
+    )
+
+    draw.text(
+        (75, 1060),
+        "Elgeyo-Marakwet • West Pokot • Laikipia • Kajiado",
+        font=get_font(
+            25,
+            bold=False,
+        ),
+        fill=GREY,
+    )
+
+    now = datetime.now().strftime(
+        "%d %b %Y"
+    )
+
+    draw.text(
+        (75, 1160),
+        now.upper(),
+        font=get_font(
+            26,
+            bold=True,
+        ),
+        fill=YELLOW,
     )
 
     return image
 
 
-def add_photo_overlay(image):
-    overlay = Image.new(
-        "RGBA",
-        image.size,
-        (0, 0, 0, 0),
-    )
-
-    draw = ImageDraw.Draw(overlay)
-
-    height = image.height
-
-    for i in range(height):
-        alpha = int(
-            170 * (i / max(1, height - 1))
-        )
-
-        draw.line(
-            (0, i, image.width, i),
-            fill=(0, 0, 0, alpha),
-        )
-
-    return Image.alpha_composite(
-        image.convert("RGBA"),
-        overlay,
-    ).convert("RGB")
-
-
 # ============================================================
-# SCENE 1 — HEADLINE / REAL PHOTO
+# HEADLINE SCENE
 # ============================================================
 
-def create_headline_scene(story, story_number, path):
-    image = Image.new(
-        "RGB",
-        (WIDTH, HEIGHT),
-        BG,
-    )
+
+def create_headline_scene(story):
+    photo = find_story_photo(story)
+
+    if photo:
+        image = create_photo_background(
+            photo
+        )
+    else:
+        image = create_news_background()
 
     draw = ImageDraw.Draw(image)
 
-    photo_path = find_story_photo(story)
+    add_header(
+        image,
+        story.get("category", "REGIONAL NEWS"),
+        story.get("county", ""),
+        breaking=True,
+    )
 
-    if photo_path:
-        photo = crop_photo(
-            photo_path,
-            (WIDTH, 1050),
+    # Dark lower panel
+    panel_top = 720
+
+    draw.rectangle(
+        (
+            0,
+            panel_top,
+            WIDTH,
+            HEIGHT,
+        ),
+        fill=(6, 9, 14),
+    )
+
+    draw.rectangle(
+        (
+            0,
+            panel_top,
+            WIDTH,
+            panel_top + 8,
+        ),
+        fill=RED,
+    )
+
+    label_font = get_font(
+        26,
+        bold=True,
+    )
+
+    draw.text(
+        (60, 790),
+        "REGIONAL UPDATE",
+        font=label_font,
+        fill=YELLOW,
+    )
+
+    title = clean_text(
+        story.get("title", "")
+    )
+
+    draw_wrapped_text(
+        draw,
+        title,
+        60,
+        850,
+        WIDTH - 120,
+        get_font(
+            57,
+            bold=True,
+        ),
+        WHITE,
+        line_gap=16,
+    )
+
+    summary = clean_text(
+        story.get("summary", "")
+    )
+
+    if summary:
+        draw_wrapped_text(
+            draw,
+            summary,
+            60,
+            1230,
+            WIDTH - 120,
+            get_font(
+                29,
+                bold=False,
+            ),
+            LIGHT,
+            line_gap=12,
         )
 
-        if photo:
-            photo = add_photo_overlay(photo)
+    # Bottom ticker
+    draw.rectangle(
+        (
+            0,
+            HEIGHT - 105,
+            WIDTH,
+            HEIGHT,
+        ),
+        fill=(10, 14, 20),
+    )
 
-            image.paste(
-                photo,
-                (0, 145),
+    draw.text(
+        (55, HEIGHT - 75),
+        "RIFT VALLEY WATCH",
+        font=get_font(
+            24,
+            bold=True,
+        ),
+        fill=RED,
+    )
+
+    return image
+
+
+# ============================================================
+# KEY FACTS SCENE
+# ============================================================
+
+
+def create_key_facts_scene(story):
+    image = create_news_background()
+
+    draw = ImageDraw.Draw(image)
+
+    add_header(
+        image,
+        "KEY FACTS",
+        story.get("county", ""),
+    )
+
+    draw.text(
+        (60, 270),
+        "WHAT WE KNOW",
+        font=get_font(
+            48,
+            bold=True,
+        ),
+        fill=WHITE,
+    )
+
+    accent_bar(
+        draw,
+        60,
+        345,
+        125,
+        9,
+    )
+
+    facts = story.get(
+        "verified_facts",
+        [],
+    )
+
+    # Accept both:
+    # [{"label": "...", "value": "..."}]
+    # and strings.
+    normalized = []
+
+    for fact in facts:
+        if isinstance(fact, dict):
+            label = clean_text(
+                fact.get("label", "")
             )
 
-    else:
-        draw.rectangle(
-            (0, 145, WIDTH, 1195),
-            fill=BG2,
-        )
+            value = clean_text(
+                fact.get("value", "")
+            )
 
-        draw.text(
-            (55, 550),
-            "REAL-TIME\nREGIONAL NEWS",
-            font=font(70, True),
-            fill=MUTED,
-        )
+            if value:
+                normalized.append(
+                    (
+                        label,
+                        value,
+                    )
+                )
 
-    draw_header(
-        draw,
-        county_name(story),
-        category_name(story),
-        story_number,
-    )
+        elif isinstance(fact, str):
+            if fact.strip():
+                normalized.append(
+                    (
+                        "FACT",
+                        clean_text(fact),
+                    )
+                )
 
-    # Breaking-news label
-    rounded_rectangle(
-        draw,
-        (55, 190, 390, 250),
-        12,
-        RED,
-    )
+    y = 420
 
-    draw.text(
-        (78, 205),
-        "LATEST REPORT",
-        font=font(25, True),
-        fill=WHITE,
-    )
+    for index, (label, value) in enumerate(
+        normalized[:6],
+        start=1,
+    ):
+        panel_height = 185
 
-    # Headline area
-    title = story_title(story)
-
-    y = 1200
-
-    y = draw_wrapped(
-        draw,
-        title,
-        (55, y),
-        font(62, True),
-        WHITE,
-        WIDTH - 110,
-        line_gap=14,
-        max_lines=4,
-    )
-
-    y += 35
-
-    draw.rectangle(
-        (55, y, 175, y + 6),
-        fill=RED,
-    )
-
-    y += 30
-
-    draw.text(
-        (55, y),
-        f"{county_name(story)}  •  {category_name(story)}",
-        font=font(27, True),
-        fill=MUTED,
-    )
-
-    draw_footer(draw)
-
-    save_image(image, path)
-
-
-# ============================================================
-# SCENE 2 — KEY FACTS
-# ============================================================
-
-def create_key_facts_scene(story, story_number, path):
-    image = Image.new(
-        "RGB",
-        (WIDTH, HEIGHT),
-        BG,
-    )
-
-    draw = ImageDraw.Draw(image)
-
-    draw_header(
-        draw,
-        county_name(story),
-        category_name(story),
-        story_number,
-    )
-
-    draw.text(
-        (55, 225),
-        "KEY FACTS",
-        font=font(64, True),
-        fill=WHITE,
-    )
-
-    draw.rectangle(
-        (55, 305, 200, 311),
-        fill=RED,
-    )
-
-    description = story_description(story)
-
-    title = story_title(story)
-
-    facts = [
-        title,
-        description,
-        f"Location: {county_name(story)}",
-        f"Category: {category_name(story)}",
-        f"Reported: {published_text(story)}",
-    ]
-
-    y = 380
-
-    for index, fact in enumerate(facts):
-        rounded_rectangle(
+        rounded_panel(
             draw,
             (
-                55,
+                50,
                 y,
-                WIDTH - 55,
-                y + 235,
+                WIDTH - 50,
+                y + panel_height,
             ),
-            20,
-            CARD,
         )
 
-        draw.ellipse(
-            (85, y + 45, 130, y + 90),
+        number = f"{index:02d}"
+
+        draw.text(
+            (80, y + 30),
+            number,
+            font=get_font(
+                34,
+                bold=True,
+            ),
             fill=RED,
         )
 
+        label_text = clean_text(
+            label
+        ).replace("_", " ").upper()
+
         draw.text(
-            (101, y + 50),
-            str(index + 1),
-            font=font(22, True),
-            fill=WHITE,
+            (155, y + 34),
+            label_text,
+            font=get_font(
+                22,
+                bold=True,
+            ),
+            fill=YELLOW,
         )
 
-        draw_wrapped(
+        draw_wrapped_text(
             draw,
-            fact,
-            (160, y + 38),
-            font(31, True if index == 0 else False),
-            WHITE if index == 0 else MUTED,
-            WIDTH - 250,
-            line_gap=9,
-            max_lines=5,
+            value,
+            155,
+            y + 82,
+            WIDTH - 235,
+            get_font(
+                28,
+                bold=True,
+            ),
+            WHITE,
+            line_gap=8,
         )
 
-        y += 260
+        y += panel_height + 25
 
-        if y > HEIGHT - 300:
+        if y > HEIGHT - 240:
             break
 
-    draw_footer(draw)
-
-    save_image(image, path)
+    return image
 
 
 # ============================================================
-# SCENE 3 — ROUTE / REGIONAL CORRIDOR
+# LOCATION SCENE
 # ============================================================
 
-def is_infrastructure_story(story):
-    text = (
-        story_title(story)
-        + " "
-        + story_description(story)
-        + " "
-        + category_name(story)
-    ).lower()
 
-    keywords = [
-        "road",
-        "highway",
-        "corridor",
-        "bridge",
-        "construction",
-        "infrastructure",
-        "expressway",
-        "bypass",
-        "airport",
-        "rail",
-        "water project",
-        "pipeline",
-    ]
-
-    return any(word in text for word in keywords)
-
-
-def extract_route_points(story):
-    text = (
-        story_title(story)
-        + " "
-        + story_description(story)
-    )
-
-    county = county_name(story)
-
-    possible = [
-        "Bomet",
-        "Kericho",
-        "Nakuru",
-        "Narok",
-        "Nandi",
-        "Eldoret",
-        "Uasin Gishu",
-        "Kapsabet",
-        "Kisii",
-        "Longisa",
-        "Sigor",
-        "Kipreres",
-        "Sotik",
-        "Litein",
-        "Kisumu",
-        "Mau Summit",
-        "Naivasha",
-        "Turkana",
-        "Kitale",
-        "Kapenguria",
-        "Maralal",
-        "Kajiado",
-        "Kilgoris",
-        "Lodwar",
-    ]
-
-    found = []
-
-    lowered = text.lower()
-
-    for place in possible:
-        if place.lower() in lowered and place not in found:
-            found.append(place)
-
-    if county not in found:
-        found.insert(0, county)
-
-    return found[:6]
-
-
-def create_route_scene(story, story_number, path):
-    image = Image.new(
-        "RGB",
-        (WIDTH, HEIGHT),
-        BG,
-    )
+def create_location_scene(story):
+    image = create_news_background()
 
     draw = ImageDraw.Draw(image)
 
-    draw_header(
-        draw,
-        county_name(story),
-        category_name(story),
-        story_number,
+    add_header(
+        image,
+        "REGIONAL FOCUS",
+        story.get("county", ""),
     )
 
-    if is_infrastructure_story(story):
-        heading = "ROUTE CORRIDOR"
-        subtitle = "Regional infrastructure focus"
-    else:
-        heading = "REGIONAL FOCUS"
-        subtitle = "Where the story is unfolding"
+    county = clean_text(
+        story.get("county", "")
+    )
+
+    summary = clean_text(
+        story.get("summary", "")
+    )
 
     draw.text(
-        (55, 225),
-        heading,
-        font=font(60, True),
+        (60, 280),
+        "WHERE IT IS HAPPENING",
+        font=get_font(
+            43,
+            bold=True,
+        ),
         fill=WHITE,
     )
 
-    draw.text(
-        (55, 305),
-        subtitle,
-        font=font(28),
-        fill=MUTED,
+    accent_bar(
+        draw,
+        60,
+        355,
+        130,
+        9,
     )
 
-    points = extract_route_points(story)
+    rounded_panel(
+        draw,
+        (
+            55,
+            430,
+            WIDTH - 55,
+            790,
+        ),
+        fill=(13, 28, 45),
+        outline=BLUE,
+    )
 
-    if not points:
-        points = [county_name(story)]
+    draw.text(
+        (95, 500),
+        county.upper(),
+        font=get_font(
+            67,
+            bold=True,
+        ),
+        fill=YELLOW,
+    )
 
-    center_y = 760
+    location = ""
 
-    line_x = 140
+    for fact in story.get(
+        "verified_facts",
+        [],
+    ):
+        if isinstance(fact, dict):
+            label = clean_text(
+                fact.get("label", "")
+            ).upper()
 
-    if len(points) == 1:
-        ys = [center_y]
-    else:
-        top = 500
-        bottom = 1050
-        spacing = (bottom - top) / (len(points) - 1)
-        ys = [
-            int(top + i * spacing)
-            for i in range(len(points))
-        ]
+            if label == "LOCATION":
+                location = clean_text(
+                    fact.get("value", "")
+                )
 
-    if len(ys) > 1:
+    if location:
+        draw_wrapped_text(
+            draw,
+            location,
+            95,
+            625,
+            WIDTH - 190,
+            get_font(
+                34,
+                bold=True,
+            ),
+            WHITE,
+            line_gap=10,
+        )
+
+    # Regional visual strip
+    y = 900
+
+    draw.text(
+        (60, y),
+        "RIFT VALLEY",
+        font=get_font(
+            34,
+            bold=True,
+        ),
+        fill=WHITE,
+    )
+
+    y += 85
+
+    # Stylized regional corridor graphic.
+    points = [
+        (100, y + 80),
+        (270, y + 20),
+        (450, y + 110),
+        (650, y + 40),
+        (860, y + 130),
+        (980, y + 60),
+    ]
+
+    for i in range(len(points) - 1):
         draw.line(
             (
-                line_x,
-                ys[0],
-                line_x,
-                ys[-1],
+                points[i][0],
+                points[i][1],
+                points[i + 1][0],
+                points[i + 1][1],
             ),
-            fill=BLUE,
-            width=16,
+            fill=RED,
+            width=12,
         )
 
-    for i, (point, y) in enumerate(zip(points, ys)):
+    for point in points:
+        x, py = point
+
         draw.ellipse(
             (
-                line_x - 25,
-                y - 25,
-                line_x + 25,
-                y + 25,
+                x - 16,
+                py - 16,
+                x + 16,
+                py + 16,
             ),
-            fill=RED if i == 0 else BLUE,
+            fill=YELLOW,
         )
 
-        draw.text(
-            (215, y - 30),
-            point,
-            font=font(38, True),
-            fill=WHITE,
-        )
-
-        if i == 0:
-            label = "CURRENT FOCUS"
-        elif i == len(points) - 1:
-            label = "REGIONAL LINK"
-        else:
-            label = "CORRIDOR"
-
-        draw.text(
-            (215, y + 25),
-            label,
-            font=font(21, True),
-            fill=MUTED,
-        )
-
-    description = story_description(story)
-
-    rounded_rectangle(
+    draw_wrapped_text(
         draw,
-        (55, 1200, WIDTH - 55, 1570),
-        25,
-        CARD,
-    )
-
-    draw.text(
-        (90, 1245),
-        "WHAT THIS MEANS",
-        font=font(30, True),
-        fill=RED,
-    )
-
-    draw_wrapped(
-        draw,
-        description or "The development is being monitored across the wider Rift Valley region.",
-        (90, 1310),
-        font(31),
-        WHITE,
-        WIDTH - 180,
+        summary,
+        60,
+        1330,
+        WIDTH - 120,
+        get_font(
+            29,
+            bold=False,
+        ),
+        LIGHT,
         line_gap=12,
-        max_lines=7,
     )
 
-    draw_footer(draw)
-
-    save_image(image, path)
+    return image
 
 
 # ============================================================
-# SCENE 4 — IMPACT
+# DATA CARD
 # ============================================================
 
-def create_impact_scene(story, story_number, path):
-    image = Image.new(
-        "RGB",
-        (WIDTH, HEIGHT),
-        BG,
-    )
+
+def create_data_scene(story):
+    image = create_news_background()
 
     draw = ImageDraw.Draw(image)
 
-    draw_header(
-        draw,
-        county_name(story),
-        category_name(story),
-        story_number,
+    add_header(
+        image,
+        "PROJECT DATA",
+        story.get("county", ""),
     )
 
+    facts = {}
+
+    for fact in story.get(
+        "verified_facts",
+        [],
+    ):
+        if isinstance(fact, dict):
+            label = clean_text(
+                fact.get("label", "")
+            ).upper()
+
+            value = clean_text(
+                fact.get("value", "")
+            )
+
+            facts[label] = value
+
     draw.text(
-        (55, 225),
-        "IMPACT",
-        font=font(68, True),
+        (60, 285),
+        "THE NUMBERS",
+        font=get_font(
+            50,
+            bold=True,
+        ),
         fill=WHITE,
     )
 
-    draw.rectangle(
-        (55, 315, 180, 321),
-        fill=RED,
+    accent_bar(
+        draw,
+        60,
+        360,
+        120,
+        9,
     )
 
-    title = story_title(story)
-    description = story_description(story)
+    cards = []
 
-    # Determine likely impact areas
-    text = (
-        title
-        + " "
-        + description
-    ).lower()
-
-    impacts = []
-
-    if any(x in text for x in ["road", "highway", "bridge", "transport"]):
-        impacts.append(
-            ("TRANSPORT", "Road connectivity and movement across the affected area.")
-        )
-
-    if any(x in text for x in ["farmer", "agriculture", "crop", "livestock", "milk"]):
-        impacts.append(
-            ("AGRICULTURE", "Potential implications for farmers, markets and supply chains.")
-        )
-
-    if any(x in text for x in ["business", "trade", "economy", "investment", "market"]):
-        impacts.append(
-            ("BUSINESS", "Potential effects on trade, investment and local economic activity.")
-        )
-
-    if any(x in text for x in ["hospital", "health", "clinic", "medical"]):
-        impacts.append(
-            ("HEALTH", "Possible implications for access to health services.")
-        )
-
-    if any(x in text for x in ["school", "education", "student", "university"]):
-        impacts.append(
-            ("EDUCATION", "Potential implications for learners and education services.")
-        )
-
-    if any(x in text for x in ["security", "police", "crime", "accident"]):
-        impacts.append(
-            ("SECURITY", "Potential implications for safety and public security.")
-        )
-
-    if not impacts:
-        impacts = [
+    if facts.get("ROAD_LENGTH"):
+        cards.append(
             (
-                "REGIONAL",
-                "The development is relevant to residents, institutions and economic activity in the region.",
-            ),
-            (
-                "COUNTY",
-                f"The immediate focus is {county_name(story)} and the communities affected by the development.",
-            ),
-            (
-                "PUBLIC INTEREST",
-                "Residents and stakeholders will be watching for implementation, response and next steps.",
-            ),
-        ]
+                "ROAD LENGTH",
+                facts["ROAD_LENGTH"],
+            )
+        )
 
-    y = 410
+    if facts.get("COST"):
+        cards.append(
+            (
+                "PROJECT COST",
+                facts["COST"],
+            )
+        )
 
-    for label, explanation in impacts[:3]:
-        rounded_rectangle(
+    if facts.get("STATUS"):
+        cards.append(
+            (
+                "STATUS",
+                facts["STATUS"],
+            )
+        )
+
+    if facts.get("LOCATION"):
+        cards.append(
+            (
+                "LOCATION",
+                facts["LOCATION"],
+            )
+        )
+
+    y = 450
+
+    for label, value in cards[:4]:
+        rounded_panel(
             draw,
             (
                 55,
                 y,
                 WIDTH - 55,
-                y + 290,
+                y + 260,
             ),
-            22,
-            CARD,
+            fill=(15, 23, 32),
+            outline=(55, 70, 88),
         )
 
         draw.text(
-            (90, y + 45),
+            (95, y + 45),
             label,
-            font=font(31, True),
+            font=get_font(
+                24,
+                bold=True,
+            ),
+            fill=YELLOW,
+        )
+
+        draw_wrapped_text(
+            draw,
+            value,
+            95,
+            y + 100,
+            WIDTH - 190,
+            get_font(
+                52,
+                bold=True,
+            ),
+            WHITE,
+            line_gap=12,
+        )
+
+        y += 300
+
+    return image
+
+
+# ============================================================
+# ROUTE SCENE
+# ============================================================
+
+
+def create_route_scene(story):
+    image = create_news_background()
+
+    draw = ImageDraw.Draw(image)
+
+    add_header(
+        image,
+        "ROUTE CORRIDOR",
+        story.get("county", ""),
+    )
+
+    route = ""
+
+    for fact in story.get(
+        "verified_facts",
+        [],
+    ):
+        if isinstance(fact, dict):
+            label = clean_text(
+                fact.get("label", "")
+            ).upper()
+
+            if label == "PROJECT":
+                route = clean_text(
+                    fact.get("value", "")
+                )
+
+    draw.text(
+        (60, 285),
+        "PROJECT CORRIDOR",
+        font=get_font(
+            48,
+            bold=True,
+        ),
+        fill=WHITE,
+    )
+
+    accent_bar(
+        draw,
+        60,
+        360,
+        135,
+        9,
+    )
+
+    # Split route around slash.
+    segments = [
+        x.strip()
+        for x in route.split("/")
+        if x.strip()
+    ]
+
+    if not segments:
+        segments = [route]
+
+    y = 470
+
+    for segment_index, segment in enumerate(
+        segments[:2]
+    ):
+        rounded_panel(
+            draw,
+            (
+                55,
+                y,
+                WIDTH - 55,
+                y + 430,
+            ),
+            fill=(12, 20, 29),
+            outline=(55, 68, 84),
+        )
+
+        label = (
+            f"CORRIDOR {segment_index + 1}"
+        )
+
+        draw.text(
+            (95, y + 45),
+            label,
+            font=get_font(
+                24,
+                bold=True,
+            ),
+            fill=YELLOW,
+        )
+
+        # Extract locations.
+        stops = [
+            x.strip()
+            for x in re.split(
+                r"[-–—>/]+",
+                segment,
+            )
+            if x.strip()
+        ]
+
+        if len(stops) > 1:
+            line_y = y + 200
+
+            start_x = 110
+            end_x = WIDTH - 110
+
+            draw.line(
+                (
+                    start_x,
+                    line_y,
+                    end_x,
+                    line_y,
+                ),
+                fill=RED,
+                width=10,
+            )
+
+            usable_width = (
+                end_x - start_x
+            )
+
+            for i, stop in enumerate(
+                stops[:7]
+            ):
+                if len(stops) == 1:
+                    x = start_x
+                else:
+                    x = int(
+                        start_x
+                        + (
+                            usable_width
+                            * i
+                            / (len(stops) - 1)
+                        )
+                    )
+
+                draw.ellipse(
+                    (
+                        x - 18,
+                        line_y - 18,
+                        x + 18,
+                        line_y + 18,
+                    ),
+                    fill=YELLOW,
+                )
+
+                stop_text = clean_text(
+                    stop
+                )
+
+                # Remove redundant "road".
+                stop_text = re.sub(
+                    r"\s+road$",
+                    "",
+                    stop_text,
+                    flags=re.IGNORECASE,
+                )
+
+                stop_lines = wrap_text(
+                    draw,
+                    stop_text,
+                    get_font(
+                        21,
+                        bold=True,
+                    ),
+                    150,
+                )
+
+                draw.text(
+                    (
+                        x - 70,
+                        line_y + 45,
+                    ),
+                    "\n".join(
+                        stop_lines[:2]
+                    ),
+                    font=get_font(
+                        21,
+                        bold=True,
+                    ),
+                    fill=WHITE,
+                )
+
+        else:
+            draw_wrapped_text(
+                draw,
+                segment,
+                95,
+                y + 150,
+                WIDTH - 190,
+                get_font(
+                    31,
+                    bold=True,
+                ),
+                WHITE,
+                line_gap=10,
+            )
+
+        y += 470
+
+    return image
+
+
+# ============================================================
+# IMPACT SCENE
+# ============================================================
+
+
+def create_impact_scene(story):
+    image = create_news_background()
+
+    draw = ImageDraw.Draw(image)
+
+    add_header(
+        image,
+        "WHY IT MATTERS",
+        story.get("county", ""),
+    )
+
+    draw.text(
+        (60, 285),
+        "EXPECTED IMPACT",
+        font=get_font(
+            48,
+            bold=True,
+        ),
+        fill=WHITE,
+    )
+
+    accent_bar(
+        draw,
+        60,
+        360,
+        135,
+        9,
+    )
+
+    impact = ""
+
+    for fact in story.get(
+        "verified_facts",
+        [],
+    ):
+        if isinstance(fact, dict):
+            label = clean_text(
+                fact.get("label", "")
+            ).upper()
+
+            if label == "IMPACT":
+                impact = clean_text(
+                    fact.get("value", "")
+                )
+
+    if not impact:
+        impact = clean_text(
+            story.get("summary", "")
+        )
+
+    rounded_panel(
+        draw,
+        (
+            55,
+            470,
+            WIDTH - 55,
+            1170,
+        ),
+        fill=(13, 25, 29),
+        outline=GREEN,
+    )
+
+    draw.ellipse(
+        (
+            95,
+            530,
+            175,
+            610,
+        ),
+        fill=GREEN,
+    )
+
+    draw.text(
+        (205, 525),
+        "REGIONAL SIGNIFICANCE",
+        font=get_font(
+            25,
+            bold=True,
+        ),
+        fill=YELLOW,
+    )
+
+    draw_wrapped_text(
+        draw,
+        impact,
+        95,
+        690,
+        WIDTH - 190,
+        get_font(
+            43,
+            bold=True,
+        ),
+        WHITE,
+        line_gap=18,
+    )
+
+    # Supporting factual status
+    status = ""
+
+    for fact in story.get(
+        "verified_facts",
+        [],
+    ):
+        if isinstance(fact, dict):
+            if (
+                clean_text(
+                    fact.get("label", "")
+                ).upper()
+                == "STATUS"
+            ):
+                status = clean_text(
+                    fact.get("value", "")
+                )
+
+    if status:
+        draw.text(
+            (95, 1280),
+            "CURRENT STATUS",
+            font=get_font(
+                24,
+                bold=True,
+            ),
+            fill=YELLOW,
+        )
+
+        draw_wrapped_text(
+            draw,
+            status,
+            95,
+            1340,
+            WIDTH - 190,
+            get_font(
+                31,
+                bold=True,
+            ),
+            LIGHT,
+            line_gap=10,
+        )
+
+    return image
+
+
+# ============================================================
+# OFFICIAL STATEMENT
+# ============================================================
+
+
+def create_statement_scene(story):
+    image = create_news_background()
+
+    draw = ImageDraw.Draw(image)
+
+    add_header(
+        image,
+        "OFFICIAL STATEMENT",
+        story.get("county", ""),
+    )
+
+    statement = story.get(
+        "official_statement",
+        {},
+    )
+
+    speaker = clean_text(
+        statement.get(
+            "speaker",
+            "",
+        )
+    )
+
+    quote = clean_text(
+        statement.get(
+            "quote",
+            "",
+        )
+    )
+
+    draw.text(
+        (60, 285),
+        "WHAT WAS SAID",
+        font=get_font(
+            48,
+            bold=True,
+        ),
+        fill=WHITE,
+    )
+
+    accent_bar(
+        draw,
+        60,
+        360,
+        125,
+        9,
+    )
+
+    if speaker:
+        rounded_panel(
+            draw,
+            (
+                55,
+                455,
+                WIDTH - 55,
+                700,
+            ),
+            fill=(18, 25, 36),
+            outline=(55, 75, 100),
+        )
+
+        draw.text(
+            (95, 515),
+            "SPEAKER",
+            font=get_font(
+                23,
+                bold=True,
+            ),
+            fill=YELLOW,
+        )
+
+        draw_wrapped_text(
+            draw,
+            speaker,
+            95,
+            575,
+            WIDTH - 190,
+            get_font(
+                37,
+                bold=True,
+            ),
+            WHITE,
+            line_gap=10,
+        )
+
+    if quote:
+        rounded_panel(
+            draw,
+            (
+                55,
+                790,
+                WIDTH - 55,
+                1370,
+            ),
+            fill=(12, 17, 24),
+            outline=RED,
+        )
+
+        draw.text(
+            (95, 845),
+            "STATEMENT",
+            font=get_font(
+                23,
+                bold=True,
+            ),
+            fill=YELLOW,
+        )
+
+        # Quote mark
+        draw.text(
+            (80, 915),
+            "“",
+            font=get_font(
+                100,
+                bold=True,
+            ),
             fill=RED,
         )
 
-        draw_wrapped(
+        draw_wrapped_text(
             draw,
-            explanation,
-            (90, y + 105),
-            font(33),
+            quote,
+            130,
+            955,
+            WIDTH - 220,
+            get_font(
+                36,
+                bold=False,
+            ),
             WHITE,
-            WIDTH - 180,
-            line_gap=12,
-            max_lines=4,
+            line_gap=18,
         )
 
-        y += 330
-
-    draw_footer(draw)
-
-    save_image(image, path)
-
-
-# ============================================================
-# SCENE 5 — OFFICIAL STATEMENT
-# ============================================================
-
-def create_statement_scene(story, story_number, path):
-    image = Image.new(
-        "RGB",
-        (WIDTH, HEIGHT),
-        BG,
-    )
-
-    draw = ImageDraw.Draw(image)
-
-    draw_header(
-        draw,
-        county_name(story),
-        category_name(story),
-        story_number,
-    )
-
-    draw.text(
-        (55, 225),
-        "OFFICIAL STATEMENT",
-        font=font(56, True),
-        fill=WHITE,
-    )
-
-    draw.rectangle(
-        (55, 315, 220, 321),
-        fill=RED,
-    )
-
-    source = source_name(story)
-
-    description = story_description(story)
-
-    narration = clean_text(story.get("narration", ""))
-
-    statement = ""
-
-    # Only use existing source material.
-    # Never invent quotation marks.
-    if description:
-        statement = description
-    elif narration:
-        statement = narration
-
-    if not statement:
-        statement = (
-            "The latest available information is being monitored "
-            "as the situation develops."
-        )
-
-    rounded_rectangle(
-        draw,
-        (55, 405, WIDTH - 55, 1330),
-        30,
-        CARD,
-    )
-
-    draw.text(
-        (100, 470),
-        "REPORT",
-        font=font(30, True),
-        fill=RED,
-    )
-
-    # Quote-style visual without claiming it is a direct quote
-    draw.rectangle(
-        (100, 555, 110, 1040),
-        fill=BLUE,
-    )
-
-    draw_wrapped(
-        draw,
-        statement,
-        (155, 555),
-        font(38),
-        WHITE,
-        WIDTH - 255,
-        line_gap=18,
-        max_lines=10,
-    )
-
-    draw.text(
-        (100, 1150),
-        "SOURCE",
-        font=font(25, True),
-        fill=MUTED,
-    )
-
-    draw_wrapped(
-        draw,
-        source,
-        (100, 1190),
-        font(31, True),
-        WHITE,
-        WIDTH - 200,
-        line_gap=10,
-        max_lines=2,
-    )
-
-    draw_footer(draw)
-
-    save_image(image, path)
-
-
-# ============================================================
-# SCENE 6 — SOURCE
-# ============================================================
-
-def create_source_scene(story, story_number, path):
-    image = Image.new(
-        "RGB",
-        (WIDTH, HEIGHT),
-        BG,
-    )
-
-    draw = ImageDraw.Draw(image)
-
-    draw_header(
-        draw,
-        county_name(story),
-        category_name(story),
-        story_number,
-    )
-
-    draw.text(
-        (55, 240),
-        "SOURCE",
-        font=font(72, True),
-        fill=WHITE,
-    )
-
-    draw.rectangle(
-        (55, 335, 170, 341),
-        fill=RED,
-    )
-
-    source = source_name(story)
-    url = story_url(story)
-
-    rounded_rectangle(
-        draw,
-        (55, 460, WIDTH - 55, 1040),
-        30,
-        CARD,
-    )
-
-    draw.text(
-        (100, 535),
-        "REPORTING SOURCE",
-        font=font(29, True),
-        fill=RED,
-    )
-
-    draw_wrapped(
-        draw,
-        source,
-        (100, 625),
-        font(52, True),
-        WHITE,
-        WIDTH - 200,
-        line_gap=15,
-        max_lines=5,
-    )
-
-    draw.text(
-        (100, 870),
-        "PUBLISHED / UPDATED",
-        font=font(25, True),
-        fill=MUTED,
-    )
-
-    draw_wrapped(
-        draw,
-        published_text(story),
-        (100, 915),
-        font(31, True),
-        WHITE,
-        WIDTH - 200,
-        line_gap=10,
-        max_lines=2,
-    )
-
-    # Show domain only, never the raw URL
-    domain = ""
-
-    if url:
-        match = re.search(
-            r"https?://(?:www\.)?([^/]+)",
-            url,
-        )
-
-        if match:
-            domain = match.group(1)
-
-    if domain:
-        rounded_rectangle(
-            draw,
-            (55, 1110, WIDTH - 55, 1285),
-            20,
-            CARD2,
-        )
-
-        draw.text(
-            (95, 1150),
-            "ONLINE SOURCE",
-            font=font(25, True),
-            fill=MUTED,
-        )
-
-        draw.text(
-            (95, 1195),
-            domain,
-            font=font(34, True),
-            fill=WHITE,
-        )
-
-    rounded_rectangle(
-        draw,
-        (55, 1360, WIDTH - 55, 1580),
-        20,
-        (27, 43, 60),
-    )
-
-    draw.text(
-        (95, 1410),
-        "RIFT VALLEY WATCH",
-        font=font(29, True),
-        fill=WHITE,
-    )
-
-    draw.text(
-        (95, 1460),
-        "Independent regional news presentation",
-        font=font(25),
-        fill=MUTED,
-    )
-
-    draw_footer(draw)
-
-    save_image(image, path)
+    return image
 
 
 # ============================================================
 # OUTRO
 # ============================================================
 
-def create_outro_scene(path):
+
+def create_outro():
     image = Image.new(
         "RGB",
         (WIDTH, HEIGHT),
-        BG,
+        BLACK,
     )
 
     draw = ImageDraw.Draw(image)
@@ -1351,212 +1807,301 @@ def create_outro_scene(path):
     )
 
     draw.text(
-        (55, 580),
+        (70, 700),
         "RIFT VALLEY",
-        font=font(78, True),
+        font=get_font(
+            76,
+            bold=True,
+        ),
         fill=WHITE,
     )
 
     draw.text(
-        (55, 690),
+        (70, 795),
         "WATCH",
-        font=font(110, True),
-        fill=RED,
+        font=get_font(
+            105,
+            bold=True,
+        ),
+        fill=YELLOW,
     )
 
-    draw.rectangle(
-        (55, 840, 360, 847),
-        fill=BLUE,
+    accent_bar(
+        draw,
+        75,
+        930,
+        180,
+        10,
     )
 
     draw.text(
-        (55, 910),
+        (75, 1000),
         "REGIONAL NEWS.",
-        font=font(40, True),
-        fill=WHITE,
+        font=get_font(
+            36,
+            bold=True,
+        ),
+        fill=LIGHT,
     )
 
     draw.text(
-        (55, 975),
-        "REAL DEVELOPMENTS.",
-        font=font(40, True),
-        fill=WHITE,
+        (75, 1060),
+        "DEVELOPMENTS.",
+        font=get_font(
+            36,
+            bold=True,
+        ),
+        fill=LIGHT,
     )
 
     draw.text(
-        (55, 1040),
-        "RIFT VALLEY VOICES.",
-        font=font(40, True),
-        fill=WHITE,
+        (75, 1120),
+        "THE RIFT VALLEY.",
+        font=get_font(
+            36,
+            bold=True,
+        ),
+        fill=LIGHT,
     )
 
     draw.text(
-        (55, 1200),
-        "FOLLOW FOR THE LATEST",
-        font=font(31, True),
-        fill=MUTED,
+        (75, 1240),
+        "FOLLOW FOR THE NEXT UPDATE",
+        font=get_font(
+            28,
+            bold=True,
+        ),
+        fill=GREY,
     )
 
-    draw.text(
-        (55, 1260),
-        "Rift Valley regional bulletin",
-        font=font(29),
-        fill=MUTED,
-    )
+    return image
 
-    draw.rectangle(
-        (0, HEIGHT - 18, WIDTH, HEIGHT),
-        fill=RED,
-    )
 
-    save_image(image, path)
+# ============================================================
+# SAVE PNG
+# ============================================================
+
+
+def save_image(image, path):
+    image.save(
+        path,
+        "PNG",
+        optimize=True,
+    )
 
 
 # ============================================================
 # NARRATION
 # ============================================================
 
-def shorten(text, max_words):
-    words = clean_text(text).split()
 
-    if len(words) <= max_words:
-        return " ".join(words)
-
-    return " ".join(words[:max_words]).rstrip(" .,;:") + "."
-
-
-def headline_narration(story):
-    title = story_title(story)
-    county = county_name(story)
-
+def narration_intro():
     return (
-        f"Rift Valley Watch. "
-        f"Here is the latest regional report from {county}. "
-        f"{title}."
+        "This is Rift Valley Watch. "
+        "Here is the latest regional development."
     )
 
 
-def facts_narration(story):
-    description = story_description(story)
+def narration_headline(story):
+    county = clean_text(
+        story.get("county", "")
+    )
 
-    if description:
-        return (
-            "Key facts. "
-            + shorten(description, 65)
+    title = clean_text(
+        story.get("title", "")
+    )
+
+    summary = clean_text(
+        story.get("summary", "")
+    )
+
+    parts = [
+        f"{county}.",
+        title + ".",
+    ]
+
+    if summary:
+        parts.append(summary)
+
+    return " ".join(parts)
+
+
+def narration_facts(story):
+    parts = [
+        "Here are the key facts."
+    ]
+
+    for fact in story.get(
+        "verified_facts",
+        [],
+    )[:6]:
+        if not isinstance(fact, dict):
+            continue
+
+        label = clean_text(
+            fact.get("label", "")
+        ).replace("_", " ")
+
+        value = clean_text(
+            fact.get("value", "")
         )
 
-    return (
-        f"The latest report concerns {story_title(story)} "
-        f"in {county_name(story)}."
-    )
-
-
-def route_narration(story):
-    points = extract_route_points(story)
-
-    if is_infrastructure_story(story):
-        if len(points) >= 2:
-            return (
-                "Route corridor. "
-                + "The development links "
-                + ", ".join(points[:-1])
-                + f", toward {points[-1]}."
+        if value:
+            parts.append(
+                f"{label}: {value}."
             )
 
+    return " ".join(parts)
+
+
+def narration_location(story):
+    county = clean_text(
+        story.get("county", "")
+    )
+
+    location = ""
+
+    for fact in story.get(
+        "verified_facts",
+        [],
+    ):
+        if isinstance(fact, dict):
+            label = clean_text(
+                fact.get("label", "")
+            ).upper()
+
+            if label == "LOCATION":
+                location = clean_text(
+                    fact.get("value", "")
+                )
+
+    if location:
         return (
-            f"Route corridor. "
-            f"The infrastructure focus is in {county_name(story)}."
+            f"The project is located in "
+            f"{location}, within {county}."
         )
 
     return (
-        f"Regional focus. "
-        f"The story is unfolding in {county_name(story)} "
-        f"and is relevant to the wider Rift Valley region."
+        f"The development is located in "
+        f"{county}."
     )
 
 
-def impact_narration(story):
-    text = (
-        story_title(story)
-        + " "
-        + story_description(story)
-    ).lower()
+def narration_route(story):
+    route = ""
 
-    areas = []
+    for fact in story.get(
+        "verified_facts",
+        [],
+    ):
+        if isinstance(fact, dict):
+            if (
+                clean_text(
+                    fact.get("label", "")
+                ).upper()
+                == "PROJECT"
+            ):
+                route = clean_text(
+                    fact.get("value", "")
+                )
 
-    if any(x in text for x in ["road", "highway", "bridge", "transport"]):
-        areas.append("transport")
-
-    if any(x in text for x in ["farmer", "agriculture", "crop", "livestock"]):
-        areas.append("agriculture")
-
-    if any(x in text for x in ["business", "trade", "economy", "investment"]):
-        areas.append("business")
-
-    if any(x in text for x in ["hospital", "health", "clinic", "medical"]):
-        areas.append("health")
-
-    if any(x in text for x in ["school", "education", "student"]):
-        areas.append("education")
-
-    if areas:
+    if route:
         return (
-            "Impact. "
-            "The development could affect "
-            + ", ".join(areas[:3])
-            + " across the affected communities."
+            "The project corridor covers "
+            f"{route}."
         )
 
     return (
-        "Impact. "
-        f"The development is significant for residents and stakeholders "
-        f"in {county_name(story)} and the wider region."
+        "The project covers multiple "
+        "locations within the county."
     )
 
 
-def statement_narration(story):
-    source = source_name(story)
-    description = story_description(story)
+def narration_impact(story):
+    impact = ""
 
-    if description:
+    for fact in story.get(
+        "verified_facts",
+        [],
+    ):
+        if isinstance(fact, dict):
+            if (
+                clean_text(
+                    fact.get("label", "")
+                ).upper()
+                == "IMPACT"
+            ):
+                impact = clean_text(
+                    fact.get("value", "")
+                )
+
+    if impact:
         return (
-            "Official and source information. "
-            f"{shorten(description, 60)} "
-            f"This report is based on information from {source}."
+            "Why it matters. "
+            f"{impact}."
         )
 
     return (
-        f"The latest available information comes from {source}. "
-        "Rift Valley Watch will continue monitoring developments."
+        "The development remains significant "
+        "for the affected area and residents."
     )
 
 
-def source_narration(story):
-    source = source_name(story)
+def narration_statement(story):
+    statement = story.get(
+        "official_statement",
+        {},
+    )
+
+    speaker = clean_text(
+        statement.get(
+            "speaker",
+            "",
+        )
+    )
+
+    quote = clean_text(
+        statement.get(
+            "quote",
+            "",
+        )
+    )
+
+    if speaker and quote:
+        return (
+            f"{speaker} said: "
+            f"{quote}"
+        )
+
+    if speaker:
+        return (
+            f"An official statement was issued "
+            f"by {speaker}."
+        )
 
     return (
-        f"Source. "
-        f"This report is based on reporting from {source}."
+        "An official statement was issued "
+        "on the development."
     )
 
 
-def outro_narration():
-    return (
-        "That is the latest regional bulletin from Rift Valley Watch. "
-        "Follow for more developments across the Rift Valley."
-    )
+# ============================================================
+# TTS
+# ============================================================
 
 
-def create_audio(text, path):
+def create_audio(text, output_path):
     text = clean_text(text)
 
     if not text:
-        raise ValueError("Cannot create audio from empty text.")
+        raise RuntimeError(
+            "Cannot create narration from empty text."
+        )
 
-    if path.exists() and path.stat().st_size > 1000:
-        return path
-
-    log(f"Creating narration: {text}")
+    print(
+        f"Generating narration: "
+        f"{output_path.name}"
+    )
 
     tts = gTTS(
         text=text,
@@ -1564,19 +2109,17 @@ def create_audio(text, path):
         slow=False,
     )
 
-    temp = path.with_suffix(".mp3.tmp")
-
-    if temp.exists():
-        temp.unlink()
-
-    tts.save(str(temp))
-
-    temp.replace(path)
-
-    return path
+    tts.save(
+        str(output_path)
+    )
 
 
-def get_audio_duration(path):
+# ============================================================
+# AUDIO DURATION
+# ============================================================
+
+
+def get_duration(path):
     command = [
         "ffprobe",
         "-v",
@@ -1596,23 +2139,40 @@ def get_audio_duration(path):
     )
 
     if result.returncode != 0:
-        return 5.0
+        return 0.0
 
     try:
-        return max(3.0, float(result.stdout.strip()))
+        return float(
+            result.stdout.strip()
+        )
     except Exception:
-        return 5.0
+        return 0.0
 
 
 # ============================================================
-# SCENE RENDERING
+# CREATE SCENE VIDEO
 # ============================================================
 
-def render_scene(image_path, audio_path, output_path):
-    duration = get_audio_duration(audio_path)
 
-    # Add a small tail so speech is not clipped.
-    duration += 0.25
+def create_scene_video(
+    image_path,
+    audio_path,
+    output_path,
+    scene_name,
+):
+    duration = get_duration(
+        audio_path
+    )
+
+    if duration <= 0:
+        raise RuntimeError(
+            f"Could not determine audio duration "
+            f"for {scene_name}"
+        )
+
+    # Small safety extension prevents
+    # narration clipping at scene boundaries.
+    duration += 0.12
 
     command = [
         "ffmpeg",
@@ -1621,60 +2181,63 @@ def render_scene(image_path, audio_path, output_path):
         "-loop",
         "1",
 
-        "-framerate",
-        str(FPS),
-
         "-i",
         str(image_path),
 
         "-i",
         str(audio_path),
 
-        "-map",
-        "0:v:0",
+        "-filter_complex",
+        (
+            "[0:v]"
+            "scale=1080:1920:force_original_aspect_ratio=decrease,"
+            "pad=1080:1920:(ow-iw)/2:(oh-ih)/2,"
+            "zoompan="
+            "z='min(zoom+0.00018,1.045)':"
+            "x='iw/2-(iw/zoom/2)':"
+            "y='ih/2-(ih/zoom/2)':"
+            f"d={max(1, int(duration * FPS))}:"
+            "s=1080x1920:"
+            "fps=30,"
+            "format=yuv420p"
+            "[v]"
+        ),
 
         "-map",
-        "1:a:0",
+        "[v]",
+
+        "-map",
+        "1:a",
 
         "-t",
         f"{duration:.3f}",
-
-        "-vf",
-        (
-            "scale=1080:1920:"
-            "force_original_aspect_ratio=decrease,"
-            "pad=1080:1920:(ow-iw)/2:(oh-ih)/2,"
-            "setsar=1"
-        ),
 
         "-r",
         str(FPS),
 
         "-c:v",
-        "libx264",
+        VIDEO_CODEC,
 
         "-preset",
-        "veryfast",
+        "medium",
 
         "-crf",
-        "22",
+        "20",
 
-        "-pix_fmt",
-        "yuv420p",
+        "-b:v",
+        VIDEO_BITRATE,
 
         "-c:a",
-        "aac",
+        AUDIO_CODEC,
 
         "-b:a",
-        "128k",
+        AUDIO_BITRATE,
 
         "-ar",
         "44100",
 
         "-ac",
         "2",
-
-        "-shortest",
 
         "-movflags",
         "+faststart",
@@ -1682,162 +2245,631 @@ def render_scene(image_path, audio_path, output_path):
         str(output_path),
     ]
 
-    run_command(
-        command,
-        f"RENDERING {output_path.name}",
-    )
+    run_command(command)
 
-    if not output_path.exists():
-        raise RuntimeError(
-            f"Scene was not created: {output_path}"
-        )
-
-    if output_path.stat().st_size < 10000:
-        raise RuntimeError(
-            f"Scene is suspiciously small: {output_path}"
-        )
+    return duration
 
 
 # ============================================================
-# FINAL ASSEMBLY
+# CONCATENATE SCENES
 # ============================================================
 
-def assemble_final(scene_files):
-    if not scene_files:
-        raise RuntimeError("No scene files to assemble.")
 
-    log("")
-    log("=" * 70)
-    log("ASSEMBLING FINAL MP4")
-    log("=" * 70)
+def concat_scenes(scene_paths):
+    concat_file = OUTPUT_DIR / "concat.txt"
+
+    with open(
+        concat_file,
+        "w",
+        encoding="utf-8",
+    ) as f:
+        for path in scene_paths:
+            absolute = Path(
+                path
+            ).resolve()
+
+            escaped = str(
+                absolute
+            ).replace(
+                "'",
+                "'\\''",
+            )
+
+            f.write(
+                f"file '{escaped}'\n"
+            )
 
     command = [
         "ffmpeg",
         "-y",
-    ]
 
-    for scene in scene_files:
-        command += [
-            "-i",
-            str(scene),
-        ]
+        "-f",
+        "concat",
 
-    filters = []
-    pairs = []
+        "-safe",
+        "0",
 
-    for index in range(len(scene_files)):
-        video_label = f"v{index}"
-        audio_label = f"a{index}"
+        "-i",
+        str(concat_file),
 
-        filters.append(
-            f"[{index}:v:0]"
-            "scale=1080:1920:"
-            "force_original_aspect_ratio=decrease,"
-            "pad=1080:1920:(ow-iw)/2:(oh-ih)/2,"
-            "setsar=1,"
-            "fps=30,"
-            "format=yuv420p"
-            f"[{video_label}]"
-        )
-
-        filters.append(
-            f"[{index}:a:0]"
-            "aformat="
-            "sample_rates=44100:"
-            "channel_layouts=stereo,"
-            "aresample=44100"
-            f"[{audio_label}]"
-        )
-
-        pairs.append(
-            f"[{video_label}][{audio_label}]"
-        )
-
-    filters.append(
-        "".join(pairs)
-        + f"concat=n={len(scene_files)}:v=1:a=1"
-        "[vout][aout]"
-    )
-
-    command += [
-        "-filter_complex",
-        ";".join(filters),
-
-        "-map",
-        "[vout]",
-
-        "-map",
-        "[aout]",
-
-        "-c:v",
-        "libx264",
-
-        "-preset",
-        "veryfast",
-
-        "-crf",
-        "22",
-
-        "-pix_fmt",
-        "yuv420p",
-
-        "-r",
-        "30",
-
-        "-c:a",
-        "aac",
-
-        "-b:a",
-        "128k",
-
-        "-ar",
-        "44100",
-
-        "-ac",
-        "2",
+        "-c",
+        "copy",
 
         "-movflags",
         "+faststart",
 
-        str(TEMP_VIDEO),
+        str(FINAL_VIDEO),
     ]
 
-    run_command(
-        command,
-        "FINAL VIDEO ASSEMBLY",
+    run_command(command)
+
+
+# ============================================================
+# NORMALIZE STORY JSON
+# ============================================================
+
+
+def load_stories():
+    if not STORY_FILE.exists():
+        raise FileNotFoundError(
+            f"Missing {STORY_FILE}"
+        )
+
+    with open(
+        STORY_FILE,
+        "r",
+        encoding="utf-8",
+    ) as f:
+        data = json.load(f)
+
+    # New engine format:
+    #
+    # {
+    #   "stories": [...]
+    # }
+    if isinstance(data, dict):
+        stories = data.get(
+            "stories"
+        )
+
+        if isinstance(stories, list):
+            return stories
+
+        # Also accept one-story JSON
+        if "title" in data:
+            return [data]
+
+    # Direct list
+    if isinstance(data, list):
+        return data
+
+    raise RuntimeError(
+        "Unsupported story.json format."
     )
 
-    if not TEMP_VIDEO.exists():
-        raise RuntimeError(
-            "Temporary final MP4 was not created."
+
+# ============================================================
+# STORY SANITIZATION
+# ============================================================
+
+
+def sanitize_story(story):
+    result = dict(story)
+
+    result["title"] = clean_text(
+        result.get("title", "")
+    )
+
+    result["county"] = clean_text(
+        result.get(
+            "county",
+            "Rift Valley",
         )
+    )
 
-    if TEMP_VIDEO.stat().st_size < 100000:
-        raise RuntimeError(
-            "Temporary final MP4 is suspiciously small."
+    result["category"] = clean_text(
+        result.get(
+            "category",
+            "REGIONAL NEWS",
         )
+    )
 
-    if FINAL_VIDEO.exists():
-        FINAL_VIDEO.unlink()
+    result["summary"] = clean_text(
+        result.get(
+            "summary",
+            "",
+        )
+    )
 
-    TEMP_VIDEO.replace(FINAL_VIDEO)
+    if not isinstance(
+        result.get(
+            "verified_facts"
+        ),
+        list,
+    ):
+        result["verified_facts"] = []
 
-    log("")
-    log("=" * 70)
-    log("FINAL MP4 CREATED")
-    log("=" * 70)
-    log(str(FINAL_VIDEO))
-    log(f"Size: {FINAL_VIDEO.stat().st_size:,} bytes")
+    if not isinstance(
+        result.get(
+            "official_statement"
+        ),
+        dict,
+    ):
+        result[
+            "official_statement"
+        ] = {}
+
+    return result
 
 
 # ============================================================
-# VIDEO VALIDATION
+# STORY SCENE CREATION
 # ============================================================
+
+
+def create_story_scenes(
+    story,
+    story_number,
+):
+    story = sanitize_story(
+        story
+    )
+
+    prefix = (
+        f"story_{story_number:02d}"
+    )
+
+    scenes = []
+
+    # --------------------------------------------------------
+    # 1. HEADLINE
+    # --------------------------------------------------------
+
+    headline_image = (
+        SCENES_DIR
+        / f"{prefix}_01_headline.png"
+    )
+
+    save_image(
+        create_headline_scene(
+            story
+        ),
+        headline_image,
+    )
+
+    headline_audio = (
+        AUDIO_DIR
+        / f"{prefix}_01_headline.mp3"
+    )
+
+    create_audio(
+        narration_headline(
+            story
+        ),
+        headline_audio,
+    )
+
+    headline_video = (
+        SCENES_DIR
+        / f"{prefix}_01_headline.mp4"
+    )
+
+    duration = create_scene_video(
+        headline_image,
+        headline_audio,
+        headline_video,
+        "headline",
+    )
+
+    scenes.append(
+        {
+            "name": "headline",
+            "image": str(
+                headline_image
+            ),
+            "audio": str(
+                headline_audio
+            ),
+            "video": str(
+                headline_video
+            ),
+            "duration": duration,
+        }
+    )
+
+    # --------------------------------------------------------
+    # 2. KEY FACTS
+    # --------------------------------------------------------
+
+    facts = story.get(
+        "verified_facts",
+        [],
+    )
+
+    if facts:
+        facts_image = (
+            SCENES_DIR
+            / f"{prefix}_02_key_facts.png"
+        )
+
+        save_image(
+            create_key_facts_scene(
+                story
+            ),
+            facts_image,
+        )
+
+        facts_audio = (
+            AUDIO_DIR
+            / f"{prefix}_02_key_facts.mp3"
+        )
+
+        create_audio(
+            narration_facts(
+                story
+            ),
+            facts_audio,
+        )
+
+        facts_video = (
+            SCENES_DIR
+            / f"{prefix}_02_key_facts.mp4"
+        )
+
+        duration = create_scene_video(
+            facts_image,
+            facts_audio,
+            facts_video,
+            "key facts",
+        )
+
+        scenes.append(
+            {
+                "name": "key_facts",
+                "image": str(
+                    facts_image
+                ),
+                "audio": str(
+                    facts_audio
+                ),
+                "video": str(
+                    facts_video
+                ),
+                "duration": duration,
+            }
+        )
+
+    # --------------------------------------------------------
+    # 3. LOCATION
+    # --------------------------------------------------------
+
+    location_image = (
+        SCENES_DIR
+        / f"{prefix}_03_location.png"
+    )
+
+    save_image(
+        create_location_scene(
+            story
+        ),
+        location_image,
+    )
+
+    location_audio = (
+        AUDIO_DIR
+        / f"{prefix}_03_location.mp3"
+    )
+
+    create_audio(
+        narration_location(
+            story
+        ),
+        location_audio,
+    )
+
+    location_video = (
+        SCENES_DIR
+        / f"{prefix}_03_location.mp4"
+    )
+
+    duration = create_scene_video(
+        location_image,
+        location_audio,
+        location_video,
+        "location",
+    )
+
+    scenes.append(
+        {
+            "name": "location",
+            "image": str(
+                location_image
+            ),
+            "audio": str(
+                location_audio
+            ),
+            "video": str(
+                location_video
+            ),
+            "duration": duration,
+        }
+    )
+
+    # --------------------------------------------------------
+    # 4. DATA
+    # --------------------------------------------------------
+
+    data_image = (
+        SCENES_DIR
+        / f"{prefix}_04_data.png"
+    )
+
+    save_image(
+        create_data_scene(
+            story
+        ),
+        data_image,
+    )
+
+    data_audio = (
+        AUDIO_DIR
+        / f"{prefix}_04_data.mp3"
+    )
+
+    create_audio(
+        narration_facts(
+            story
+        ),
+        data_audio,
+    )
+
+    data_video = (
+        SCENES_DIR
+        / f"{prefix}_04_data.mp4"
+    )
+
+    duration = create_scene_video(
+        data_image,
+        data_audio,
+        data_video,
+        "data",
+    )
+
+    scenes.append(
+        {
+            "name": "data",
+            "image": str(
+                data_image
+            ),
+            "audio": str(
+                data_audio
+            ),
+            "video": str(
+                data_video
+            ),
+            "duration": duration,
+        }
+    )
+
+    # --------------------------------------------------------
+    # 5. ROUTE
+    # --------------------------------------------------------
+
+    route_image = (
+        SCENES_DIR
+        / f"{prefix}_05_route.png"
+    )
+
+    save_image(
+        create_route_scene(
+            story
+        ),
+        route_image,
+    )
+
+    route_audio = (
+        AUDIO_DIR
+        / f"{prefix}_05_route.mp3"
+    )
+
+    create_audio(
+        narration_route(
+            story
+        ),
+        route_audio,
+    )
+
+    route_video = (
+        SCENES_DIR
+        / f"{prefix}_05_route.mp4"
+    )
+
+    duration = create_scene_video(
+        route_image,
+        route_audio,
+        route_video,
+        "route",
+    )
+
+    scenes.append(
+        {
+            "name": "route",
+            "image": str(
+                route_image
+            ),
+            "audio": str(
+                route_audio
+            ),
+            "video": str(
+                route_video
+            ),
+            "duration": duration,
+        }
+    )
+
+    # --------------------------------------------------------
+    # 6. IMPACT
+    # --------------------------------------------------------
+
+    impact_image = (
+        SCENES_DIR
+        / f"{prefix}_06_impact.png"
+    )
+
+    save_image(
+        create_impact_scene(
+            story
+        ),
+        impact_image,
+    )
+
+    impact_audio = (
+        AUDIO_DIR
+        / f"{prefix}_06_impact.mp3"
+    )
+
+    create_audio(
+        narration_impact(
+            story
+        ),
+        impact_audio,
+    )
+
+    impact_video = (
+        SCENES_DIR
+        / f"{prefix}_06_impact.mp4"
+    )
+
+    duration = create_scene_video(
+        impact_image,
+        impact_audio,
+        impact_video,
+        "impact",
+    )
+
+    scenes.append(
+        {
+            "name": "impact",
+            "image": str(
+                impact_image
+            ),
+            "audio": str(
+                impact_audio
+            ),
+            "video": str(
+                impact_video
+            ),
+            "duration": duration,
+        }
+    )
+
+    # --------------------------------------------------------
+    # 7. OFFICIAL STATEMENT
+    # --------------------------------------------------------
+
+    statement = story.get(
+        "official_statement",
+        {},
+    )
+
+    if statement.get(
+        "available",
+        True,
+    ) and (
+        statement.get(
+            "speaker"
+        )
+        or statement.get(
+            "quote"
+        )
+    ):
+        statement_image = (
+            SCENES_DIR
+            / f"{prefix}_07_statement.png"
+        )
+
+        save_image(
+            create_statement_scene(
+                story
+            ),
+            statement_image,
+        )
+
+        statement_audio = (
+            AUDIO_DIR
+            / f"{prefix}_07_statement.mp3"
+        )
+
+        create_audio(
+            narration_statement(
+                story
+            ),
+            statement_audio,
+        )
+
+        statement_video = (
+            SCENES_DIR
+            / f"{prefix}_07_statement.mp4"
+        )
+
+        duration = create_scene_video(
+            statement_image,
+            statement_audio,
+            statement_video,
+            "official statement",
+        )
+
+        scenes.append(
+            {
+                "name": "official_statement",
+                "image": str(
+                    statement_image
+                ),
+                "audio": str(
+                    statement_audio
+                ),
+                "video": str(
+                    statement_video
+                ),
+                "duration": duration,
+            }
+        )
+
+    return scenes
+
+
+# ============================================================
+# FINAL VALIDATION
+# ============================================================
+
 
 def validate_final_video():
     if not FINAL_VIDEO.exists():
         raise RuntimeError(
-            "Final MP4 does not exist."
+            "FINAL MP4 WAS NOT CREATED."
+        )
+
+    size = FINAL_VIDEO.stat().st_size
+
+    print()
+    print("=" * 70)
+    print("FINAL VIDEO VALIDATION")
+    print("=" * 70)
+
+    print(
+        "File:",
+        FINAL_VIDEO,
+    )
+
+    print(
+        "Size:",
+        size,
+        "bytes",
+    )
+
+    if size < 100000:
+        raise RuntimeError(
+            "Final MP4 is suspiciously small."
         )
 
     command = [
@@ -1845,10 +2877,9 @@ def validate_final_video():
         "-v",
         "error",
         "-show_entries",
-        "format=duration,size",
+        "stream=codec_type,codec_name,width,height,r_frame_rate",
         "-show_entries",
-        "stream=codec_type,codec_name,width,height,"
-        "sample_rate,channels,r_frame_rate",
+        "format=duration,size",
         "-of",
         "json",
         str(FINAL_VIDEO),
@@ -1863,265 +2894,206 @@ def validate_final_video():
 
     if result.returncode != 0:
         raise RuntimeError(
-            "Final MP4 failed ffprobe validation."
+            "ffprobe could not inspect final MP4."
         )
 
-    data = json.loads(result.stdout)
+    print(
+        result.stdout
+    )
 
-    log("")
-    log("=" * 70)
-    log("FINAL MP4 VALIDATION")
-    log("=" * 70)
+    data = json.loads(
+        result.stdout
+    )
 
-    log(json.dumps(data, indent=2))
-
-    streams = data.get("streams", [])
+    streams = data.get(
+        "streams",
+        [],
+    )
 
     video_stream = None
     audio_stream = None
 
     for stream in streams:
-        if stream.get("codec_type") == "video":
+        if stream.get(
+            "codec_type"
+        ) == "video":
             video_stream = stream
 
-        if stream.get("codec_type") == "audio":
+        if stream.get(
+            "codec_type"
+        ) == "audio":
             audio_stream = stream
 
     if not video_stream:
         raise RuntimeError(
-            "No video stream found."
-        )
-
-    if video_stream.get("width") != WIDTH:
-        raise RuntimeError(
-            f"Wrong width: {video_stream.get('width')}"
-        )
-
-    if video_stream.get("height") != HEIGHT:
-        raise RuntimeError(
-            f"Wrong height: {video_stream.get('height')}"
+            "FINAL VIDEO HAS NO VIDEO STREAM."
         )
 
     if not audio_stream:
         raise RuntimeError(
-            "No audio stream found."
+            "FINAL VIDEO HAS NO AUDIO STREAM."
         )
 
-    log("")
-    log("VIDEO: 1080x1920")
-    log("AUDIO: stereo / 44.1kHz")
-    log("VALIDATION: PASSED")
+    width = int(
+        video_stream.get(
+            "width",
+            0,
+        )
+    )
 
+    height = int(
+        video_stream.get(
+            "height",
+            0,
+        )
+    )
 
-# ============================================================
-# LOAD NEWS
-# ============================================================
-
-def load_stories():
-    if not STORY_FILE.exists():
+    if width != WIDTH:
         raise RuntimeError(
-            f"Missing story file: {STORY_FILE}"
+            f"Expected width {WIDTH}, got {width}"
         )
 
-    with STORY_FILE.open(
-        "r",
-        encoding="utf-8",
-    ) as f:
-        data = json.load(f)
-
-    if isinstance(data, list):
-        stories = data
-
-    elif isinstance(data, dict):
-        stories = (
-            data.get("stories")
-            or data.get("articles")
-            or data.get("items")
-            or []
+    if height != HEIGHT:
+        raise RuntimeError(
+            f"Expected height {HEIGHT}, got {height}"
         )
 
-        if not stories and data.get("title"):
-            stories = [data]
-
-    else:
-        stories = []
-
-    cleaned = []
-
-    for story in stories:
-        if isinstance(story, dict):
-            cleaned.append(story)
-
-    return cleaned
-
-
-# ============================================================
-# CREATE STORY SCENES
-# ============================================================
-
-def create_story_scenes(story, story_number):
-    prefix = f"story_{story_number:02d}"
-
-    scene_definitions = [
-        (
-            "headline",
-            create_headline_scene,
-            headline_narration,
-        ),
-        (
-            "facts",
-            create_key_facts_scene,
-            facts_narration,
-        ),
-        (
-            "route",
-            create_route_scene,
-            route_narration,
-        ),
-        (
-            "impact",
-            create_impact_scene,
-            impact_narration,
-        ),
-        (
-            "statement",
-            create_statement_scene,
-            statement_narration,
-        ),
-        (
-            "source",
-            create_source_scene,
-            source_narration,
-        ),
-    ]
-
-    scene_files = []
-
-    for index, (
-        name,
-        image_function,
-        narration_function,
-    ) in enumerate(scene_definitions):
-
-        image_path = (
-            SCENES_DIR
-            / f"{prefix}_{index + 1:02d}_{name}.jpg"
+    duration = float(
+        data.get(
+            "format",
+            {},
+        ).get(
+            "duration",
+            0,
         )
-
-        audio_path = (
-            AUDIO_DIR
-            / f"{prefix}_{index + 1:02d}_{name}.mp3"
-        )
-
-        video_path = (
-            SCENES_DIR
-            / f"{prefix}_{index + 1:02d}_{name}.mp4"
-        )
-
-        log("")
-        log(
-            f"STORY {story_number:02d} "
-            f"SCENE {index + 1:02d}: "
-            f"{name.upper()}"
-        )
-
-        image_function(
-            story,
-            story_number,
-            image_path,
-        )
-
-        narration = narration_function(story)
-
-        create_audio(
-            narration,
-            audio_path,
-        )
-
-        render_scene(
-            image_path,
-            audio_path,
-            video_path,
-        )
-
-        scene_files.append(video_path)
-
-    return scene_files
-
-
-# ============================================================
-# OUTRO SCENE
-# ============================================================
-
-def create_outro_files():
-    image_path = SCENES_DIR / "outro.jpg"
-    audio_path = AUDIO_DIR / "outro.mp3"
-    video_path = SCENES_DIR / "outro.mp4"
-
-    create_outro_scene(image_path)
-
-    create_audio(
-        outro_narration(),
-        audio_path,
     )
 
-    render_scene(
-        image_path,
-        audio_path,
-        video_path,
+    if duration < 5:
+        raise RuntimeError(
+            "Final video is too short."
+        )
+
+    print(
+        "Resolution:",
+        f"{width}x{height}",
     )
 
-    return video_path
+    print(
+        "Duration:",
+        f"{duration:.2f}s",
+    )
+
+    print(
+        "Video:",
+        video_stream.get(
+            "codec_name"
+        ),
+    )
+
+    print(
+        "Audio:",
+        audio_stream.get(
+            "codec_name"
+        ),
+    )
+
+    print(
+        "FINAL MP4 VALIDATION PASSED."
+    )
+
+    return {
+        "width": width,
+        "height": height,
+        "duration": duration,
+        "size": size,
+        "video_codec": video_stream.get(
+            "codec_name"
+        ),
+        "audio_codec": audio_stream.get(
+            "codec_name"
+        ),
+    }
 
 
 # ============================================================
-# WRITE VISUAL REPORT
+# VISUAL REPORT
 # ============================================================
 
-def write_visual_report(stories, scene_files):
+
+def write_visual_report(
+    stories,
+    all_scenes,
+    validation,
+):
     report = {
-        "project": "Rift Valley Watch",
-        "generated_at": datetime.utcnow().isoformat() + "Z",
-        "format": {
+        "version": "RIFT VALLEY WATCH V7 VIDEO",
+        "generated_at": datetime.utcnow().isoformat()
+        + "Z",
+        "video": {
+            "path": str(
+                FINAL_VIDEO
+            ),
             "width": WIDTH,
             "height": HEIGHT,
             "fps": FPS,
-            "orientation": "vertical",
+            "duration": validation[
+                "duration"
+            ],
+            "size": validation[
+                "size"
+            ],
         },
-        "architecture": [
-            "headline",
-            "key_facts",
-            "route_corridor",
-            "impact",
-            "official_statement",
-            "source",
-            "outro",
-        ],
+        "source_card": False,
         "stories": [],
-        "scene_count": len(scene_files),
-        "real_photos_used": 0,
     }
 
-    for index, story in enumerate(stories, start=1):
-        photo = find_story_photo(story)
+    for index, story in enumerate(
+        stories,
+        start=1,
+    ):
+        story_scenes = []
 
-        item = {
-            "story_number": index,
-            "title": story_title(story),
-            "county": county_name(story),
-            "category": category_name(story),
-            "source": source_name(story),
-            "photo": str(photo) if photo else None,
-        }
+        for scene in all_scenes:
+            if scene.get(
+                "story_number"
+            ) == index:
+                story_scenes.append(
+                    {
+                        "name": scene[
+                            "name"
+                        ],
+                        "duration": scene[
+                            "duration"
+                        ],
+                    }
+                )
 
-        if photo:
-            report["real_photos_used"] += 1
+        report["stories"].append(
+            {
+                "number": index,
+                "title": story.get(
+                    "title",
+                    "",
+                ),
+                "county": story.get(
+                    "county",
+                    "",
+                ),
+                "category": story.get(
+                    "category",
+                    "",
+                ),
+                "photo": bool(
+                    find_story_photo(
+                        story
+                    )
+                ),
+                "scenes": story_scenes,
+            }
+        )
 
-        report["stories"].append(item)
-
-    report_path = ROOT / "data" / "visual_report.json"
-
-    with report_path.open(
+    with open(
+        VISUAL_REPORT,
         "w",
         encoding="utf-8",
     ) as f:
@@ -2132,69 +3104,264 @@ def write_visual_report(stories, scene_files):
             ensure_ascii=False,
         )
 
-    log(f"Created: {report_path}")
-
 
 # ============================================================
 # MAIN
 # ============================================================
 
-def main():
-    log("")
-    log("=" * 70)
-    log("RIFT VALLEY WATCH V4 VIDEO GENERATOR")
-    log("=" * 70)
-    log("")
 
-    ensure_dirs()
-    setup_fonts()
+def main():
+    print()
+    print("=" * 70)
+    print("RIFT VALLEY WATCH V7 VIDEO GENERATOR")
+    print("=" * 70)
+    print()
+    print(
+        "Professional regional-news video engine"
+    )
+    print(
+        "1080x1920 / 30 FPS"
+    )
+    print(
+        "SOURCE CARD: DISABLED"
+    )
+    print(
+        "RAW SOURCE DATA DISPLAY: DISABLED"
+    )
+    print()
+
+    if not ffmpeg_exists():
+        raise RuntimeError(
+            "FFmpeg is not installed."
+        )
+
+    if not ffprobe_exists():
+        raise RuntimeError(
+            "FFprobe is not installed."
+        )
+
+    ensure_directories()
 
     stories = load_stories()
 
     if not stories:
         raise RuntimeError(
-            "No stories found in data/story.json"
+            "No stories found."
         )
 
-    # Limit bulletin length while preserving regional coverage.
-    stories = stories[:4]
-
-    log(
-        f"Stories loaded: {len(stories)}"
+    print(
+        "Stories loaded:",
+        len(stories),
     )
 
-    for index, story in enumerate(stories, start=1):
-        log(
-            f"{index}. "
-            f"{county_name(story)} — "
-            f"{story_title(story)}"
-        )
+    # Limit to 4 bulletin stories.
+    stories = stories[:4]
 
-    all_scene_files = []
+    # Remove old generated scenes/audio.
+    for directory in [
+        AUDIO_DIR,
+        SCENES_DIR,
+    ]:
+        for file in directory.iterdir():
+            if file.is_file():
+                try:
+                    file.unlink()
+                except Exception:
+                    pass
+
+    scene_paths = []
+    all_scene_data = []
 
     # --------------------------------------------------------
-    # STORY SCENES
+    # INTRO
     # --------------------------------------------------------
 
-    for story_number, story in enumerate(
+    intro_image = (
+        SCENES_DIR
+        / "00_intro.png"
+    )
+
+    save_image(
+        create_intro(),
+        intro_image,
+    )
+
+    intro_audio = (
+        AUDIO_DIR
+        / "00_intro.mp3"
+    )
+
+    create_audio(
+        narration_intro(),
+        intro_audio,
+    )
+
+    intro_video = (
+        SCENES_DIR
+        / "00_intro.mp4"
+    )
+
+    intro_duration = create_scene_video(
+        intro_image,
+        intro_audio,
+        intro_video,
+        "intro",
+    )
+
+    scene_paths.append(
+        intro_video
+    )
+
+    all_scene_data.append(
+        {
+            "story_number": 0,
+            "name": "intro",
+            "duration": intro_duration,
+        }
+    )
+
+    # --------------------------------------------------------
+    # STORIES
+    # --------------------------------------------------------
+
+    for index, story in enumerate(
         stories,
         start=1,
     ):
-        story_scene_files = create_story_scenes(
-            story,
-            story_number,
+        print()
+        print("=" * 70)
+        print(
+            f"BUILDING STORY {index:02d}"
+        )
+        print("=" * 70)
+
+        print(
+            "Headline:",
+            story.get(
+                "title",
+                "",
+            ),
         )
 
-        all_scene_files.extend(
-            story_scene_files
+        print(
+            "County:",
+            story.get(
+                "county",
+                "",
+            ),
+        )
+
+        photo = find_story_photo(
+            story
+        )
+
+        print(
+            "Real photo:",
+            "YES" if photo else "NO",
+        )
+
+        scenes = create_story_scenes(
+            story,
+            index,
+        )
+
+        for scene in scenes:
+            scene_paths.append(
+                Path(
+                    scene["video"]
+                )
+            )
+
+            all_scene_data.append(
+                {
+                    "story_number": index,
+                    "name": scene[
+                        "name"
+                    ],
+                    "duration": scene[
+                        "duration"
+                    ],
+                }
+            )
+
+        print(
+            f"STORY {index:02d} COMPLETE"
         )
 
     # --------------------------------------------------------
     # OUTRO
     # --------------------------------------------------------
 
-    outro = create_outro_files()
-    all_scene_files.append(outro)
+    outro_image = (
+        SCENES_DIR
+        / "99_outro.png"
+    )
+
+    save_image(
+        create_outro(),
+        outro_image,
+    )
+
+    outro_audio = (
+        AUDIO_DIR
+        / "99_outro.mp3"
+    )
+
+    create_audio(
+        "This is Rift Valley Watch. "
+        "Follow for the next regional update.",
+        outro_audio,
+    )
+
+    outro_video = (
+        SCENES_DIR
+        / "99_outro.mp4"
+    )
+
+    outro_duration = create_scene_video(
+        outro_image,
+        outro_audio,
+        outro_video,
+        "outro",
+    )
+
+    scene_paths.append(
+        outro_video
+    )
+
+    all_scene_data.append(
+        {
+            "story_number": 99,
+            "name": "outro",
+            "duration": outro_duration,
+        }
+    )
+
+    # --------------------------------------------------------
+    # ASSEMBLY
+    # --------------------------------------------------------
+
+    print()
+    print("=" * 70)
+    print("ASSEMBLING FINAL MP4")
+    print("=" * 70)
+
+    print(
+        "Total scenes:",
+        len(scene_paths),
+    )
+
+    concat_scenes(
+        scene_paths
+    )
+
+    # --------------------------------------------------------
+    # VALIDATION
+    # --------------------------------------------------------
+
+    validation = (
+        validate_final_video()
+    )
 
     # --------------------------------------------------------
     # REPORT
@@ -2202,41 +3369,57 @@ def main():
 
     write_visual_report(
         stories,
-        all_scene_files,
+        all_scene_data,
+        validation,
     )
 
-    # --------------------------------------------------------
-    # ASSEMBLE
-    # --------------------------------------------------------
+    print()
+    print("=" * 70)
+    print("RIFT VALLEY WATCH V7 COMPLETE")
+    print("=" * 70)
 
-    assemble_final(
-        all_scene_files
+    print()
+    print(
+        "FINAL MP4:",
+        FINAL_VIDEO,
     )
 
-    # --------------------------------------------------------
-    # VALIDATE
-    # --------------------------------------------------------
+    print(
+        "VISUAL REPORT:",
+        VISUAL_REPORT,
+    )
 
-    validate_final_video()
+    print()
+    print(
+        "Stories:",
+        len(stories),
+    )
 
-    log("")
-    log("=" * 70)
-    log("RIFT VALLEY WATCH VIDEO GENERATION SUCCESSFUL")
-    log("=" * 70)
-    log(f"Stories: {len(stories)}")
-    log(f"Scenes: {len(all_scene_files)}")
-    log(f"Output: {FINAL_VIDEO}")
-    log("=" * 70)
+    print(
+        "Scenes:",
+        len(scene_paths),
+    )
+
+    print(
+        "Duration:",
+        f"{validation['duration']:.2f}s",
+    )
+
+    print(
+        "Resolution:",
+        f"{WIDTH}x{HEIGHT}",
+    )
+
+    print(
+        "Source card:",
+        "DISABLED",
+    )
+
+    print()
+    print(
+        "VIDEO GENERATION SUCCESSFUL."
+    )
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as exc:
-        log("")
-        log("=" * 70)
-        log("VIDEO GENERATOR FAILED")
-        log("=" * 70)
-        log(str(exc))
-        log("=" * 70)
-        raise
+    main()
