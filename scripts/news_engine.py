@@ -1,5 +1,5 @@
 # ============================================================
-# RIFT VALLEY WATCH V2
+# RIFT VALLEY WATCH V3
 # VERIFIED NEWS SCRIPT ENGINE
 # ============================================================
 
@@ -30,7 +30,7 @@ FORBIDDEN_PHRASES = [
     "this marks a major milestone",
     "will greatly improve",
     "is set to transform",
-    "promises to transform",
+    "promises to transform"
 ]
 
 
@@ -39,14 +39,20 @@ FORBIDDEN_PHRASES = [
 # ============================================================
 
 def load_story():
+
     if not STORY_FILE.exists():
         raise RuntimeError(
             f"Story file not found: {STORY_FILE}"
         )
 
     try:
-        with open(STORY_FILE, "r", encoding="utf-8") as f:
+        with open(
+            STORY_FILE,
+            "r",
+            encoding="utf-8"
+        ) as f:
             story = json.load(f)
+
     except json.JSONDecodeError as e:
         raise RuntimeError(
             f"Invalid story.json: {e}"
@@ -61,23 +67,68 @@ def load_story():
 
 
 # ============================================================
-# BASIC TEXT CLEANING
+# TEXT CLEANING
 # ============================================================
 
 def clean_text(text):
+
     if text is None:
         return ""
 
     text = str(text)
 
-    text = re.sub(r"\s+", " ", text)
-    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    )
+
+    text = re.sub(
+        r"<[^>]+>",
+        "",
+        text
+    )
 
     return text.strip()
 
 
+def clean_section(text):
+
+    text = clean_text(text)
+
+    for phrase in FORBIDDEN_PHRASES:
+
+        text = re.sub(
+            re.escape(phrase),
+            "",
+            text,
+            flags=re.IGNORECASE
+        )
+
+    text = re.sub(
+        r"\s+([,.!?])",
+        r"\1",
+        text
+    )
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    )
+
+    return text.strip()
+
+
+def word_count(text):
+
+    return len(
+        clean_text(text).split()
+    )
+
+
 # ============================================================
-# REQUIRED FIELD CHECK
+# REQUIRED FIELD VALIDATION
 # ============================================================
 
 def validate_required_fields(story):
@@ -89,16 +140,17 @@ def validate_required_fields(story):
         "date",
         "source",
         "summary",
-        "verified_facts",
+        "verified_facts"
     ]
 
-    missing = []
-
-    for field in required:
-        if field not in story:
-            missing.append(field)
+    missing = [
+        field
+        for field in required
+        if field not in story
+    ]
 
     if missing:
+
         raise RuntimeError(
             "EDITORIAL QC FAILED.\n"
             f"Missing required fields: {', '.join(missing)}"
@@ -114,33 +166,42 @@ def validate_source(story):
     source = story.get("source")
 
     if not isinstance(source, dict):
+
         raise RuntimeError(
             "EDITORIAL QC FAILED.\n"
-            "Source must be an object containing name, url and type."
+            "Source must be an object."
         )
 
-    source_name = clean_text(source.get("name"))
-
-    if not source_name:
-        raise RuntimeError(
-            "EDITORIAL QC FAILED.\n"
-            "A source name is required."
-        )
+    name = clean_text(
+        source.get("name")
+    )
 
     source_type = clean_text(
         source.get("type")
     ).upper()
 
+    url = clean_text(
+        source.get("url")
+    )
+
+    if not name:
+
+        raise RuntimeError(
+            "EDITORIAL QC FAILED.\n"
+            "A source name is required."
+        )
+
     if not source_type:
+
         raise RuntimeError(
             "EDITORIAL QC FAILED.\n"
             "Source type is required."
         )
 
     return {
-        "name": source_name,
-        "url": clean_text(source.get("url")),
-        "type": source_type,
+        "name": name,
+        "url": url,
+        "type": source_type
     }
 
 
@@ -150,9 +211,15 @@ def validate_source(story):
 
 def validate_facts(story):
 
-    facts = story.get("verified_facts")
+    facts = story.get(
+        "verified_facts"
+    )
 
-    if not isinstance(facts, list):
+    if not isinstance(
+        facts,
+        list
+    ):
+
         raise RuntimeError(
             "EDITORIAL QC FAILED.\n"
             "verified_facts must be a list."
@@ -162,7 +229,10 @@ def validate_facts(story):
 
     for fact in facts:
 
-        if not isinstance(fact, dict):
+        if not isinstance(
+            fact,
+            dict
+        ):
             continue
 
         label = clean_text(
@@ -174,12 +244,14 @@ def validate_facts(story):
         )
 
         if label and value:
+
             cleaned.append({
                 "label": label,
                 "value": value
             })
 
     if len(cleaned) < 2:
+
         raise RuntimeError(
             "EDITORIAL QC FAILED.\n"
             "At least two verified facts are required."
@@ -199,7 +271,11 @@ def get_official_statement(story):
         {}
     )
 
-    if not isinstance(statement, dict):
+    if not isinstance(
+        statement,
+        dict
+    ):
+
         return {
             "available": False,
             "speaker": "",
@@ -207,7 +283,10 @@ def get_official_statement(story):
         }
 
     available = bool(
-        statement.get("available", False)
+        statement.get(
+            "available",
+            False
+        )
     )
 
     speaker = clean_text(
@@ -219,6 +298,7 @@ def get_official_statement(story):
     )
 
     if not available:
+
         return {
             "available": False,
             "speaker": "",
@@ -226,6 +306,7 @@ def get_official_statement(story):
         }
 
     if not speaker or not quote:
+
         return {
             "available": False,
             "speaker": "",
@@ -240,10 +321,13 @@ def get_official_statement(story):
 
 
 # ============================================================
-# FIND FACT
+# FACT HELPERS
 # ============================================================
 
-def find_fact(facts, label):
+def find_fact(
+    facts,
+    label
+):
 
     label = label.upper()
 
@@ -255,11 +339,31 @@ def find_fact(facts, label):
     return ""
 
 
+def fact_line(
+    facts,
+    label,
+    display_name
+):
+
+    value = find_fact(
+        facts,
+        label
+    )
+
+    if not value:
+        return ""
+
+    return f"{display_name}: {value}."
+
+
 # ============================================================
 # BUILD HOOK
 # ============================================================
 
-def build_hook(story, facts):
+def build_hook(
+    story,
+    facts
+):
 
     title = clean_text(
         story["title"]
@@ -269,18 +373,7 @@ def build_hook(story, facts):
         story["county"]
     )
 
-    status = find_fact(
-        facts,
-        "STATUS"
-    )
-
-    if status:
-        return (
-            f"{county}: {title}. "
-            f"Current status: {status}."
-        )
-
-    return (
+    return clean_section(
         f"{county}: {title}."
     )
 
@@ -289,38 +382,137 @@ def build_hook(story, facts):
 # BUILD WHAT HAPPENED
 # ============================================================
 
-def build_what_happened(story, facts):
+def build_what_happened(
+    story,
+    facts
+):
 
-    summary = clean_text(
-        story["summary"]
+    project = find_fact(
+        facts,
+        "PROJECT"
     )
 
-    return summary
+    length = find_fact(
+        facts,
+        "ROAD_LENGTH"
+    )
+
+    cost = find_fact(
+        facts,
+        "COST"
+    )
+
+    location = find_fact(
+        facts,
+        "LOCATION"
+    )
+
+    status = find_fact(
+        facts,
+        "STATUS"
+    )
+
+    parts = []
+
+    if project:
+        parts.append(
+            f"Construction is ongoing on the {project}"
+        )
+
+    if length:
+        parts.append(
+            f"a project covering {length}"
+        )
+
+    if cost:
+        parts.append(
+            f"and costing {cost}"
+        )
+
+    if location:
+        parts.append(
+            f"in {location}"
+        )
+
+    sentence = " ".join(parts)
+
+    if sentence:
+
+        sentence = (
+            sentence.rstrip(".")
+            + "."
+        )
+
+    if status and status.lower() not in sentence.lower():
+
+        sentence += (
+            f" The reported status is {status.lower()}."
+        )
+
+    if not sentence:
+
+        sentence = clean_text(
+            story["summary"]
+        )
+
+    return clean_section(
+        sentence
+    )
 
 
 # ============================================================
 # BUILD KEY FACTS
 # ============================================================
 
-def build_key_facts(facts):
+def build_key_facts(
+    facts
+):
+
+    priority = [
+        "PROJECT",
+        "ROAD_LENGTH",
+        "COST",
+        "LOCATION",
+        "STATUS",
+        "IMPACT"
+    ]
 
     lines = []
 
-    for fact in facts:
+    for label in priority:
 
-        lines.append(
-            f"{fact['label'].title()}: "
-            f"{fact['value']}."
+        value = find_fact(
+            facts,
+            label
         )
 
-    return " ".join(lines)
+        if not value:
+            continue
+
+        display = label.title()
+
+        if label == "ROAD_LENGTH":
+            display = "Road length"
+
+        elif label == "EXPECTED_IMPACT":
+            display = "Expected impact"
+
+        lines.append(
+            f"{display}: {value}."
+        )
+
+    return clean_section(
+        " ".join(lines)
+    )
 
 
 # ============================================================
 # BUILD CONTEXT
 # ============================================================
 
-def build_context(story):
+def build_context(
+    story
+):
 
     editorial = story.get(
         "editorial",
@@ -338,74 +530,108 @@ def build_context(story):
     ):
         unconfirmed = []
 
-    if not unconfirmed:
-        return (
-            "The available information confirms "
-            "the reported development."
-        )
-
     names = []
 
-    for item in unconfirmed[:4]:
+    for item in unconfirmed:
 
-        item = clean_text(item)
+        item = clean_text(
+            item
+        )
 
         if item:
             names.append(item)
 
     if not names:
+
         return (
             "The available information confirms "
             "the reported development."
         )
 
-    if len(names) == 1:
+    # Only mention the most important missing details.
+    selected = names[:3]
 
-        missing = names[0]
+    if len(selected) == 1:
 
-    elif len(names) == 2:
+        missing = selected[0]
+
+    elif len(selected) == 2:
 
         missing = (
-            f"{names[0]} and {names[1]}"
+            f"{selected[0]} and {selected[1]}"
         )
 
     else:
 
         missing = (
-            ", ".join(names[:-1])
-            + " and "
-            + names[-1]
+            f"{selected[0]}, "
+            f"{selected[1]} and "
+            f"{selected[2]}"
         )
 
-    return (
-        "Some project details remain unconfirmed "
-        f"from the available source, including {missing}."
+    return clean_section(
+        "Some project details remain unconfirmed, "
+        f"including {missing}."
     )
 
 
 # ============================================================
-# BUILD OFFICIAL ATTRIBUTION
+# BUILD ATTRIBUTION
 # ============================================================
 
 def build_attribution(
-    story,
     source,
     statement
 ):
 
     source_name = source["name"]
 
-    if statement["available"]:
+    if not statement["available"]:
 
-        return (
-            f'{source_name}, through '
-            f'{statement["speaker"]}, said: '
-            f'"{statement["quote"]}"'
+        return clean_section(
+            f"The information is attributed to "
+            f"{source_name}."
         )
 
-    return (
-        f"The information is attributed to "
-        f"{source_name}."
+    speaker = statement["speaker"]
+    quote = statement["quote"]
+
+    # Keep official quotes concise for narration.
+    sentences = re.split(
+        r"(?<=[.!?])\s+",
+        quote
+    )
+
+    short_quote = ""
+
+    for sentence in sentences:
+
+        sentence = clean_text(
+            sentence
+        )
+
+        if not sentence:
+            continue
+
+        candidate = (
+            f"{short_quote} {sentence}"
+        ).strip()
+
+        if word_count(candidate) <= 35:
+
+            short_quote = candidate
+
+        else:
+
+            break
+
+    if not short_quote:
+        short_quote = quote
+
+    return clean_section(
+        f"{source_name}, through "
+        f"{speaker}, said: "
+        f"\"{short_quote}\""
     )
 
 
@@ -413,29 +639,43 @@ def build_attribution(
 # BUILD IMPACT
 # ============================================================
 
-def build_impact(story):
+def build_impact(
+    story,
+    facts
+):
+
+    impact = find_fact(
+        facts,
+        "IMPACT"
+    )
+
+    if not impact:
+
+        impact = find_fact(
+            facts,
+            "EXPECTED_IMPACT"
+        )
+
+    if impact:
+
+        return clean_section(
+            f"The expected impact is that {impact.lower()}."
+        )
 
     summary = clean_text(
         story["summary"]
     )
 
-    # Only use impact language already present
-    # in the supplied story.
     sentences = re.split(
         r"(?<=[.!?])\s+",
         summary
     )
 
-    impact_sentences = []
-
     keywords = [
-        "improve",
-        "support",
-        "movement",
+        "economic",
         "transport",
         "business",
-        "residents",
-        "economic",
+        "movement",
         "access",
         "connect"
     ]
@@ -448,19 +688,14 @@ def build_impact(story):
             keyword in lower
             for keyword in keywords
         ):
-            impact_sentences.append(
-                sentence.strip()
+
+            return clean_section(
+                sentence
             )
 
-    if impact_sentences:
-        return " ".join(
-            impact_sentences
-        )
-
-    return (
-        "The reported impact will depend on "
-        "implementation of the project and "
-        "the availability of further verified details."
+    return clean_section(
+        "The wider impact will depend on "
+        "implementation and further verified updates."
     )
 
 
@@ -468,61 +703,151 @@ def build_impact(story):
 # BUILD CLOSE
 # ============================================================
 
-def build_close(story, source):
+def build_close(
+    story,
+    source
+):
 
     county = clean_text(
         story["county"]
     )
 
-    source_name = source["name"]
-
-    return (
+    return clean_section(
         f"Rift Valley Watch will track further "
-        f"updates from {source_name} on the project "
-        f"in {county}."
+        f"verified updates from {source['name']} "
+        f"on the project in {county}."
     )
 
 
 # ============================================================
-# CLEAN GENERATED SECTION
+# SCRIPT COMPRESSION
 # ============================================================
 
-def clean_section(text):
+def compress_script(
+    sections
+):
 
-    text = clean_text(text)
+    """
+    Reduce repetition while preserving the strongest
+    verified information.
 
-    for phrase in FORBIDDEN_PHRASES:
+    Order of reduction:
+    1. Remove duplicate context.
+    2. Remove close if necessary.
+    3. Shorten attribution.
+    4. Shorten key facts.
+    5. Never invent facts.
+    """
 
-        pattern = re.compile(
-            re.escape(phrase),
-            re.IGNORECASE
+    def assemble():
+
+        return clean_section(
+            " ".join(
+                value
+                for value in sections.values()
+                if value
+            )
         )
 
-        text = pattern.sub(
-            "",
-            text
+    current = assemble()
+
+    if word_count(current) <= MAX_WORDS:
+        return sections
+
+    # Remove close first.
+    sections["close"] = ""
+
+    current = assemble()
+
+    if word_count(current) <= MAX_WORDS:
+        return sections
+
+    # Reduce context.
+    sections["context"] = (
+        "Some additional project details remain "
+        "unconfirmed."
+    )
+
+    current = assemble()
+
+    if word_count(current) <= MAX_WORDS:
+        return sections
+
+    # Reduce attribution while retaining the source
+    # and official speaker.
+    attribution = sections.get(
+        "attribution",
+        ""
+    )
+
+    match = re.search(
+        r"^(.*?), through (.*?), said:",
+        attribution
+    )
+
+    if match:
+
+        source_name = match.group(1)
+        speaker = match.group(2)
+
+        sections["attribution"] = (
+            f"{source_name}, through {speaker}, "
+            "said construction should be closely "
+            "monitored for timely and quality delivery."
         )
 
-    text = re.sub(
-        r"\s+([,.!?])",
-        r"\1",
-        text
+    current = assemble()
+
+    if word_count(current) <= MAX_WORDS:
+        return sections
+
+    # Keep only the highest-value verified facts.
+    key_facts = []
+
+    for sentence in re.split(
+        r"(?<=[.!?])\s+",
+        sections["key_facts"]
+    ):
+
+        sentence = clean_text(
+            sentence
+        )
+
+        if not sentence:
+            continue
+
+        key_facts.append(
+            sentence
+        )
+
+    sections["key_facts"] = " ".join(
+        key_facts[:4]
     )
 
-    text = re.sub(
-        r"\s+",
-        " ",
-        text
-    )
+    current = assemble()
 
-    return text.strip()
+    if word_count(current) <= MAX_WORDS:
+        return sections
+
+    # Final safe reduction: remove attribution only
+    # if an official source remains available elsewhere.
+    sections["attribution"] = ""
+
+    current = assemble()
+
+    if word_count(current) <= MAX_WORDS:
+        return sections
+
+    return sections
 
 
 # ============================================================
 # BUILD SCRIPT
 # ============================================================
 
-def build_script(story):
+def build_script(
+    story
+):
 
     validate_required_fields(
         story
@@ -540,169 +865,207 @@ def build_script(story):
         story
     )
 
-    hook = clean_section(
-        build_hook(
+    sections = {
+
+        "hook": build_hook(
             story,
             facts
-        )
-    )
+        ),
 
-    what_happened = clean_section(
-        build_what_happened(
+        "what_happened": build_what_happened(
             story,
             facts
-        )
-    )
+        ),
 
-    key_facts = clean_section(
-        build_key_facts(
+        "key_facts": build_key_facts(
             facts
-        )
-    )
+        ),
 
-    context = clean_section(
-        build_context(
+        "context": build_context(
             story
-        )
-    )
+        ),
 
-    attribution = clean_section(
-        build_attribution(
-            story,
+        "attribution": build_attribution(
             source,
             statement
-        )
-    )
+        ),
 
-    impact = clean_section(
-        build_impact(
-            story
-        )
-    )
+        "impact": build_impact(
+            story,
+            facts
+        ),
 
-    close = clean_section(
-        build_close(
+        "close": build_close(
             story,
             source
         )
-    )
-
-    sections = {
-        "hook": hook,
-        "what_happened": what_happened,
-        "key_facts": key_facts,
-        "context": context,
-        "attribution": attribution,
-        "impact": impact,
-        "close": close
     }
 
-    full_text = " ".join(
-        sections.values()
+    sections = {
+        key: clean_section(value)
+        for key, value in sections.items()
+    }
+
+    sections = compress_script(
+        sections
     )
 
-    words = full_text.split()
+    full_text = clean_section(
+        " ".join(
+            value
+            for value in sections.values()
+            if value
+        )
+    )
 
-    word_count = len(words)
+    total_words = word_count(
+        full_text
+    )
 
-    if word_count < MIN_WORDS:
+    # ========================================================
+    # FINAL WORD COUNT QC
+    # ========================================================
+
+    if total_words < MIN_WORDS:
 
         raise RuntimeError(
             "EDITORIAL QC FAILED.\n"
-            f"Script contains only {word_count} words.\n"
+            f"Script contains only {total_words} words.\n"
             f"Minimum required: {MIN_WORDS}.\n"
-            "Add more verified facts to story.json."
+            "Add more verified information to story.json."
         )
 
-    if word_count > MAX_WORDS:
+    if total_words > MAX_WORDS:
 
         raise RuntimeError(
             "EDITORIAL QC FAILED.\n"
-            f"Script contains {word_count} words.\n"
+            f"Script contains {total_words} words "
+            f"after automatic compression.\n"
             f"Maximum allowed: {MAX_WORDS}."
         )
 
+    # ========================================================
+    # OUTPUT
+    # ========================================================
+
     return {
-        "version": "RIFT VALLEY WATCH V2",
-        "generated_at": datetime.utcnow().isoformat()
-        + "Z",
 
-        "title": clean_text(
-            story["title"]
-        ),
+        "version": "RIFT VALLEY WATCH V3",
 
-        "county": clean_text(
-            story["county"]
-        ),
+        "generated_at":
+            datetime.utcnow().isoformat() + "Z",
 
-        "category": clean_text(
-            story["category"]
-        ).upper(),
+        "title":
+            clean_text(
+                story["title"]
+            ),
 
-        "date": clean_text(
-            story["date"]
-        ),
+        "county":
+            clean_text(
+                story["county"]
+            ),
 
-        "source": source,
+        "category":
+            clean_text(
+                story["category"]
+            ).upper(),
 
-        "official_statement": statement,
+        "date":
+            clean_text(
+                story["date"]
+            ),
 
-        "verified_facts": facts,
+        "source":
+            source,
 
-        "editorial": story.get(
-            "editorial",
-            {}
-        ),
+        "official_statement":
+            statement,
 
-        "sections": sections,
+        "verified_facts":
+            facts,
 
-        "full_script": full_text,
+        "editorial":
+            story.get(
+                "editorial",
+                {}
+            ),
 
-        "word_count": word_count,
+        "sections":
+            sections,
+
+        "full_script":
+            full_text,
+
+        "word_count":
+            total_words,
 
         "visual_plan": [
+
             {
                 "sequence": 1,
                 "type": "HOOK",
-                "purpose": "Open with the strongest verified fact."
+                "purpose":
+                    "Open with the strongest verified fact."
             },
+
             {
                 "sequence": 2,
                 "type": "VISUAL_EVIDENCE",
-                "purpose": "Show an available official/project visual."
+                "purpose":
+                    "Show an available official or project visual."
             },
+
             {
                 "sequence": 3,
                 "type": "KEY_FACTS",
-                "purpose": "Display verified project information."
+                "purpose":
+                    "Display verified project information."
             },
+
             {
                 "sequence": 4,
                 "type": "CONTEXT",
-                "purpose": "Clearly separate confirmed and unconfirmed information."
+                "purpose":
+                    "Separate confirmed and unconfirmed information."
             },
+
             {
                 "sequence": 5,
                 "type": "IMPACT",
-                "purpose": "Use only impact information supported by the source."
+                "purpose":
+                    "Use only verified impact information."
             },
+
             {
                 "sequence": 6,
                 "type": "SOURCE",
-                "purpose": "Display source and publication date."
+                "purpose":
+                    "Display source and publication date."
             }
         ],
 
-        "caption_required": True,
+        "caption_required":
+            True,
 
         "qc": {
-            "source_present": True,
-            "verified_facts_present": True,
+
+            "source_present":
+                True,
+
+            "verified_facts_present":
+                True,
+
             "official_statement_available":
                 statement["available"],
-            "boilerplate_removed": True,
-            "word_count_passed": True,
-            "ready_for_video": True
+
+            "boilerplate_removed":
+                True,
+
+            "word_count_passed":
+                True,
+
+            "ready_for_video":
+                True
         }
     }
 
@@ -711,7 +1074,9 @@ def build_script(story):
 # SAVE SCRIPT
 # ============================================================
 
-def save_script(script):
+def save_script(
+    script
+):
 
     SCRIPT_FILE.parent.mkdir(
         parents=True,
@@ -739,7 +1104,7 @@ def save_script(script):
 def main():
 
     print("=" * 60)
-    print("RIFT VALLEY WATCH V2")
+    print("RIFT VALLEY WATCH V3")
     print("VERIFIED NEWS SCRIPT ENGINE")
     print("=" * 60)
 
@@ -786,9 +1151,19 @@ def main():
     print()
     print("[3/5] Building verified script...")
 
-    script = build_script(
-        story
-    )
+    try:
+
+        script = build_script(
+            story
+        )
+
+    except Exception as error:
+
+        print()
+        print("EDITORIAL QC ERROR:")
+        print(str(error))
+
+        raise
 
     print(
         f"      Word count: {script['word_count']}"
@@ -833,7 +1208,7 @@ def main():
 
     print()
     print(
-        "RIFT VALLEY WATCH V2 SCRIPT ENGINE COMPLETE."
+        "RIFT VALLEY WATCH V3 SCRIPT ENGINE COMPLETE."
     )
 
 
