@@ -651,7 +651,6 @@ def extract_image_candidates(
 ):
     candidates = []
 
-    # OG image first.
     patterns = [
         r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
         r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
@@ -675,7 +674,6 @@ def extract_image_candidates(
                 )
             )
 
-    # IMG tags.
     img_pattern = re.compile(
         r"<img\b([^>]+)>",
         re.I
@@ -771,7 +769,6 @@ def extract_image_candidates(
             (url, score)
         )
 
-    # De-duplicate.
     seen = set()
     unique = []
 
@@ -949,7 +946,6 @@ def find_source_image(story):
                     "RGB"
                 )
 
-                # Reject obvious tiny/flat assets.
                 width, height = image.size
 
                 if width < 700 or height < 400:
@@ -972,7 +968,6 @@ def find_source_image(story):
             }
         )
 
-        # We only need a few good candidates.
         if len(accepted) >= 3:
             break
 
@@ -1074,7 +1069,6 @@ def photo_background(path):
                 )
             )
 
-        # Dark editorial treatment.
         overlay = Image.new(
             "RGBA",
             (WIDTH, HEIGHT),
@@ -1265,7 +1259,6 @@ def scene_photo(story, image_path):
         "OFFICIAL SOURCE VISUAL"
     )
 
-    # Lower newsroom information panel.
     draw.rounded_rectangle(
         (
             35,
@@ -1381,7 +1374,6 @@ def scene_location(story):
         4
     )
 
-    # Editorial locator graphic.
     draw.rounded_rectangle(
         (
             70,
@@ -1594,8 +1586,6 @@ def scene_route(story):
         fill=(225, 35, 42)
     )
 
-    # Abstract route visual.
-    # Clearly editorial — not presented as a geographic map.
     points = [
         (120, 760),
         (300, 660),
@@ -2127,6 +2117,7 @@ def scene_outro(story):
 
 def build_narration_segments(story):
     title = story_title(story)
+
     summary = clean_text(
         story.get("summary", "")
     )
@@ -2171,14 +2162,9 @@ def build_narration_segments(story):
             summary
         )
 
-    location_sentence = (
-        f"The project is located in "
-        f"{location}."
-    )
-
     if location:
         segments.append(
-            location_sentence
+            f"The project is located in {location}."
         )
 
     fact_parts = []
@@ -2342,7 +2328,6 @@ def create_srt(text, duration, path):
             group
         )
 
-        # Prevent very short flashes.
         if end - start < 0.75:
             end = min(
                 duration,
@@ -2451,7 +2436,6 @@ def create_scene_video(
         / f"scene_{scene_index:02d}.mp4"
     )
 
-    # FFmpeg-safe subtitle path.
     subtitle_path = str(
         srt_path.resolve()
     ).replace(
@@ -2545,10 +2529,32 @@ def create_scene_video(
 # ============================================================
 
 def concat_scenes(scene_files):
+    """
+    Concatenate all rendered scene MP4 files.
+
+    IMPORTANT:
+    Video timestamps use setpts.
+    Audio timestamps use asetpts.
+
+    They must be processed separately because
+    setpts accepts video while asetpts accepts audio.
+    """
+
     if not scene_files:
         raise RuntimeError(
             "No scene videos available."
         )
+
+    for path in scene_files:
+        if not Path(path).exists():
+            raise RuntimeError(
+                f"Missing scene video: {path}"
+            )
+
+    OUTPUT_DIR.mkdir(
+        parents=True,
+        exist_ok=True
+    )
 
     inputs = []
 
@@ -2565,11 +2571,18 @@ def concat_scenes(scene_files):
     for i in range(
         len(scene_files)
     ):
+        # VIDEO
         filter_parts.append(
             f"[{i}:v:0]"
-            f"[{i}:a:0]"
             f"setpts=PTS-STARTPTS"
-            f"[v{i}][a{i}]"
+            f"[v{i}]"
+        )
+
+        # AUDIO
+        filter_parts.append(
+            f"[{i}:a:0]"
+            f"asetpts=PTS-STARTPTS"
+            f"[a{i}]"
         )
 
     concat_inputs = "".join(
@@ -2594,37 +2607,80 @@ def concat_scenes(scene_files):
         "-y"
     ]
 
-    command.extend(inputs)
+    command.extend(
+        inputs
+    )
 
     command.extend(
         [
             "-filter_complex",
             filter_complex,
+
             "-map",
             "[v]",
+
             "-map",
             "[a]",
+
             "-r",
             str(FPS),
+
             "-c:v",
             "libx264",
+
             "-preset",
             "medium",
+
             "-crf",
             "19",
+
             "-pix_fmt",
             "yuv420p",
+
             "-c:a",
             "aac",
+
             "-b:a",
             "160k",
+
             "-ar",
             "48000",
+
             "-movflags",
             "+faststart",
+
             str(OUTPUT_FILE)
         ]
     )
+
+    print()
+    print("=" * 70)
+    print("CONCATENATING FINAL VIDEO")
+    print("=" * 70)
+    print(
+        f"Scenes to combine: "
+        f"{len(scene_files)}"
+    )
+
+    for index, path in enumerate(
+        scene_files,
+        start=1
+    ):
+        print(
+            f"Scene {index}: {path}"
+        )
+
+    print()
+    print(
+        "Resetting video timestamps..."
+    )
+    print(
+        "Resetting audio timestamps..."
+    )
+    print(
+        "Combining scenes..."
+    )
+    print()
 
     run_command(
         command
@@ -2634,6 +2690,25 @@ def concat_scenes(scene_files):
         raise RuntimeError(
             "Final MP4 was not created."
         )
+
+    size = OUTPUT_FILE.stat().st_size
+
+    if size < 100000:
+        raise RuntimeError(
+            "Final MP4 is suspiciously small."
+        )
+
+    print()
+    print("=" * 70)
+    print("FINAL MP4 CREATED SUCCESSFULLY")
+    print("=" * 70)
+    print(
+        f"Output: {OUTPUT_FILE}"
+    )
+    print(
+        f"Size: {size / (1024 * 1024):.2f} MB"
+    )
+    print()
 
     return OUTPUT_FILE
 
@@ -2869,13 +2944,14 @@ def main():
     print()
     print("STORY:")
     print(story_title(story))
+
     print()
     print("COUNTY:")
     print(story_county(story))
+
     print()
     print("SOURCE:")
     print(source_name(story))
-    print()
 
     # --------------------------------------------------------
     # SOURCE IMAGE
@@ -2934,230 +3010,3 @@ def main():
 
     if source_image:
         scene_plan.append(
-            (
-                "VISUAL EVIDENCE",
-                scene_photo,
-                source_image
-            )
-        )
-
-    scene_plan.extend(
-        [
-            (
-                "WHERE IT IS",
-                scene_location,
-                None
-            ),
-            (
-                "KEY FACTS",
-                scene_facts,
-                None
-            ),
-            (
-                "THE ROUTE",
-                scene_route,
-                None
-            ),
-            (
-                "WHY IT MATTERS",
-                scene_impact,
-                None
-            ),
-            (
-                "OFFICIAL STATEMENT",
-                scene_statement,
-                None
-            ),
-            (
-                "SOURCE",
-                scene_source,
-                None
-            ),
-            (
-                "OUTRO",
-                scene_outro,
-                None
-            )
-        ]
-    )
-
-    # --------------------------------------------------------
-    # SCENES
-    # --------------------------------------------------------
-
-    scene_records = []
-    scene_files = []
-
-    audio_index = 0
-
-    for scene_number, (
-        scene_name,
-        renderer,
-        argument
-    ) in enumerate(
-        scene_plan,
-        start=1
-    ):
-
-        print()
-        print("=" * 70)
-        print(
-            f"SCENE {scene_number}: "
-            f"{scene_name}"
-        )
-        print("=" * 70)
-
-        # Use narration sequentially.
-        if audio_index >= len(
-            audio_files
-        ):
-            audio_index = len(
-                audio_files
-            ) - 1
-
-        if audio_index < 0:
-            audio_index = 0
-
-        audio_path = audio_files[
-            audio_index
-        ]
-
-        if argument:
-            image = renderer(
-                story,
-                argument
-            )
-        else:
-            image = renderer(
-                story
-            )
-
-        image_path = save_scene(
-            image,
-            scene_number
-        )
-
-        # Give the scene an appropriate
-        # narration segment.
-        caption_text = (
-            narration_segments[
-                min(
-                    audio_index,
-                    len(
-                        narration_segments
-                    ) - 1
-                )
-            ]
-        )
-
-        scene_video, duration, srt = (
-            create_scene_video(
-                image_path,
-                audio_path,
-                caption_text,
-                scene_number
-            )
-        )
-
-        scene_files.append(
-            scene_video
-        )
-
-        scene_records.append(
-            {
-                "scene": scene_number,
-                "name": scene_name,
-                "image": str(
-                    image_path
-                ),
-                "video": str(
-                    scene_video
-                ),
-                "caption": str(
-                    srt
-                ),
-                "duration": round(
-                    duration,
-                    2
-                )
-            }
-        )
-
-        audio_index += 1
-
-    # --------------------------------------------------------
-    # FINAL OUTRO NARRATION
-    # --------------------------------------------------------
-    # If there are more scenes than narration
-    # segments, the final scenes use the last
-    # segment. This keeps the render stable.
-
-    print()
-    print("=" * 70)
-    print("ASSEMBLING FINAL MP4")
-    print("=" * 70)
-
-    concat_scenes(
-        scene_files
-    )
-
-    # --------------------------------------------------------
-    # FINAL QC
-    # --------------------------------------------------------
-
-    print()
-    print("=" * 70)
-    print("FINAL QUALITY CONTROL")
-    print("=" * 70)
-
-    qc = validate_final_mp4(
-        OUTPUT_FILE
-    )
-
-    print(
-        json.dumps(
-            qc,
-            indent=2
-        )
-    )
-
-    write_visual_report(
-        story,
-        scene_records,
-        source_candidates,
-        source_image
-    )
-
-    print()
-    print("=" * 70)
-    print("VIDEO GENERATION SUCCESSFUL")
-    print("=" * 70)
-    print()
-    print(
-        f"MP4: {OUTPUT_FILE}"
-    )
-    print(
-        f"Size: {qc['size_bytes']} bytes"
-    )
-    print(
-        f"Duration: "
-        f"{qc['duration_seconds']} seconds"
-    )
-    print(
-        f"Resolution: "
-        f"{qc['width']}x{qc['height']}"
-    )
-    print(
-        f"Video: {qc['video_codec']}"
-    )
-    print(
-        f"Audio: {qc['audio_codec']}"
-    )
-    print(
-        f"Visual report: {REPORT_FILE}"
-    )
-    print()
-
-
-if __name__ == "__main__":
-    main()
