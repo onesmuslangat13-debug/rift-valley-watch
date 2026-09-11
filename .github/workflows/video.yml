@@ -1,0 +1,47 @@
+name: Rift Valley Watch Video
+
+on:
+  workflow_dispatch:
+
+jobs:
+  generate-video:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pillow gTTS
+
+      - name: Generate news script
+        run: |
+          python scripts/news_engine.py
+
+      - name: Generate MP4 video
+        run: |
+          python scripts/video_generator.py
+
+      - name: Verify output
+        run: |
+          ls -lh output/
+          ffprobe -v error output/rift_valley_watch.mp4
+
+      - name: Upload MP4
+        uses: actions/upload-artifact@v4
+        with:
+          name: rift-valley-watch-mp4
+          path: output/rift_valley_watch.mp4
+          if-no-files-found: error
