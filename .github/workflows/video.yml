@@ -2,12 +2,15 @@ name: Rift Valley Watch V2 Video
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * *"
 
 jobs:
   generate-video:
     runs-on: ubuntu-latest
 
     steps:
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -29,95 +32,122 @@ jobs:
       - name: Check project files
         run: |
           echo "=========================================="
-          echo "CHECKING PROJECT FILES"
+          echo "CHECKING PROJECT"
           echo "=========================================="
 
           test -f data/story.json
+          test -f data/script.json
           test -f scripts/news_engine.py
           test -f scripts/video_generator.py
 
-          echo "All required files found."
+          echo "Project files OK"
 
-      - name: Prepare output directories
+      - name: Prepare directories
         run: |
-          echo "=========================================="
-          echo "PREPARING OUTPUT DIRECTORIES"
-          echo "=========================================="
-
           mkdir -p output
           mkdir -p output/scenes
+          mkdir -p output/audio
           mkdir -p assets
           mkdir -p assets/source
           mkdir -p assets/audio
+          mkdir -p assets/music
 
-          echo "Directories ready."
-
-      - name: Generate verified news script
+      - name: Generate real-time news
         run: |
           echo "=========================================="
-          echo "GENERATING VERIFIED NEWS SCRIPT"
+          echo "GENERATING REAL-TIME RIFT VALLEY NEWS"
           echo "=========================================="
 
           python -u scripts/news_engine.py
 
-      - name: Show generated script
+      - name: Show generated news
         run: |
           echo "=========================================="
-          echo "GENERATED V2 SCRIPT"
+          echo "STORY.JSON"
+          echo "=========================================="
+
+          cat data/story.json
+
+          echo
+          echo "=========================================="
+          echo "SCRIPT.JSON"
           echo "=========================================="
 
           cat data/script.json
 
-      - name: Generate V2 MP4
+      - name: Generate video
         run: |
           echo "=========================================="
           echo "STARTING VIDEO GENERATOR"
           echo "=========================================="
 
+          set +e
+
           python -u scripts/video_generator.py 2>&1 | tee video_generator.log
 
           STATUS=${PIPESTATUS[0]}
 
+          echo
           echo "=========================================="
           echo "VIDEO GENERATOR EXIT CODE: $STATUS"
           echo "=========================================="
 
           exit $STATUS
 
-      - name: Show generator log
+      - name: Print complete generator log
         if: always()
         run: |
           echo "=========================================="
-          echo "VIDEO GENERATOR LOG"
+          echo "COMPLETE VIDEO GENERATOR LOG"
           echo "=========================================="
 
           if [ -f video_generator.log ]; then
             cat video_generator.log
           else
-            echo "video_generator.log was not created."
+            echo "video_generator.log was not created"
           fi
+
+      - name: Inspect generated scenes
+        if: always()
+        run: |
+          echo "=========================================="
+          echo "OUTPUT DIRECTORY"
+          echo "=========================================="
+
+          find output -maxdepth 3 -type f -printf '%p %s bytes\n' 2>/dev/null || true
+
+          echo
+          echo "=========================================="
+          echo "SCENE FILES"
+          echo "=========================================="
+
+          ls -lah output/scenes/ 2>/dev/null || true
 
       - name: Verify MP4 exists
         run: |
           echo "=========================================="
-          echo "OUTPUT FILE"
+          echo "VERIFYING FINAL MP4"
           echo "=========================================="
 
-          mkdir -p output
-
-          ls -lah output/ || true
-
           if [ ! -f output/rift_valley_watch.mp4 ]; then
-            echo "ERROR: output/rift_valley_watch.mp4 was not created."
+            echo
+            echo "ERROR: Final MP4 was not created."
+            echo
+            echo "Last 150 lines of generator log:"
+            tail -n 150 video_generator.log || true
+            echo
+            echo "Generated files:"
+            find output -maxdepth 3 -type f -printf '%p %s bytes\n' || true
             exit 1
           fi
 
-          echo "MP4 successfully created."
+          ls -lh output/rift_valley_watch.mp4
 
       - name: Inspect MP4
+        if: success()
         run: |
           echo "=========================================="
-          echo "MP4 INSPECTION"
+          echo "FFPROBE"
           echo "=========================================="
 
           ffprobe -v error \
@@ -126,7 +156,7 @@ jobs:
             -of json \
             output/rift_valley_watch.mp4
 
-      - name: Upload V2 MP4
+      - name: Upload MP4
         if: success()
         uses: actions/upload-artifact@v4
         with:
@@ -139,7 +169,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: rift-valley-watch-v2-script
-          path: data/script.json
+          path: |
+            data/story.json
+            data/script.json
+            data/visual_report.json
           if-no-files-found: warn
 
       - name: Upload generator log
@@ -150,7 +183,7 @@ jobs:
           path: video_generator.log
           if-no-files-found: warn
 
-      - name: Upload output directory for debugging
+      - name: Upload debug output
         if: always()
         uses: actions/upload-artifact@v4
         with:
