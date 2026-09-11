@@ -8,306 +8,134 @@ from PIL import Image, ImageDraw, ImageFont
 from gtts import gTTS
 
 
-# ============================================================
-# RIFT VALLEY WATCH
-# STABLE V4 VIDEO GENERATOR
-#
-# IMPORTANT:
-# - Reads verified story data from data/story.json
-# - Does NOT require narration fields in data/script.json
-# - Builds narration directly from verified facts
-# - Creates 8 scenes
-# - Creates individual MP4 scenes
-# - Concatenates scenes with FFmpeg filter_complex
-# - Validates final MP4 with ffprobe
-# ============================================================
-
-
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[1]
 
 STORY_FILE = ROOT / "data" / "story.json"
-SCRIPT_FILE = ROOT / "data" / "script.json"
-
 OUTPUT_DIR = ROOT / "output"
 SCENE_DIR = OUTPUT_DIR / "scenes"
-AUDIO_DIR = ROOT / "assets" / "audio"
+AUDIO_DIR = OUTPUT_DIR / "audio"
 
 OUTPUT_FILE = OUTPUT_DIR / "rift_valley_watch.mp4"
+REPORT_FILE = OUTPUT_DIR / "visual_report.json"
 
 WIDTH = 1080
 HEIGHT = 1920
 FPS = 30
 
 
-# ============================================================
-# COLORS
-# ============================================================
-
-BG = (8, 13, 22)
-CARD = (19, 28, 43)
-CARD2 = (14, 22, 35)
-WHITE = (245, 247, 250)
-MUTED = (165, 175, 190)
-RED = (220, 45, 55)
-BLUE = (65, 130, 220)
-GREEN = (45, 185, 115)
-GOLD = (220, 170, 65)
-GRID = (25, 35, 50)
+def log(message):
+    print(message, flush=True)
 
 
-# ============================================================
-# HELPERS
-# ============================================================
-
-def clean(value):
-    if value is None:
-        return ""
-
-    return " ".join(
-        str(value)
-        .replace("\n", " ")
-        .replace("\r", " ")
-        .split()
-    )
-
-
-def load_json(path):
-    if not path.exists():
-        raise RuntimeError(
-            f"Required JSON file does not exist: {path}"
-        )
-
-    try:
-        with open(
-            path,
-            "r",
-            encoding="utf-8"
-        ) as f:
-            return json.load(f)
-
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(
-            f"Invalid JSON in {path}: {exc}"
-        )
-
-
-def run_command(command, label):
-    print()
-    print("=" * 70)
-    print(label)
-    print("=" * 70)
-
-    print(
-        " ".join(
-            str(x)
-            for x in command
-        )
-    )
-
-    print()
+def run_command(command, description):
+    log("")
+    log("=" * 60)
+    log(description)
+    log("=" * 60)
+    log(" ".join(str(x) for x in command))
 
     result = subprocess.run(
         command,
+        cwd=ROOT,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True
     )
 
-    print(result.stdout)
+    if result.stdout:
+        print(result.stdout, flush=True)
 
     if result.returncode != 0:
         raise RuntimeError(
-            f"{label} failed with exit code "
-            f"{result.returncode}"
+            f"{description} failed with exit code {result.returncode}"
         )
 
-    return result.stdout
+    return result
 
 
 def check_ffmpeg():
+    if shutil.which("ffmpeg") is None:
+        raise RuntimeError("FFmpeg was not found.")
+
+    if shutil.which("ffprobe") is None:
+        raise RuntimeError("FFprobe was not found.")
+
+    log("FFmpeg found.")
+    log("FFprobe found.")
+
+
+def load_json(path):
+    if not path.exists():
+        raise RuntimeError(f"Missing file: {path}")
+
     try:
-        subprocess.run(
-            ["ffmpeg", "-version"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=True
-        )
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as exc:
+        raise RuntimeError(f"Could not read {path}: {exc}")
 
-        subprocess.run(
-            ["ffprobe", "-version"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=True
-        )
 
-    except Exception:
-        raise RuntimeError(
-            "FFmpeg and/or FFprobe is unavailable."
-        )
+def prepare_output():
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    SCENE_DIR.mkdir(parents=True, exist_ok=True)
+    AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+
+    if OUTPUT_FILE.exists():
+        OUTPUT_FILE.unlink()
+
+    if REPORT_FILE.exists():
+        REPORT_FILE.unlink()
+
+    for folder in [SCENE_DIR, AUDIO_DIR]:
+        for item in folder.iterdir():
+            if item.is_file():
+                item.unlink()
+
+    log(f"Output directory: {OUTPUT_DIR}")
+    log(f"Scene directory: {SCENE_DIR}")
+    log(f"Audio directory: {AUDIO_DIR}")
 
 
 def get_font(size, bold=False):
+    candidates = []
+
     if bold:
-        candidates = [
+        candidates.extend([
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
-        ]
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf"
+        ])
     else:
-        candidates = [
+        candidates.extend([
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-        ]
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf"
+        ])
 
-    for candidate in candidates:
-        path = Path(candidate)
-
-        if path.exists():
-            return ImageFont.truetype(
-                str(path),
-                size
-            )
+    for path in candidates:
+        if Path(path).exists():
+            return ImageFont.truetype(path, size)
 
     return ImageFont.load_default()
 
 
-def fact(story, label, default=""):
-    target = clean(label).upper()
-
-    for item in story.get(
-        "verified_facts",
-        []
-    ):
-        item_label = clean(
-            item.get(
-                "label",
-                ""
-            )
-        ).upper()
-
-        if item_label == target:
-            return clean(
-                item.get(
-                    "value",
-                    default
-                )
-            )
-
-    return default
-
-
-def story_title(story):
-    return clean(
-        story.get(
-            "title",
-            "Rift Valley Watch"
-        )
-    )
-
-
-def story_county(story):
-    return clean(
-        story.get(
-            "county",
-            "Rift Valley"
-        )
-    )
-
-
-def story_category(story):
-    return clean(
-        story.get(
-            "category",
-            "DEVELOPMENT"
-        )
-    )
-
-
-def story_date(story):
-    return clean(
-        story.get(
-            "date",
-            ""
-        )
-    )
-
-
-def source_name(story):
-    return clean(
-        story.get(
-            "source",
-            {}
-        ).get(
-            "name",
-            "Official Source"
-        )
-    )
-
-
-def source_url(story):
-    return clean(
-        story.get(
-            "source",
-            {}
-        ).get(
-            "url",
-            ""
-        )
-    )
-
-
-def summary(story):
-    return clean(
-        story.get(
-            "summary",
-            ""
-        )
-    )
-
-
-# ============================================================
-# TEXT FUNCTIONS
-# ============================================================
-
-def get_wrapped_lines(
-    draw,
-    text,
-    fnt,
-    max_width
-):
-    words = clean(text).split()
-
-    if not words:
-        return []
-
+def wrap_text(draw, text, font, max_width):
+    words = str(text).split()
     lines = []
     current = ""
 
     for word in words:
+        candidate = word if not current else current + " " + word
 
-        candidate = (
-            word
-            if not current
-            else current + " " + word
-        )
-
-        box = draw.textbbox(
+        bbox = draw.textbbox(
             (0, 0),
             candidate,
-            font=fnt
+            font=font
         )
 
-        text_width = (
-            box[2] -
-            box[0]
-        )
-
-        if text_width <= max_width:
+        if bbox[2] - bbox[0] <= max_width:
             current = candidate
-
         else:
             if current:
                 lines.append(current)
-
             current = word
 
     if current:
@@ -321,1239 +149,280 @@ def draw_wrapped(
     text,
     x,
     y,
-    fnt,
-    fill,
+    font,
     max_width,
-    gap=14
+    fill=(235, 240, 245),
+    spacing=14
 ):
-    lines = get_wrapped_lines(
+    lines = wrap_text(
         draw,
         text,
-        fnt,
+        font,
         max_width
     )
 
     for line in lines:
-
-        box = draw.textbbox(
-            (x, y),
-            line,
-            font=fnt
-        )
-
         draw.text(
             (x, y),
             line,
-            font=fnt,
+            font=font,
             fill=fill
         )
 
-        y += (
-            box[3] -
-            box[1] +
-            gap
+        bbox = draw.textbbox(
+            (x, y),
+            line,
+            font=font
         )
+
+        y += (bbox[3] - bbox[1]) + spacing
 
     return y
 
 
-def centered(draw, text, y, fnt, fill):
-    text = clean(text)
-
-    box = draw.textbbox(
-        (0, 0),
-        text,
-        font=fnt
-    )
-
-    width = (
-        box[2] -
-        box[0]
-    )
-
-    x = (
-        WIDTH -
-        width
-    ) // 2
-
-    draw.text(
-        (x, y),
-        text,
-        font=fnt,
-        fill=fill
-    )
-
-
-# ============================================================
-# GRAPHICS
-# ============================================================
-
-def create_background():
+def make_background():
     image = Image.new(
         "RGB",
         (WIDTH, HEIGHT),
-        BG
+        (9, 15, 23)
     )
 
     draw = ImageDraw.Draw(image)
 
-    # Broadcast grid
-    for y in range(
-        130,
-        HEIGHT,
-        100
-    ):
+    for y in range(HEIGHT):
+        value = int(
+            9 + (y / HEIGHT) * 14
+        )
+
         draw.line(
-            [
-                (0, y),
-                (WIDTH, y)
-            ],
-            fill=GRID,
+            [(0, y), (WIDTH, y)],
+            fill=(value, value + 5, value + 12)
+        )
+
+    for x in range(0, WIDTH, 90):
+        draw.line(
+            [(x, 0), (x, HEIGHT)],
+            fill=(24, 32, 43),
             width=1
         )
 
-    for x in range(
-        0,
-        WIDTH,
-        120
-    ):
+    for y in range(0, HEIGHT, 90):
         draw.line(
-            [
-                (x, 0),
-                (x, HEIGHT)
-            ],
-            fill=GRID,
+            [(0, y), (WIDTH, y)],
+            fill=(24, 32, 43),
             width=1
         )
-
-    # Left broadcast stripe
-    draw.rectangle(
-        [0, 0, 14, HEIGHT],
-        fill=RED
-    )
 
     return image
 
 
-def draw_header(image, section):
-    draw = ImageDraw.Draw(image)
-
+def draw_header(draw, section):
     draw.rectangle(
-        [14, 0, WIDTH, 128],
-        fill=(4, 7, 13)
+        [0, 0, WIDTH, 120],
+        fill=(17, 24, 34)
     )
 
     draw.rectangle(
-        [14, 120, WIDTH, 128],
-        fill=RED
+        [0, 0, 16, 120],
+        fill=(220, 35, 45)
     )
 
+    logo_font = get_font(35, True)
+    section_font = get_font(23, True)
+
     draw.text(
-        (52, 30),
+        (45, 23),
         "RIFT VALLEY WATCH",
-        font=get_font(
-            34,
-            True
-        ),
-        fill=WHITE
+        font=logo_font,
+        fill=(255, 255, 255)
     )
 
     draw.text(
-        (52, 82),
-        "VERIFIED REGIONAL DEVELOPMENTS",
-        font=get_font(
-            18,
-            False
-        ),
-        fill=MUTED
-    )
-
-    section = clean(section).upper()
-
-    box = draw.textbbox(
-        (0, 0),
-        section,
-        font=get_font(
-            22,
-            True
-        )
-    )
-
-    section_width = (
-        box[2] -
-        box[0]
+        (45, 72),
+        section.upper(),
+        font=section_font,
+        fill=(190, 201, 213)
     )
 
     draw.text(
-        (
-            WIDTH -
-            section_width -
-            52,
-            48
-        ),
-        section,
-        font=get_font(
-            22,
-            True
-        ),
-        fill=MUTED
+        (WIDTH - 170, 40),
+        "NEWS",
+        font=section_font,
+        fill=(220, 35, 45)
     )
 
 
-def draw_footer(image, story):
+def draw_footer(draw, source):
+    y = HEIGHT - 105
+
+    draw.rectangle(
+        [0, y, WIDTH, HEIGHT],
+        fill=(13, 19, 27)
+    )
+
+    font = get_font(21)
+
+    draw.text(
+        (40, y + 30),
+        f"SOURCE: {source}",
+        font=font,
+        fill=(195, 205, 216)
+    )
+
+
+def create_scene_image(
+    path,
+    section,
+    title,
+    body,
+    cards=None,
+    source="Bomet County Government"
+):
+    image = make_background()
     draw = ImageDraw.Draw(image)
 
-    draw.line(
-        [
-            (55, 1775),
-            (1025, 1775)
-        ],
-        fill=(60, 70, 85),
-        width=2
-    )
+    draw_header(draw, section)
 
-    draw.text(
-        (55, 1805),
-        "RIFT VALLEY WATCH",
-        font=get_font(
-            20,
-            True
-        ),
-        fill=MUTED
-    )
+    title_font = get_font(57, True)
+    body_font = get_font(37)
+    label_font = get_font(23, True)
+    value_font = get_font(52, True)
 
-    source = source_name(story)
-
-    draw.text(
-        (55, 1845),
-        "SOURCE: " + source[:60],
-        font=get_font(
-            18
-        ),
-        fill=MUTED
-    )
-
-    date = story_date(story)
-
-    if date:
-
-        box = draw.textbbox(
-            (0, 0),
-            date,
-            font=get_font(18)
-        )
-
-        date_width = (
-            box[2] -
-            box[0]
-        )
-
-        draw.text(
-            (
-                1025 -
-                date_width,
-                1845
-            ),
-            date,
-            font=get_font(18),
-            fill=MUTED
-        )
-
-
-def draw_card(
-    draw,
-    x1,
-    y1,
-    x2,
-    y2
-):
-    draw.rounded_rectangle(
-        [
-            x1,
-            y1,
-            x2,
-            y2
-        ],
-        radius=26,
-        fill=CARD,
-        outline=(43, 55, 72),
-        width=2
-    )
-
-
-def draw_label(
-    draw,
-    text,
-    x,
-    y,
-    color
-):
-    draw.text(
-        (x, y),
-        clean(text).upper(),
-        font=get_font(
-            27,
-            True
-        ),
-        fill=color
-    )
-
-
-# ============================================================
-# SCENE 1
-# ============================================================
-
-def scene_latest(story):
-    image = create_background()
-
-    draw_header(
-        image,
-        "THE LATEST"
-    )
-
-    draw = ImageDraw.Draw(image)
-
-    draw_label(
-        draw,
-        story_category(story),
-        60,
-        190,
-        RED
-    )
+    y = 220
 
     y = draw_wrapped(
         draw,
-        story_title(story),
-        60,
-        270,
-        get_font(
-            61,
-            True
-        ),
-        WHITE,
-        900,
-        18
+        title,
+        55,
+        y,
+        title_font,
+        WIDTH - 110,
+        fill=(255, 255, 255),
+        spacing=12
     )
 
-    draw.line(
-        [
-            (60, y + 25),
-            (1020, y + 25)
-        ],
-        fill=RED,
-        width=6
-    )
+    y += 60
 
-    draw_card(
-        draw,
-        60,
-        y + 85,
-        1020,
-        1170
-    )
+    if cards:
+        for label, value in cards:
+            card_height = 180
+
+            draw.rounded_rectangle(
+                [55, y, WIDTH - 55, y + card_height],
+                radius=18,
+                fill=(20, 29, 40),
+                outline=(58, 70, 85),
+                width=2
+            )
+
+            draw.text(
+                (85, y + 25),
+                str(label).upper(),
+                font=label_font,
+                fill=(220, 35, 45)
+            )
+
+            draw_wrapped(
+                draw,
+                value,
+                85,
+                y + 72,
+                value_font,
+                WIDTH - 170,
+                fill=(255, 255, 255),
+                spacing=8
+            )
+
+            y += card_height + 28
+
+    y = max(y, 500)
 
     draw_wrapped(
         draw,
-        summary(story),
-        95,
-        y + 145,
-        get_font(
-            31
-        ),
-        WHITE,
-        860,
-        14
+        body,
+        55,
+        y,
+        body_font,
+        WIDTH - 110,
+        fill=(224, 231, 238),
+        spacing=16
     )
 
-    draw_footer(
-        image,
-        story
+    draw_footer(draw, source)
+
+    image.save(
+        path,
+        "PNG",
+        optimize=True
     )
 
-    return image
+
+def fact_value(story, label, default=""):
+    for fact in story.get("verified_facts", []):
+        if str(fact.get("label", "")).upper() == label.upper():
+            return str(fact.get("value", default))
+
+    return default
 
 
-# ============================================================
-# SCENE 2
-# ============================================================
-
-def scene_location(story):
-    image = create_background()
-
-    draw_header(
-        image,
-        "WHERE IT IS"
+def build_sections(story):
+    title = story.get(
+        "title",
+        "Rift Valley Watch"
     )
 
-    draw = ImageDraw.Draw(image)
-
-    draw_label(
-        draw,
-        "PROJECT LOCATION",
-        60,
-        190,
-        BLUE
+    county = story.get(
+        "county",
+        "Bomet County"
     )
 
-    draw_wrapped(
-        draw,
-        story_county(story),
-        60,
-        275,
-        get_font(
-            70,
-            True
-        ),
-        WHITE,
-        900,
-        15
-    )
-
-    draw_card(
-        draw,
-        60,
-        570,
-        1020,
-        930
-    )
-
-    draw_label(
-        draw,
-        "LOCATION",
-        95,
-        635,
-        BLUE
-    )
-
-    draw_wrapped(
-        draw,
-        fact(
-            story,
-            "LOCATION",
-            story_county(story)
-        ),
-        95,
-        710,
-        get_font(
-            43,
-            True
-        ),
-        WHITE,
-        850,
-        16
-    )
-
-    draw_card(
-        draw,
-        60,
-        1010,
-        1020,
-        1320
-    )
-
-    draw_label(
-        draw,
-        "STATUS",
-        95,
-        1070,
-        GREEN
-    )
-
-    draw_wrapped(
-        draw,
-        fact(
-            story,
-            "STATUS",
-            "Ongoing"
-        ),
-        95,
-        1140,
-        get_font(
-            40,
-            True
-        ),
-        WHITE,
-        850,
-        14
-    )
-
-    draw_footer(
-        image,
-        story
-    )
-
-    return image
-
-
-# ============================================================
-# SCENE 3
-# ============================================================
-
-def scene_facts(story):
-    image = create_background()
-
-    draw_header(
-        image,
-        "KEY FACTS"
-    )
-
-    draw = ImageDraw.Draw(image)
-
-    draw_label(
-        draw,
-        "AT A GLANCE",
-        60,
-        190,
-        GOLD
-    )
-
-    draw_card(
-        draw,
-        60,
-        320,
-        1020,
-        700
-    )
-
-    draw_label(
-        draw,
-        "ROAD LENGTH",
-        100,
-        385,
-        GOLD
-    )
-
-    draw_wrapped(
-        draw,
-        fact(
-            story,
-            "ROAD_LENGTH",
-            "Not stated"
-        ),
-        100,
-        470,
-        get_font(
-            67,
-            True
-        ),
-        WHITE,
-        830
-    )
-
-    draw_card(
-        draw,
-        60,
-        760,
-        1020,
-        1140
-    )
-
-    draw_label(
-        draw,
-        "PROJECT COST",
-        100,
-        825,
-        GOLD
-    )
-
-    draw_wrapped(
-        draw,
-        fact(
-            story,
-            "COST",
-            "Not stated"
-        ),
-        100,
-        910,
-        get_font(
-            62,
-            True
-        ),
-        WHITE,
-        830
-    )
-
-    draw_card(
-        draw,
-        60,
-        1200,
-        1020,
-        1480
-    )
-
-    draw_label(
-        draw,
-        "CATEGORY",
-        100,
-        1260,
-        GOLD
-    )
-
-    draw.text(
-        (100, 1340),
-        story_category(story),
-        font=get_font(
-            48,
-            True
-        ),
-        fill=WHITE
-    )
-
-    draw_footer(
-        image,
-        story
-    )
-
-    return image
-
-
-# ============================================================
-# SCENE 4
-# ============================================================
-
-def scene_route(story):
-    image = create_background()
-
-    draw_header(
-        image,
-        "PROJECT ROUTE"
-    )
-
-    draw = ImageDraw.Draw(image)
-
-    draw_label(
-        draw,
-        "PROJECT",
-        60,
-        190,
-        BLUE
-    )
-
-    project = fact(
-        story,
-        "PROJECT",
+    summary = story.get(
+        "summary",
         ""
     )
 
-    if not project:
-        project = (
-            "Road project in "
-            + story_county(story)
-        )
-
-    draw_card(
-        draw,
-        60,
-        310,
-        1020,
-        1170
-    )
-
-    draw_wrapped(
-        draw,
-        project,
-        100,
-        400,
-        get_font(
-            44,
-            True
-        ),
-        WHITE,
-        840,
-        18
-    )
-
-    draw_label(
-        draw,
-        "ROUTE OVERVIEW",
-        60,
-        1260,
-        BLUE
-    )
-
-    route = (
-        "Kyogong"
-        "  →  "
-        "Kapkesosio"
-        "  →  "
-        "Sigor"
-        "  →  "
-        "Chebunyo"
-    )
-
-    draw_wrapped(
-        draw,
-        route,
-        60,
-        1340,
-        get_font(
-            28,
-            True
-        ),
-        WHITE,
-        920,
-        15
-    )
-
-    draw.line(
-        [
-            (120, 1510),
-            (960, 1510)
-        ],
-        fill=RED,
-        width=7
-    )
-
-    points = [
-        (
-            "KYOGONG",
-            120
-        ),
-        (
-            "KAPKESOSIO",
-            400
-        ),
-        (
-            "SIGOR",
-            680
-        ),
-        (
-            "CHEBUNYO",
-            960
-        )
-    ]
-
-    for label, x in points:
-
-        draw.ellipse(
-            [
-                x - 18,
-                1492,
-                x + 18,
-                1528
-            ],
-            fill=RED
-        )
-
-        centered(
-            draw,
-            label,
-            1560,
-            get_font(
-                17,
-                True
-            ),
-            WHITE
-        )
-
-    draw_footer(
-        image,
-        story
-    )
-
-    return image
-
-
-# ============================================================
-# SCENE 5
-# ============================================================
-
-def scene_impact(story):
-    image = create_background()
-
-    draw_header(
-        image,
-        "WHY IT MATTERS"
-    )
-
-    draw = ImageDraw.Draw(image)
-
-    draw_label(
-        draw,
-        "EXPECTED IMPACT",
-        60,
-        190,
-        GREEN
-    )
-
-    impact = fact(
-        story,
-        "IMPACT",
-        ""
-    )
-
-    if not impact:
-        impact = (
-            "The project is expected "
-            "to support economic activity "
-            "in the area."
-        )
-
-    draw_card(
-        draw,
-        60,
-        330,
-        1020,
-        1320
-    )
-
-    draw_wrapped(
-        draw,
-        impact,
-        100,
-        430,
-        get_font(
-            45,
-            True
-        ),
-        WHITE,
-        840,
-        20
-    )
-
-    draw.line(
-        [
-            (100, 1080),
-            (980, 1080)
-        ],
-        fill=GREEN,
-        width=5
-    )
-
-    draw.text(
-        (100, 1135),
-        "ECONOMIC POTENTIAL",
-        font=get_font(
-            29,
-            True
-        ),
-        fill=GREEN
-    )
-
-    draw_wrapped(
-        draw,
-        (
-            "The county government says "
-            "the project is expected to "
-            "unlock economic potential "
-            "in the area and wider "
-            "Bomet County."
-        ),
-        100,
-        1195,
-        get_font(
-            28
-        ),
-        MUTED,
-        840,
-        12
-    )
-
-    draw_footer(
-        image,
-        story
-    )
-
-    return image
-
-
-# ============================================================
-# SCENE 6
-# ============================================================
-
-def scene_statement(story):
-    image = create_background()
-
-    draw_header(
-        image,
-        "OFFICIAL STATEMENT"
-    )
-
-    draw = ImageDraw.Draw(image)
-
-    draw_label(
-        draw,
-        "OFFICIAL STATEMENT",
-        60,
-        190,
-        RED
-    )
-
-    statement = story.get(
-        "official_statement",
+    source = story.get(
+        "source",
         {}
     )
 
-    speaker = clean(
-        statement.get(
-            "speaker",
-            "Official source"
-        )
+    source_name = source.get(
+        "name",
+        "Official source"
     )
 
-    quote = clean(
-        statement.get(
-            "quote",
-            ""
-        )
+    project = fact_value(
+        story,
+        "PROJECT",
+        ""
     )
 
-    draw_card(
-        draw,
-        60,
-        330,
-        1020,
-        1370
-    )
-
-    draw.text(
-        (100, 405),
-        "“",
-        font=get_font(
-            105,
-            True
-        ),
-        fill=RED
-    )
-
-    if quote:
-        draw_wrapped(
-            draw,
-            quote,
-            115,
-            520,
-            get_font(
-                38,
-                True
-            ),
-            WHITE,
-            820,
-            18
-        )
-    else:
-        draw_wrapped(
-            draw,
-            "No official statement was provided.",
-            115,
-            520,
-            get_font(
-                38,
-                True
-            ),
-            MUTED,
-            820,
-            18
-        )
-
-    draw.line(
-        [
-            (115, 1130),
-            (965, 1130)
-        ],
-        fill=(60, 70, 85),
-        width=2
-    )
-
-    draw_wrapped(
-        draw,
-        speaker,
-        115,
-        1180,
-        get_font(
-            30,
-            True
-        ),
-        WHITE,
-        820,
-        12
-    )
-
-    draw.text(
-        (115, 1270),
-        "OFFICIAL STATEMENT",
-        font=get_font(
-            19
-        ),
-        fill=MUTED
-    )
-
-    draw_footer(
-        image,
-        story
-    )
-
-    return image
-
-
-# ============================================================
-# SCENE 7
-# ============================================================
-
-def scene_source(story):
-    image = create_background()
-
-    draw_header(
-        image,
-        "SOURCE"
-    )
-
-    draw = ImageDraw.Draw(image)
-
-    draw_label(
-        draw,
-        "SOURCE & VERIFICATION",
-        60,
-        190,
-        BLUE
-    )
-
-    draw_card(
-        draw,
-        60,
-        340,
-        1020,
-        1060
-    )
-
-    draw_label(
-        draw,
-        "PRIMARY SOURCE",
-        100,
-        420,
-        BLUE
-    )
-
-    draw_wrapped(
-        draw,
-        source_name(story),
-        100,
-        505,
-        get_font(
-            44,
-            True
-        ),
-        WHITE,
-        830,
-        16
-    )
-
-    draw.text(
-        (100, 700),
-        "SOURCE TYPE",
-        font=get_font(
-            25,
-            True
-        ),
-        fill=MUTED
-    )
-
-    source_type = clean(
-        story.get(
-            "source",
-            {}
-        ).get(
-            "type",
-            "OFFICIAL_SOURCE"
-        )
-    )
-
-    draw.text(
-        (100, 765),
-        source_type,
-        font=get_font(
-            32,
-            True
-        ),
-        fill=GREEN
-    )
-
-    draw_card(
-        draw,
-        60,
-        1140,
-        1020,
-        1460
-    )
-
-    draw_label(
-        draw,
-        "EDITORIAL STANDARD",
-        100,
-        1200,
-        GREEN
-    )
-
-    draw_wrapped(
-        draw,
-        (
-            "This report uses the verified "
-            "facts supplied in the story record. "
-            "Unconfirmed details are not presented "
-            "as established facts."
-        ),
-        100,
-        1270,
-        get_font(
-            27
-        ),
-        WHITE,
-        830,
-        12
-    )
-
-    draw_footer(
-        image,
-        story
-    )
-
-    return image
-
-
-# ============================================================
-# SCENE 8
-# ============================================================
-
-def scene_outro(story):
-    image = create_background()
-
-    draw_header(
-        image,
-        "RIFT VALLEY WATCH"
-    )
-
-    draw = ImageDraw.Draw(image)
-
-    centered(
-        draw,
-        "RIFT VALLEY",
-        590,
-        get_font(
-            73,
-            True
-        ),
-        WHITE
-    )
-
-    centered(
-        draw,
-        "WATCH",
-        700,
-        get_font(
-            90,
-            True
-        ),
-        RED
-    )
-
-    draw.line(
-        [
-            (180, 855),
-            (900, 855)
-        ],
-        fill=RED,
-        width=7
-    )
-
-    centered(
-        draw,
-        "Tracking verified developments",
-        935,
-        get_font(
-            35,
-            True
-        ),
-        WHITE
-    )
-
-    centered(
-        draw,
-        "across the Rift Valley region",
-        995,
-        get_font(
-            30
-        ),
-        MUTED
-    )
-
-    centered(
-        draw,
-        story_county(story),
-        1165,
-        get_font(
-            32,
-            True
-        ),
-        BLUE
-    )
-
-    draw_footer(
-        image,
-        story
-    )
-
-    return image
-
-
-# ============================================================
-# NARRATION
-# ============================================================
-
-def build_narration(story):
-    """
-    Build narration directly from story.json.
-
-    This is deliberately independent of script.json
-    narration-field structure.
-    """
-
-    facts = {}
-
-    for item in story.get(
-        "verified_facts",
-        []
-    ):
-        label = clean(
-            item.get(
-                "label",
-                ""
-            )
-        ).upper()
-
-        value = clean(
-            item.get(
-                "value",
-                ""
-            )
-        )
-
-        if label and value:
-            facts[label] = value
-
-    title = story_title(story)
-    county = story_county(story)
-    summary_text = summary(story)
-
-    road_length = facts.get(
+    road_length = fact_value(
+        story,
         "ROAD_LENGTH",
         ""
     )
 
-    cost = facts.get(
+    cost = fact_value(
+        story,
         "COST",
         ""
     )
 
-    location = facts.get(
+    location = fact_value(
+        story,
         "LOCATION",
         county
     )
 
-    status = facts.get(
+    status = fact_value(
+        story,
         "STATUS",
         ""
     )
 
-    impact = facts.get(
+    impact = fact_value(
+        story,
         "IMPACT",
         ""
     )
@@ -1563,130 +432,118 @@ def build_narration(story):
         {}
     )
 
-    speaker = clean(
-        statement.get(
-            "speaker",
-            ""
-        )
+    speaker = statement.get(
+        "speaker",
+        ""
     )
 
-    quote = clean(
-        statement.get(
-            "quote",
-            ""
-        )
-    )
-
-    source = source_name(story)
-
-    narration = []
-
-    # 1
-    narration.append(
-        (
-            "Here is the latest development "
-            f"from {county}. {title}."
-        )
-    )
-
-    # 2
-    if summary_text:
-        narration.append(
-            summary_text
-        )
-    else:
-        narration.append(
-            f"The project is located in {location}."
-        )
-
-    # 3
-    fact_sentence_parts = []
-
-    if road_length:
-        fact_sentence_parts.append(
-            f"The project covers {road_length}."
-        )
-
-    if cost:
-        fact_sentence_parts.append(
-            f"The reported cost is {cost}."
-        )
-
-    if status:
-        fact_sentence_parts.append(
-            f"The current status is {status}."
-        )
-
-    if fact_sentence_parts:
-        narration.append(
-            " ".join(
-                fact_sentence_parts
-            )
-        )
-    else:
-        narration.append(
-            f"The project is in {location}."
-        )
-
-    # 4
-    if impact:
-        narration.append(
-            f"The reported impact is that the project is "
-            f"{impact.lower()}."
-        )
-    else:
-        narration.append(
-            "The project is expected to support "
-            "economic activity in the area."
-        )
-
-    # 5
-    if speaker and quote:
-        narration.append(
-            f"{speaker} said, {quote}"
-        )
-    else:
-        narration.append(
-            "The development has been reported "
-            f"by {source}."
-        )
-
-    # 6
-    narration.append(
-        f"This report is based on information "
-        f"from {source}."
-    )
-
-    # 7
-    narration.append(
-        "Rift Valley Watch tracks verified "
-        "developments across the region."
+    quote = statement.get(
+        "quote",
+        ""
     )
 
     return [
-        clean(text)
-        for text in narration
-        if clean(text)
+        {
+            "name": "LATEST",
+            "title": title,
+            "text": (
+                f"{title}. "
+                f"According to {source_name}, {summary}"
+            ),
+            "cards": None
+        },
+        {
+            "name": "LOCATION",
+            "title": "WHERE IS THE PROJECT?",
+            "text": (
+                f"The project is located in {location}. "
+                f"The reported road corridor covers "
+                f"{project}."
+            ),
+            "cards": [
+                ("COUNTY", county),
+                ("LOCATION", location)
+            ]
+        },
+        {
+            "name": "KEY FACTS",
+            "title": "THE NUMBERS",
+            "text": (
+                f"The project covers {road_length} "
+                f"and has a reported cost of {cost}. "
+                f"Construction status: {status}."
+            ),
+            "cards": [
+                ("ROAD LENGTH", road_length),
+                ("PROJECT COST", cost)
+            ]
+        },
+        {
+            "name": "ROUTE",
+            "title": "ROAD CORRIDOR",
+            "text": (
+                f"The reported route is "
+                f"{project}. "
+                f"The project is being undertaken "
+                f"in Bomet County."
+            ),
+            "cards": [
+                ("ROUTE", project)
+            ]
+        },
+        {
+            "name": "WHY IT MATTERS",
+            "title": "EXPECTED IMPACT",
+            "text": (
+                f"{impact}. "
+                f"The county government says the project "
+                f"is expected to unlock economic potential "
+                f"in the area and wider Bomet County."
+            ),
+            "cards": None
+        },
+        {
+            "name": "OFFICIAL STATEMENT",
+            "title": speaker or "OFFICIAL STATEMENT",
+            "text": quote or (
+                "The official source says construction "
+                "works are ongoing."
+            ),
+            "cards": None
+        },
+        {
+            "name": "SOURCE",
+            "title": "VERIFIED SOURCE",
+            "text": (
+                f"This report is based on information "
+                f"published by {source_name}. "
+                f"Unconfirmed details are not presented "
+                f"as confirmed facts."
+            ),
+            "cards": [
+                ("SOURCE", source_name)
+            ]
+        },
+        {
+            "name": "OUTRO",
+            "title": "RIFT VALLEY WATCH",
+            "text": (
+                "Tracking verified developments across "
+                "the region. Follow for more verified "
+                "local news."
+            ),
+            "cards": None
+        }
     ]
 
 
-# ============================================================
-# AUDIO
-# ============================================================
-
-def create_audio(text, output_path):
-    text = clean(text)
-
-    if not text:
+def create_audio(text, path):
+    if not text.strip():
         raise RuntimeError(
-            f"Cannot create empty narration: "
-            f"{output_path}"
+            "Narration text is empty."
         )
 
-    print()
-    print(
-        f"Creating narration: {output_path.name}"
-    )
+    log(f"Creating audio: {path.name}")
 
     tts = gTTS(
         text=text,
@@ -1694,39 +551,29 @@ def create_audio(text, output_path):
         slow=False
     )
 
-    tts.save(
-        str(output_path)
-    )
+    tts.save(str(path))
 
-    if not output_path.exists():
+    if not path.exists():
         raise RuntimeError(
-            f"Audio file was not created: "
-            f"{output_path}"
+            f"Audio was not created: {path}"
         )
 
-    if output_path.stat().st_size < 1000:
+    if path.stat().st_size < 1000:
         raise RuntimeError(
-            f"Audio file is suspiciously small: "
-            f"{output_path}"
+            f"Audio file is too small: {path}"
         )
 
 
-# ============================================================
-# RENDER SCENE
-# ============================================================
-
-def render_scene(
-    image_path,
-    audio_path,
-    video_path
-):
+def render_scene(image_path, audio_path, video_path):
     command = [
         "ffmpeg",
         "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
 
         "-loop",
         "1",
-
         "-i",
         str(image_path),
 
@@ -1735,15 +582,14 @@ def render_scene(
 
         "-map",
         "0:v:0",
-
         "-map",
         "1:a:0",
 
         "-vf",
         (
-            f"scale={WIDTH}:{HEIGHT}:"
+            "scale=1080:1920:"
             "force_original_aspect_ratio=decrease,"
-            f"pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2,"
+            "pad=1080:1920:(ow-iw)/2:(oh-ih)/2,"
             "setsar=1"
         ),
 
@@ -1752,10 +598,8 @@ def render_scene(
 
         "-c:v",
         "libx264",
-
         "-preset",
-        "medium",
-
+        "veryfast",
         "-crf",
         "21",
 
@@ -1764,15 +608,12 @@ def render_scene(
 
         "-c:a",
         "aac",
-
         "-b:a",
         "128k",
-
         "-ar",
         "44100",
 
         "-shortest",
-
         "-movflags",
         "+faststart",
 
@@ -1781,13 +622,19 @@ def render_scene(
 
     run_command(
         command,
-        f"RENDER SCENE: {video_path.name}"
+        f"Rendering {video_path.name}"
     )
 
+    if not video_path.exists():
+        raise RuntimeError(
+            f"Scene video was not created: {video_path}"
+        )
 
-# ============================================================
-# FINAL CONCAT
-# ============================================================
+    if video_path.stat().st_size < 5000:
+        raise RuntimeError(
+            f"Scene video is too small: {video_path}"
+        )
+
 
 def concatenate_scenes(scene_files):
     if not scene_files:
@@ -1795,129 +642,85 @@ def concatenate_scenes(scene_files):
             "No scene files were generated."
         )
 
-    print()
-    print("=" * 70)
-    print("BUILDING FINAL MP4")
-    print("=" * 70)
+    concat_file = OUTPUT_DIR / "concat_list.txt"
 
-    inputs = []
+    with concat_file.open(
+        "w",
+        encoding="utf-8"
+    ) as f:
+        for scene in scene_files:
+            path = scene.resolve()
 
-    for scene in scene_files:
-        inputs.extend(
-            [
-                "-i",
-                str(scene)
-            ]
-        )
+            escaped = str(path).replace(
+                "'",
+                "'\\''"
+            )
 
-    filters = []
+            f.write(
+                f"file '{escaped}'\n"
+            )
 
-    for index in range(
-        len(scene_files)
-    ):
-        filters.append(
-            f"[{index}:v:0]"
-            "setpts=PTS-STARTPTS,"
-            f"scale={WIDTH}:{HEIGHT},"
-            "setsar=1"
-            f"[v{index}]"
-        )
-
-        filters.append(
-            f"[{index}:a:0]"
-            "asetpts=PTS-STARTPTS,"
-            "aresample=44100"
-            f"[a{index}]"
-        )
-
-    concat_streams = ""
-
-    for index in range(
-        len(scene_files)
-    ):
-        concat_streams += (
-            f"[v{index}]"
-            f"[a{index}]"
-        )
-
-    filters.append(
-        concat_streams
-        + f"concat=n={len(scene_files)}:v=1:a=1"
-        "[finalv][finala]"
-    )
-
-    filter_complex = ";".join(
-        filters
+    log("")
+    log("CONCAT LIST:")
+    print(
+        concat_file.read_text(
+            encoding="utf-8"
+        ),
+        flush=True
     )
 
     command = [
         "ffmpeg",
-        "-y"
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(concat_file),
+
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "21",
+
+        "-pix_fmt",
+        "yuv420p",
+
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-ar",
+        "44100",
+
+        "-movflags",
+        "+faststart",
+
+        str(OUTPUT_FILE)
     ]
-
-    command.extend(
-        inputs
-    )
-
-    command.extend(
-        [
-            "-filter_complex",
-            filter_complex,
-
-            "-map",
-            "[finalv]",
-
-            "-map",
-            "[finala]",
-
-            "-c:v",
-            "libx264",
-
-            "-preset",
-            "medium",
-
-            "-crf",
-            "20",
-
-            "-pix_fmt",
-            "yuv420p",
-
-            "-c:a",
-            "aac",
-
-            "-b:a",
-            "128k",
-
-            "-ar",
-            "44100",
-
-            "-movflags",
-            "+faststart",
-
-            str(OUTPUT_FILE)
-        ]
-    )
 
     run_command(
         command,
-        "FINAL MP4 CONCATENATION"
+        "Creating final MP4"
     )
 
     if not OUTPUT_FILE.exists():
         raise RuntimeError(
-            "FFmpeg finished but final MP4 "
-            "was not created."
+            "FFmpeg finished but final MP4 does not exist."
         )
 
     if OUTPUT_FILE.stat().st_size < 10000:
         raise RuntimeError(
-            "Final MP4 exists but is too small."
+            "Final MP4 is too small."
         )
 
-
-# ============================================================
-# FINAL QC
-# ============================================================
 
 def validate_mp4():
     if not OUTPUT_FILE.exists():
@@ -1934,7 +737,12 @@ def validate_mp4():
         "format=duration,size",
 
         "-show_entries",
-        "stream=codec_type,codec_name,width,height,r_frame_rate",
+        "stream="
+        "codec_type,"
+        "codec_name,"
+        "width,"
+        "height,"
+        "r_frame_rate",
 
         "-of",
         "json",
@@ -1944,210 +752,158 @@ def validate_mp4():
 
     result = subprocess.run(
         command,
+        cwd=ROOT,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True
     )
 
-    print()
-    print("=" * 70)
-    print("FINAL MP4 QUALITY CONTROL")
-    print("=" * 70)
-
     print(
-        result.stdout
+        result.stdout,
+        flush=True
     )
 
     if result.returncode != 0:
         raise RuntimeError(
-            "ffprobe failed."
+            "FFprobe failed."
         )
 
-    try:
-        data = json.loads(
-            result.stdout
-        )
+    info = json.loads(
+        result.stdout
+    )
 
-    except json.JSONDecodeError:
-        raise RuntimeError(
-            "ffprobe returned invalid JSON."
-        )
-
-    streams = data.get(
+    streams = info.get(
         "streams",
         []
     )
 
-    format_data = data.get(
+    fmt = info.get(
         "format",
         {}
-    )
-
-    duration = float(
-        format_data.get(
-            "duration",
-            0
-        )
-    )
-
-    size = int(
-        format_data.get(
-            "size",
-            0
-        )
     )
 
     video = None
     audio = None
 
     for stream in streams:
-
         if stream.get(
             "codec_type"
         ) == "video":
             video = stream
 
-        elif stream.get(
+        if stream.get(
             "codec_type"
         ) == "audio":
             audio = stream
 
-    errors = []
-
     if video is None:
-        errors.append(
-            "Missing video stream."
+        raise RuntimeError(
+            "No video stream found."
         )
 
     if audio is None:
-        errors.append(
-            "Missing audio stream."
+        raise RuntimeError(
+            "No audio stream found."
         )
 
+    duration = float(
+        fmt.get(
+            "duration",
+            0
+        )
+    )
+
+    size = int(
+        float(
+            fmt.get(
+                "size",
+                0
+            )
+        )
+    )
+
     if duration <= 1:
-        errors.append(
-            "Duration is too short."
+        raise RuntimeError(
+            "Video duration is invalid."
         )
 
     if size < 10000:
-        errors.append(
-            "File size is too small."
-        )
-
-    if video:
-
-        if video.get(
-            "codec_name"
-        ) != "h264":
-            errors.append(
-                "Video is not H.264."
-            )
-
-        if int(
-            video.get(
-                "width",
-                0
-            )
-        ) != WIDTH:
-            errors.append(
-                f"Width is not {WIDTH}."
-            )
-
-        if int(
-            video.get(
-                "height",
-                0
-            )
-        ) != HEIGHT:
-            errors.append(
-                f"Height is not {HEIGHT}."
-            )
-
-    if audio:
-
-        if audio.get(
-            "codec_name"
-        ) != "aac":
-            errors.append(
-                "Audio is not AAC."
-            )
-
-    if errors:
-
-        print()
-        print("QC FAILED")
-
-        for error in errors:
-            print(
-                " - " + error
-            )
-
         raise RuntimeError(
-            "Final MP4 failed quality control."
+            "Video file size is invalid."
         )
 
-    print()
-    print("=" * 70)
-    print("QC PASSED")
-    print("=" * 70)
+    if video.get(
+        "codec_name"
+    ) != "h264":
+        raise RuntimeError(
+            "Video is not H.264."
+        )
 
-    print(
-        f"Duration: {duration:.2f} seconds"
-    )
+    if audio.get(
+        "codec_name"
+    ) != "aac":
+        raise RuntimeError(
+            "Audio is not AAC."
+        )
 
-    print(
+    if int(
+        video.get(
+            "width",
+            0
+        )
+    ) != WIDTH:
+        raise RuntimeError(
+            "Video width is not 1080."
+        )
+
+    if int(
+        video.get(
+            "height",
+            0
+        )
+    ) != HEIGHT:
+        raise RuntimeError(
+            "Video height is not 1920."
+        )
+
+    log("")
+    log("MP4 VALIDATION PASSED")
+    log(f"Duration: {duration:.2f} seconds")
+    log(
         f"Size: {size / 1024 / 1024:.2f} MB"
     )
-
-    print(
-        f"Resolution: {WIDTH}x{HEIGHT}"
-    )
-
-    print(
-        "Video codec: H.264"
-    )
-
-    print(
-        "Audio codec: AAC"
-    )
+    log("Resolution: 1080x1920")
+    log("Video: H.264")
+    log("Audio: AAC")
 
 
-# ============================================================
-# REPORT
-# ============================================================
-
-def write_report(
-    story,
-    narration,
-    scene_files
-):
+def write_report(story, sections, scene_files):
     report = {
         "project": "Rift Valley Watch",
-        "generator": "Stable V4",
-        "title": story_title(story),
-        "county": story_county(story),
-        "category": story_category(story),
-        "date": story_date(story),
-        "source": source_name(story),
-        "source_url": source_url(story),
-        "verified_story": True,
-        "narration_segments": len(narration),
+        "status": "PASS",
+        "title": story.get("title", ""),
+        "source": story.get("source", {}),
         "scene_count": len(scene_files),
-        "resolution": f"{WIDTH}x{HEIGHT}",
+        "resolution": "1080x1920",
         "fps": FPS,
         "video_codec": "H.264",
         "audio_codec": "AAC",
-        "output": "output/rift_valley_watch.mp4",
-        "ready_for_publish": True
+        "output_file": OUTPUT_FILE.name,
+        "scenes": [
+            {
+                "scene": i + 1,
+                "name": sections[i]["name"],
+                "file": scene_files[i].name
+            }
+            for i in range(len(scene_files))
+        ],
+        "quality_control": {
+            "mp4_exists": OUTPUT_FILE.exists(),
+            "validated": True
+        }
     }
 
-    report_file = (
-        OUTPUT_DIR /
-        "visual_report.json"
-    )
-
-    with open(
-        report_file,
+    with REPORT_FILE.open(
         "w",
         encoding="utf-8"
     ) as f:
@@ -2158,146 +914,178 @@ def write_report(
             ensure_ascii=False
         )
 
-    print(
-        f"Report created: {report_file}"
-    )
-
-
-# ============================================================
-# MAIN
-# ============================================================
 
 def main():
+    log("")
+    log("=" * 60)
+    log("RIFT VALLEY WATCH VIDEO GENERATOR")
+    log("=" * 60)
 
-    print()
-    print("=" * 70)
-    print("RIFT VALLEY WATCH")
-    print("STABLE V4 VIDEO GENERATOR")
-    print("=" * 70)
+    # Create output BEFORE anything else.
+    prepare_output()
 
-    check_ffmpeg()
+    try:
+        check_ffmpeg()
 
-    # --------------------------------------------------------
-    # LOAD STORY
-    # --------------------------------------------------------
+        story = load_json(
+            STORY_FILE
+        )
 
-    story = load_json(
-        STORY_FILE
-    )
+        log("")
+        log("STORY:")
+        log(
+            story.get(
+                "title",
+                ""
+            )
+        )
 
-    # script.json is optional for the video generator.
-    # We intentionally do not depend on its narration structure.
-    if SCRIPT_FILE.exists():
+        sections = build_sections(
+            story
+        )
+
+        if len(sections) != 8:
+            raise RuntimeError(
+                f"Expected 8 scenes, got {len(sections)}."
+            )
+
+        scene_files = []
+
+        for index, section in enumerate(
+            sections,
+            start=1
+        ):
+            slug = (
+                section["name"]
+                .lower()
+                .replace(" ", "_")
+            )
+
+            image_path = (
+                SCENE_DIR /
+                f"scene_{index:02d}_{slug}.png"
+            )
+
+            audio_path = (
+                AUDIO_DIR /
+                f"scene_{index:02d}_{slug}.mp3"
+            )
+
+            video_path = (
+                SCENE_DIR /
+                f"scene_{index:02d}_{slug}.mp4"
+            )
+
+            log("")
+            log(
+                f"SCENE {index}/8: "
+                f"{section['name']}"
+            )
+
+            create_scene_image(
+                image_path,
+                section["name"],
+                section["title"],
+                section["text"],
+                section.get("cards"),
+                story.get(
+                    "source",
+                    {}
+                ).get(
+                    "name",
+                    "Bomet County Government"
+                )
+            )
+
+            create_audio(
+                section["text"],
+                audio_path
+            )
+
+            render_scene(
+                image_path,
+                audio_path,
+                video_path
+            )
+
+            scene_files.append(
+                video_path
+            )
+
+        log("")
+        log("=" * 60)
+        log("ALL SCENES CREATED")
+        log("=" * 60)
+
+        for scene in scene_files:
+            log(
+                f"{scene.name}: "
+                f"{scene.stat().st_size / 1024:.1f} KB"
+            )
+
+        concatenate_scenes(
+            scene_files
+        )
+
+        validate_mp4()
+
+        write_report(
+            story,
+            sections,
+            scene_files
+        )
+
+        log("")
+        log("=" * 60)
+        log("SUCCESS")
+        log("=" * 60)
+        log(
+            f"FINAL MP4: {OUTPUT_FILE}"
+        )
+        log(
+            f"SIZE: "
+            f"{OUTPUT_FILE.stat().st_size / 1024 / 1024:.2f} MB"
+        )
+
+        return 0
+
+    except Exception as exc:
+        log("")
+        log("=" * 60)
+        log("VIDEO GENERATION FAILED")
+        log("=" * 60)
+        log(
+            f"{type(exc).__name__}: {exc}"
+        )
+
+        OUTPUT_DIR.mkdir(
+            parents=True,
+            exist_ok=True
+        )
+
+        failure = {
+            "project": "Rift Valley Watch",
+            "status": "FAILED",
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+            "output_exists": OUTPUT_FILE.exists()
+        }
 
         try:
-            load_json(
-                SCRIPT_FILE
-            )
-
-            print(
-                "script.json: valid"
-            )
-
-        except Exception as exc:
-
-            print(
-                "WARNING: script.json could not be read."
-            )
-
-            print(
-                str(exc)
-            )
-
-            print(
-                "Continuing using story.json."
-            )
-
-    # --------------------------------------------------------
-    # BASIC STORY CHECK
-    # --------------------------------------------------------
-
-    if not story_title(story):
-        raise RuntimeError(
-            "Story title is missing."
-        )
-
-    if not story_county(story):
-        raise RuntimeError(
-            "Story county is missing."
-        )
-
-    if not story.get(
-        "verified_facts"
-    ):
-        raise RuntimeError(
-            "No verified facts found."
-        )
-
-    if not source_name(story):
-        raise RuntimeError(
-            "Story source is missing."
-        )
-
-    print()
-    print("TITLE:")
-    print(
-        story_title(story)
-    )
-
-    print()
-    print("COUNTY:")
-    print(
-        story_county(story)
-    )
-
-    print()
-    print("SOURCE:")
-    print(
-        source_name(story)
-    )
-
-    # --------------------------------------------------------
-    # CLEAN OLD OUTPUT
-    # --------------------------------------------------------
-
-    if OUTPUT_DIR.exists():
-
-        for item in OUTPUT_DIR.iterdir():
-
-            if item.name == ".gitkeep":
-                continue
-
-            if item.is_dir():
-                shutil.rmtree(
-                    item
+            with REPORT_FILE.open(
+                "w",
+                encoding="utf-8"
+            ) as f:
+                json.dump(
+                    failure,
+                    f,
+                    indent=2
                 )
+        except Exception:
+            pass
 
-            else:
-                item.unlink()
+        return 1
 
-    SCENE_DIR.mkdir(
-        parents=True,
-        exist_ok=True
-    )
 
-    AUDIO_DIR.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-    # --------------------------------------------------------
-    # BUILD NARRATION DIRECTLY FROM STORY
-    # --------------------------------------------------------
-
-    narration = build_narration(
-        story
-    )
-
-    if not narration:
-        raise RuntimeError(
-            "Unable to build narration "
-            "from story.json."
-        )
-
-    print()
-   
+if __name__ == "__main__":
+    sys.exit(main())
