@@ -1,89 +1,213 @@
-{
-  "title": "65-KM Road Project Worth KSh 2.1 Billion Underway in Bomet",
-  "county": "Bomet County",
-  "category": "DEVELOPMENT",
-  "date": "2026-03-18",
+def get_script_sections(script):
+    """
+    Build narration directly from the verified story JSON.
 
-  "source": {
-    "name": "Bomet County Government",
-    "url": "https://bomet.go.ke/dp-kindiki-visits-bomet-to-inspect-development-projects",
-    "type": "OFFICIAL_SOURCE"
-  },
+    The current news_engine outputs a verified story record,
+    not separate hook/what_happened/context narration fields.
+    """
 
-  "verified_facts": [
-    {
-      "label": "PROJECT",
-      "value": "Kyogong-Kapkesosio-Sigor-Chebunyo / Sigor-Lelaitich-Kipreres-Longisa road"
-    },
-    {
-      "label": "ROAD_LENGTH",
-      "value": "65 kilometres"
-    },
-    {
-      "label": "COST",
-      "value": "KSh 2.1 billion"
-    },
-    {
-      "label": "LOCATION",
-      "value": "Chepalungu Constituency, Bomet County"
-    },
-    {
-      "label": "STATUS",
-      "value": "Ongoing construction works"
-    },
-    {
-      "label": "IMPACT",
-      "value": "Expected to unlock economic potential in the area and wider Bomet County"
-    }
-  ],
+    sections = []
 
-  "official_statement": {
-    "available": true,
-    "speaker": "Deputy President Kithure Kindiki",
-    "quote": "The Roads and Transport Ministry has been instructed to closely monitor road construction to ensure speedy completion and quality works."
-  },
+    title = clean(
+        script.get(
+            "title",
+            ""
+        )
+    )
 
-  "summary": "Construction is ongoing on a 65-kilometre road project linking Kyogong, Kapkesosio, Sigor and Chebunyo, with another section running through Sigor, Lelaitich, Kipreres and Longisa in Bomet County. The Bomet County Government says the project is being constructed at a cost of KSh 2.1 billion in Chepalungu Constituency and is expected to unlock the economic potential of the area and wider county.",
+    county = clean(
+        script.get(
+            "county",
+            "the Rift Valley"
+        )
+    )
 
-  "visuals": [
-    {
-      "type": "PROJECT_TITLE",
-      "description": "65-kilometre road project under construction in Bomet County"
-    },
-    {
-      "type": "LOCATION_GRAPHIC",
-      "description": "Bomet County and Chepalungu Constituency"
-    },
-    {
-      "type": "DATA_CARD",
-      "description": "65 KM | KSh 2.1 billion"
-    },
-    {
-      "type": "ROUTE_GRAPHIC",
-      "description": "Kyogong-Kapkesosio-Sigor-Chebunyo / Sigor-Lelaitich-Kipreres-Longisa"
-    },
-    {
-      "type": "OFFICIAL_STATEMENT",
-      "description": "Deputy President Kithure Kindiki statement on road construction monitoring"
-    },
-    {
-      "type": "SOURCE_CARD",
-      "description": "Bomet County Government"
-    }
-  ],
+    summary = clean(
+        script.get(
+            "summary",
+            ""
+        )
+    )
 
-  "editorial": {
-    "confirmed": [
-      "Construction works are ongoing.",
-      "The road project covers 65 kilometres.",
-      "The reported project cost is KSh 2.1 billion.",
-      "The project is in Chepalungu Constituency, Bomet County.",
-      "The county government says the project is expected to unlock economic potential."
-    ],
-    "unconfirmed": [
-      "Exact completion date",
-      "Contractor name",
-      "Exact funding breakdown"
-    ]
-  }
-}
+    facts = script.get(
+        "verified_facts",
+        []
+    )
+
+    official = script.get(
+        "official_statement",
+        {}
+    )
+
+    # --------------------------------------------------------
+    # 1. HOOK
+    # --------------------------------------------------------
+
+    if title:
+        sections.append(
+            (
+                "THE LATEST",
+                f"Here is the latest development from {county}. "
+                f"{title}."
+            )
+        )
+
+    # --------------------------------------------------------
+    # 2. WHAT HAPPENED
+    # --------------------------------------------------------
+
+    if summary:
+        sections.append(
+            (
+                "WHAT HAPPENED",
+                summary
+            )
+        )
+
+    # --------------------------------------------------------
+    # 3. KEY FACTS
+    # --------------------------------------------------------
+
+    fact_values = {}
+
+    for item in facts:
+        label = clean(
+            item.get(
+                "label",
+                ""
+            )
+        ).upper()
+
+        value = clean(
+            item.get(
+                "value",
+                ""
+            )
+        )
+
+        if label and value:
+            fact_values[label] = value
+
+    road_length = fact_values.get(
+        "ROAD_LENGTH",
+        ""
+    )
+
+    cost = fact_values.get(
+        "COST",
+        ""
+    )
+
+    location = fact_values.get(
+        "LOCATION",
+        county
+    )
+
+    status = fact_values.get(
+        "STATUS",
+        ""
+    )
+
+    if road_length or cost or location or status:
+        parts = []
+
+        if road_length:
+            parts.append(
+                f"The project covers {road_length}."
+            )
+
+        if cost:
+            parts.append(
+                f"The reported cost is {cost}."
+            )
+
+        if location:
+            parts.append(
+                f"It is located in {location}."
+            )
+
+        if status:
+            parts.append(
+                f"The current status is {status}."
+            )
+
+        sections.append(
+            (
+                "KEY FACTS",
+                " ".join(parts)
+            )
+        )
+
+    # --------------------------------------------------------
+    # 4. IMPACT
+    # --------------------------------------------------------
+
+    impact = fact_values.get(
+        "IMPACT",
+        ""
+    )
+
+    if impact:
+        sections.append(
+            (
+                "WHY IT MATTERS",
+                f"The reported impact is that the project is {impact.lower()}."
+            )
+        )
+
+    # --------------------------------------------------------
+    # 5. OFFICIAL STATEMENT
+    # --------------------------------------------------------
+
+    if official.get("available"):
+        speaker = clean(
+            official.get(
+                "speaker",
+                ""
+            )
+        )
+
+        quote = clean(
+            official.get(
+                "quote",
+                ""
+            )
+        )
+
+        if speaker and quote:
+            sections.append(
+                (
+                    "OFFICIAL STATEMENT",
+                    f"{speaker} said, \"{quote}\""
+                )
+            )
+
+    # --------------------------------------------------------
+    # 6. SOURCE / CLOSE
+    # --------------------------------------------------------
+
+    source = clean(
+        script.get(
+            "source",
+            {}
+        ).get(
+            "name",
+            "the official source"
+        )
+    )
+
+    sections.append(
+        (
+            "SOURCE",
+            f"This report is based on information from {source}. "
+            f"This is Rift Valley Watch, tracking verified developments "
+            f"across the region."
+        )
+    )
+
+    if not sections:
+        raise RuntimeError(
+            "Unable to build narration from verified story data."
+        )
+
+    return sections
