@@ -1924,4 +1924,543 @@ def create_visual_report(
 
     report = {
         "project": "Rift Valley Watch",
-        "
+        "generated_at": datetime.utcnow().isoformat()
+        + "Z",
+        "resolution": (
+            f"{WIDTH}x{HEIGHT}"
+        ),
+        "fps": FPS,
+        "style": (
+            "Real-photo broadcast regional news"
+        ),
+        "stories": [],
+        "scene_count": len(scene_files),
+        "final_video": str(
+            FINAL_VIDEO.relative_to(ROOT)
+        )
+        if FINAL_VIDEO.exists()
+        else None,
+    }
+
+    for index, story in enumerate(
+        stories,
+        start=1
+    ):
+
+        photo_path = get_photo_path(
+            story
+        )
+
+        report["stories"].append(
+            {
+                "story_number": index,
+                "county": clean_text(
+                    story.get("county")
+                ),
+                "category": clean_text(
+                    story.get("category")
+                ),
+                "headline": clean_text(
+                    story.get("title")
+                    or story.get("headline")
+                ),
+                "source": clean_text(
+                    story.get("source")
+                ),
+                "photo": (
+                    str(
+                        photo_path.relative_to(
+                            ROOT
+                        )
+                    )
+                    if photo_path is not None
+                    else None
+                ),
+                "real_photo_used": (
+                    photo_path is not None
+                ),
+            }
+        )
+
+    with open(
+        REPORT_FILE,
+        "w",
+        encoding="utf-8"
+    ) as file:
+
+        json.dump(
+            report,
+            file,
+            indent=2,
+            ensure_ascii=False
+        )
+
+    log(
+        "Created: "
+        + str(REPORT_FILE)
+    )
+
+
+# ============================================================
+# CLEAN OLD GENERATED FILES
+# ============================================================
+
+def clean_generated_files():
+
+    for directory in [
+        SCENES_DIR,
+        AUDIO_DIR,
+    ]:
+
+        directory.mkdir(
+            parents=True,
+            exist_ok=True
+        )
+
+        for path in directory.iterdir():
+
+            if path.is_file():
+
+                try:
+                    path.unlink()
+                except Exception:
+                    pass
+
+    for path in [
+        OUTPUT_DIR
+        / "rift_valley_watch_temp.mp4",
+        OUTPUT_DIR
+        / "rift_valley_watch.mp4",
+    ]:
+
+        if path.exists():
+
+            try:
+                path.unlink()
+            except Exception:
+                pass
+
+
+# ============================================================
+# STORY NARRATION
+# ============================================================
+
+def get_narration(story):
+
+    narration = clean_text(
+        story.get("narration")
+    )
+
+    if narration:
+        return narration
+
+    title = clean_text(
+        story.get("title")
+        or story.get("headline")
+        or "Rift Valley news update"
+    )
+
+    description = clean_text(
+        story.get("description")
+        or story.get("summary")
+        or ""
+    )
+
+    county = clean_text(
+        story.get("county")
+        or ""
+    )
+
+    source = clean_text(
+        story.get("source")
+        or ""
+    )
+
+    parts = []
+
+    if county:
+        parts.append(
+            county
+            + "."
+        )
+
+    parts.append(
+        title
+        + "."
+    )
+
+    if description:
+        parts.append(
+            description
+            + "."
+        )
+
+    if source:
+        parts.append(
+            "Source: "
+            + source
+            + "."
+        )
+
+    return " ".join(
+        parts
+    )
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+
+    log("")
+    log(
+        "======================================================================"
+    )
+    log(
+        "RIFT VALLEY WATCH V2 VIDEO GENERATOR"
+    )
+    log(
+        "======================================================================"
+    )
+
+    prepare_directories()
+
+    clean_generated_files()
+
+    log("")
+    log(
+        "Loading real-time story data..."
+    )
+
+    data = load_story_data()
+
+    stories = get_stories(
+        data
+    )
+
+    if not stories:
+
+        raise RuntimeError(
+            "No stories were found in data/story.json."
+        )
+
+    log(
+        "Stories found: "
+        + str(len(stories))
+    )
+
+    log("")
+
+    scene_files = []
+
+    # --------------------------------------------------------
+    # OPENER
+    # --------------------------------------------------------
+
+    log(
+        "Creating opener..."
+    )
+
+    opener_image = create_opener()
+
+    opener_scene = (
+        SCENES_DIR
+        / "scene_00.mp4"
+    )
+
+    render_scene(
+        opener_image,
+        opener_scene,
+        OPENER_DURATION,
+        None
+    )
+
+    scene_files.append(
+        opener_scene
+    )
+
+    # --------------------------------------------------------
+    # STORIES
+    # --------------------------------------------------------
+
+    for number, story in enumerate(
+        stories,
+        start=1
+    ):
+
+        log("")
+        log(
+            "============================================================"
+        )
+
+        log(
+            "STORY "
+            + str(number)
+        )
+
+        log(
+            "============================================================"
+        )
+
+        headline = clean_text(
+            story.get("title")
+            or story.get("headline")
+            or "Rift Valley News"
+        )
+
+        county = clean_text(
+            story.get("county")
+            or "Rift Valley"
+        )
+
+        source = clean_text(
+            story.get("source")
+            or "Source unavailable"
+        )
+
+        log(
+            "County: "
+            + county
+        )
+
+        log(
+            "Headline: "
+            + headline
+        )
+
+        log(
+            "Source: "
+            + source
+        )
+
+        photo_path = get_photo_path(
+            story
+        )
+
+        if photo_path is not None:
+
+            log(
+                "Real photo: "
+                + str(photo_path)
+            )
+
+        else:
+
+            log(
+                "Real photo: NOT AVAILABLE - "
+                "professional fallback card will be used."
+            )
+
+        story_image = create_story_image(
+            story,
+            number
+        )
+
+        narration = get_narration(
+            story
+        )
+
+        audio_path = (
+            AUDIO_DIR
+            / (
+                "story_"
+                + str(number).zfill(2)
+                + ".mp3"
+            )
+        )
+
+        log(
+            "Generating narration..."
+        )
+
+        create_audio(
+            narration,
+            audio_path
+        )
+
+        duration = STORY_DURATION
+
+        if audio_path.exists():
+
+            audio_duration = get_media_duration(
+                audio_path
+            )
+
+            if audio_duration > 0:
+
+                # Give narration a small breathing room.
+                duration = max(
+                    STORY_DURATION,
+                    audio_duration + 0.6
+                )
+
+        log(
+            "Scene duration: "
+            + f"{duration:.2f}"
+            + " seconds"
+        )
+
+        scene_path = (
+            SCENES_DIR
+            / (
+                "scene_"
+                + str(number).zfill(2)
+                + ".mp4"
+            )
+        )
+
+        render_scene(
+            story_image,
+            scene_path,
+            duration,
+            audio_path
+            if audio_path.exists()
+            else None
+        )
+
+        scene_files.append(
+            scene_path
+        )
+
+    # --------------------------------------------------------
+    # OUTRO
+    # --------------------------------------------------------
+
+    log("")
+    log(
+        "Creating outro..."
+    )
+
+    outro_image = create_outro()
+
+    outro_scene = (
+        SCENES_DIR
+        / (
+            "scene_"
+            + str(
+                len(stories) + 1
+            ).zfill(2)
+            + ".mp4"
+        )
+    )
+
+    render_scene(
+        outro_image,
+        outro_scene,
+        OUTRO_DURATION,
+        None
+    )
+
+    scene_files.append(
+        outro_scene
+    )
+
+    # --------------------------------------------------------
+    # ASSEMBLE
+    # --------------------------------------------------------
+
+    log("")
+
+    assemble_final(
+        scene_files
+    )
+
+    # --------------------------------------------------------
+    # VALIDATE
+    # --------------------------------------------------------
+
+    validate_final_video()
+
+    # --------------------------------------------------------
+    # REPORT
+    # --------------------------------------------------------
+
+    create_visual_report(
+        stories,
+        scene_files
+    )
+
+    log("")
+    log(
+        "======================================================================"
+    )
+
+    log(
+        "RIFT VALLEY WATCH VIDEO GENERATION SUCCESSFUL"
+    )
+
+    log(
+        "======================================================================"
+    )
+
+    log(
+        "Final MP4:"
+    )
+
+    log(
+        str(FINAL_VIDEO)
+    )
+
+    log(
+        "Stories rendered: "
+        + str(len(stories))
+    )
+
+    log(
+        "Real-photo stories: "
+        + str(
+            sum(
+                1
+                for story in stories
+                if get_photo_path(story)
+                is not None
+            )
+        )
+    )
+
+    log(
+        "======================================================================"
+    )
+
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
+
+if __name__ == "__main__":
+
+    try:
+
+        main()
+
+    except KeyboardInterrupt:
+
+        log(
+            "Generation cancelled."
+        )
+
+        sys.exit(130)
+
+    except Exception as exc:
+
+        log("")
+        log(
+            "======================================================================"
+        )
+
+        log(
+            "VIDEO GENERATOR ERROR"
+        )
+
+        log(
+            "======================================================================"
+        )
+
+        log(
+            str(exc)
+        )
+
+        log("")
+
+        sys.exit(1)
