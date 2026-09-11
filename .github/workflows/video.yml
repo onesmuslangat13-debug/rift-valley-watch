@@ -72,8 +72,15 @@ jobs:
           echo "VERIFYING NEWS FILES"
           echo "=========================================="
 
-          test -f data/story.json
-          test -f data/script.json
+          if [ ! -f data/story.json ]; then
+            echo "ERROR: data/story.json was not created."
+            exit 1
+          fi
+
+          if [ ! -f data/script.json ]; then
+            echo "ERROR: data/script.json was not created."
+            exit 1
+          fi
 
           echo
           echo "story.json:"
@@ -98,6 +105,33 @@ jobs:
 
           cat data/script.json
 
+      - name: Check downloaded photos
+        run: |
+          echo "=========================================="
+          echo "CHECKING REAL SOURCE PHOTOS"
+          echo "=========================================="
+
+          if [ -d assets/source ]; then
+            find assets/source -maxdepth 1 -type f \
+              -printf '%p %s bytes\n' 2>/dev/null || true
+          else
+            echo "No assets/source directory found."
+          fi
+
+          echo
+          echo "Photo count:"
+          find assets/source -maxdepth 1 -type f 2>/dev/null | wc -l
+
+      - name: Check FFmpeg
+        run: |
+          echo "=========================================="
+          echo "CHECKING FFMPEG"
+          echo "=========================================="
+
+          ffmpeg -version | head -n 3
+          echo
+          ffprobe -version | head -n 3
+
       - name: Generate video
         run: |
           echo "=========================================="
@@ -106,31 +140,32 @@ jobs:
 
           set +e
 
-          python -u scripts/video_generator.py 2>&1 | tee video_generator.log
+          python -u scripts/video_generator.py > video_generator.log 2>&1
 
-          STATUS=${PIPESTATUS[0]}
+          STATUS=$?
 
           echo
           echo "=========================================="
           echo "VIDEO GENERATOR EXIT CODE: $STATUS"
           echo "=========================================="
 
-          exit $STATUS
-
-      - name: Show generator log
-        if: always()
-        run: |
+          echo
           echo "=========================================="
           echo "VIDEO GENERATOR LOG"
           echo "=========================================="
 
-          if [ -f video_generator.log ]; then
-            cat video_generator.log
-          else
-            echo "No generator log found."
-          fi
+          cat video_generator.log || true
 
-      - name: Inspect output
+          echo
+          echo "=========================================="
+          echo "LAST 300 LINES"
+          echo "=========================================="
+
+          tail -n 300 video_generator.log || true
+
+          exit $STATUS
+
+      - name: Inspect output after generator
         if: always()
         run: |
           echo "=========================================="
@@ -141,10 +176,20 @@ jobs:
             -printf '%p %s bytes\n' 2>/dev/null || true
 
           echo
-          echo "SCENES:"
+          echo "=========================================="
+          echo "SCENES"
+          echo "=========================================="
+
           ls -lah output/scenes/ 2>/dev/null || true
 
-      - name: Verify MP4
+          echo
+          echo "=========================================="
+          echo "AUDIO"
+          echo "=========================================="
+
+          ls -lah output/audio/ 2>/dev/null || true
+
+      - name: Verify final MP4
         run: |
           echo "=========================================="
           echo "VERIFYING FINAL MP4"
@@ -154,8 +199,26 @@ jobs:
             echo
             echo "ERROR: output/rift_valley_watch.mp4 was not created."
             echo
-            echo "LAST 200 LINES OF GENERATOR LOG:"
-            tail -n 200 video_generator.log || true
+            echo "=========================================="
+            echo "GENERATOR LOG"
+            echo "=========================================="
+            tail -n 300 video_generator.log || true
+            echo
+            echo "=========================================="
+            echo "ALL OUTPUT FILES"
+            echo "=========================================="
+            find output -maxdepth 3 -type f \
+              -printf '%p %s bytes\n' 2>/dev/null || true
+            exit 1
+          fi
+
+          FILE_SIZE=$(stat -c%s output/rift_valley_watch.mp4)
+
+          echo "MP4 created successfully."
+          echo "File size: $FILE_SIZE bytes"
+
+          if [ "$FILE_SIZE" -lt 100000 ]; then
+            echo "ERROR: MP4 is suspiciously small."
             exit 1
           fi
 
@@ -174,6 +237,40 @@ jobs:
             -of json \
             output/rift_valley_watch.mp4
 
+      - name: Validate MP4 dimensions
+        if: success()
+        run: |
+          echo "=========================================="
+          echo "VALIDATING VIDEO DIMENSIONS"
+          echo "=========================================="
+
+          WIDTH=$(ffprobe -v error \
+            -select_streams v:0 \
+            -show_entries stream=width \
+            -of csv=p=0 \
+            output/rift_valley_watch.mp4)
+
+          HEIGHT=$(ffprobe -v error \
+            -select_streams v:0 \
+            -show_entries stream=height \
+            -of csv=p=0 \
+            output/rift_valley_watch.mp4)
+
+          echo "Width: $WIDTH"
+          echo "Height: $HEIGHT"
+
+          if [ "$WIDTH" != "1080" ]; then
+            echo "ERROR: Expected width 1080."
+            exit 1
+          fi
+
+          if [ "$HEIGHT" != "1920" ]; then
+            echo "ERROR: Expected height 1920."
+            exit 1
+          fi
+
+          echo "1080x1920 vertical video confirmed."
+
       - name: Upload MP4
         if: success()
         uses: actions/upload-artifact@v4
@@ -191,6 +288,14 @@ jobs:
             data/story.json
             data/script.json
             data/visual_report.json
+          if-no-files-found: warn
+
+      - name: Upload source photos
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rift-valley-watch-source-photos
+          path: assets/source/
           if-no-files-found: warn
 
       - name: Upload generator log
