@@ -1,595 +1,840 @@
+# ============================================================
+# RIFT VALLEY WATCH V2
+# VERIFIED NEWS SCRIPT ENGINE
+# ============================================================
+
 import json
 import re
 from pathlib import Path
-
-ROOT = Path(__file__).resolve().parents[1]
-
-STORY_FILE = ROOT / "data" / "story.json"
-SCRIPT_FILE = ROOT / "data" / "script.json"
-
-MIN_WORDS = 70
-MAX_WORDS = 170
+from datetime import datetime
 
 
-def clean_text(value):
-    if value is None:
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+STORY_FILE = BASE_DIR / "data" / "story.json"
+SCRIPT_FILE = BASE_DIR / "data" / "script.json"
+
+
+# ============================================================
+# SETTINGS
+# ============================================================
+
+MIN_WORDS = 90
+MAX_WORDS = 190
+
+FORBIDDEN_PHRASES = [
+    "in a significant development",
+    "this is expected to transform",
+    "residents are expected to benefit",
+    "the project will boost the economy",
+    "this marks a major milestone",
+    "will greatly improve",
+    "is set to transform",
+    "promises to transform",
+]
+
+
+# ============================================================
+# LOAD STORY
+# ============================================================
+
+def load_story():
+    if not STORY_FILE.exists():
+        raise RuntimeError(
+            f"Story file not found: {STORY_FILE}"
+        )
+
+    try:
+        with open(STORY_FILE, "r", encoding="utf-8") as f:
+            story = json.load(f)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            f"Invalid story.json: {e}"
+        )
+
+    if not isinstance(story, dict):
+        raise RuntimeError(
+            "story.json must contain a JSON object."
+        )
+
+    return story
+
+
+# ============================================================
+# BASIC TEXT CLEANING
+# ============================================================
+
+def clean_text(text):
+    if text is None:
         return ""
 
-    text = str(value)
-    text = text.replace("\xa0", " ")
+    text = str(text)
+
     text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"<[^>]+>", "", text)
 
     return text.strip()
 
 
-def word_count(text):
-    return len(clean_text(text).split())
+# ============================================================
+# REQUIRED FIELD CHECK
+# ============================================================
 
+def validate_required_fields(story):
 
-def split_sentences(text):
-    text = clean_text(text)
-
-    if not text:
-        return []
-
-    return [
-        clean_text(x)
-        for x in re.split(r"(?<=[.!?])\s+", text)
-        if clean_text(x)
+    required = [
+        "title",
+        "county",
+        "category",
+        "date",
+        "source",
+        "summary",
+        "verified_facts",
     ]
 
+    missing = []
 
-def load_story():
-    if not STORY_FILE.exists():
-        print("[ERROR] data/story.json not found.")
-        return None
+    for field in required:
+        if field not in story:
+            missing.append(field)
 
-    try:
-        with open(STORY_FILE, "r", encoding="utf-8") as file:
-            story = json.load(file)
-
-        if not isinstance(story, dict):
-            print("[ERROR] story.json must contain an object.")
-            return None
-
-        return story
-
-    except Exception as error:
-        print(f"[ERROR] Could not load story.json: {error}")
-        return None
-
-
-def get_county(story):
-    county = clean_text(story.get("county"))
-
-    if county:
-        return county
-
-    return "the Rift Valley region"
-
-
-def get_category(story):
-    category = clean_text(story.get("category")).upper()
-
-    if category:
-        return category
-
-    return "REGIONAL NEWS"
-
-
-def get_title(story):
-    title = clean_text(story.get("title"))
-
-    if title:
-        return title
-
-    return "A new development is drawing attention in the Rift Valley"
-
-
-def get_source(story):
-    source = clean_text(story.get("source"))
-
-    if source:
-        return source
-
-    return "the reported source"
-
-
-def clean_summary(summary, title):
-    summary = clean_text(summary)
-    title = clean_text(title)
-
-    if not summary:
-        return ""
-
-    if title and summary.lower().startswith(title.lower()):
-        summary = summary[len(title):].strip(" .:-")
-
-    unwanted = [
-        r"^read more\s*",
-        r"^share this\s*",
-        r"^subscribe\s*",
-        r"^home\s*",
-    ]
-
-    for pattern in unwanted:
-        summary = re.sub(
-            pattern,
-            "",
-            summary,
-            flags=re.IGNORECASE
+    if missing:
+        raise RuntimeError(
+            "EDITORIAL QC FAILED.\n"
+            f"Missing required fields: {', '.join(missing)}"
         )
 
-    return clean_text(summary)
 
+# ============================================================
+# SOURCE VALIDATION
+# ============================================================
 
-def extract_facts(summary):
-    facts = []
+def validate_source(story):
 
-    blocked = [
-        "read more",
-        "click here",
-        "subscribe",
-        "cookie policy",
-        "privacy policy",
-        "terms and conditions",
-    ]
+    source = story.get("source")
 
-    for sentence in split_sentences(summary):
-
-        if word_count(sentence) < 6:
-            continue
-
-        lowered = sentence.lower()
-
-        if any(word in lowered for word in blocked):
-            continue
-
-        if sentence not in facts:
-            facts.append(sentence)
-
-        if len(facts) == 4:
-            break
-
-    return facts
-
-
-def make_hook(story):
-    title = get_title(story)
-    county = get_county(story)
-    category = get_category(story)
-
-    if category == "BREAKING NEWS":
-        return f"Breaking news from {county}: {title}."
-
-    if category == "DEVELOPMENT":
-        return (
-            f"A major development is taking shape in "
-            f"{county}: {title}."
+    if not isinstance(source, dict):
+        raise RuntimeError(
+            "EDITORIAL QC FAILED.\n"
+            "Source must be an object containing name, url and type."
         )
 
-    if category == "AGRICULTURE":
-        return (
-            f"Farmers in {county} are watching a new "
-            f"development: {title}."
+    source_name = clean_text(source.get("name"))
+
+    if not source_name:
+        raise RuntimeError(
+            "EDITORIAL QC FAILED.\n"
+            "A source name is required."
         )
 
-    if category == "HEALTH":
-        return (
-            f"A health development in {county} is "
-            f"drawing attention: {title}."
+    source_type = clean_text(
+        source.get("type")
+    ).upper()
+
+    if not source_type:
+        raise RuntimeError(
+            "EDITORIAL QC FAILED.\n"
+            "Source type is required."
         )
 
-    if category == "EDUCATION":
-        return (
-            f"Education is taking centre stage in "
-            f"{county}: {title}."
+    return {
+        "name": source_name,
+        "url": clean_text(source.get("url")),
+        "type": source_type,
+    }
+
+
+# ============================================================
+# VERIFIED FACTS
+# ============================================================
+
+def validate_facts(story):
+
+    facts = story.get("verified_facts")
+
+    if not isinstance(facts, list):
+        raise RuntimeError(
+            "EDITORIAL QC FAILED.\n"
+            "verified_facts must be a list."
         )
 
-    if category == "BUSINESS":
-        return (
-            f"Business activity in {county} is getting "
-            f"attention: {title}."
-        )
-
-    if category == "SECURITY":
-        return (
-            f"A security development in {county} is "
-            f"drawing attention: {title}."
-        )
-
-    if category == "POLITICS":
-        return (
-            f"Political developments in {county} are "
-            f"drawing attention after {title.lower()}."
-        )
-
-    if category == "ACCOUNTABILITY":
-        return (
-            f"An accountability issue in {county} is "
-            f"drawing attention: {title}."
-        )
-
-    return f"Here is the latest development from {county}: {title}."
-
-
-def make_what_happened(story, facts):
-    title = get_title(story)
-    source = get_source(story)
-
-    if not facts:
-        return (
-            f"{title}. The development was reported by "
-            f"{source}."
-        )
-
-    fact = facts[0]
-
-    if fact.lower() == title.lower() and len(facts) > 1:
-        fact = facts[1]
-
-    return (
-        f"{title}. According to {source}, {fact}"
-    )
-
-
-def make_key_facts(facts):
-    if not facts:
-        return (
-            "Available information remains limited, and "
-            "additional details will be confirmed as they emerge."
-        )
-
-    selected = []
+    cleaned = []
 
     for fact in facts:
-        if fact not in selected:
-            selected.append(fact)
 
-        if len(selected) == 2:
-            break
+        if not isinstance(fact, dict):
+            continue
 
-    return " ".join(selected)
+        label = clean_text(
+            fact.get("label")
+        ).upper()
 
-
-def make_why_it_matters(story):
-    county = get_county(story)
-    category = get_category(story)
-
-    if category == "DEVELOPMENT":
-        return (
-            f"The development matters because projects in "
-            f"{county} can affect infrastructure, public "
-            f"services, jobs and economic activity."
+        value = clean_text(
+            fact.get("value")
         )
 
-    if category == "AGRICULTURE":
-        return (
-            f"The issue matters because agriculture supports "
-            f"livelihoods, food security and local markets "
-            f"across {county}."
+        if label and value:
+            cleaned.append({
+                "label": label,
+                "value": value
+            })
+
+    if len(cleaned) < 2:
+        raise RuntimeError(
+            "EDITORIAL QC FAILED.\n"
+            "At least two verified facts are required."
         )
 
-    if category == "HEALTH":
-        return (
-            f"The development matters because health services "
-            f"directly affect residents across {county}."
-        )
+    return cleaned
 
-    if category == "EDUCATION":
-        return (
-            f"The development matters because education "
-            f"investment can affect students, teachers and "
-            f"future opportunities across {county}."
-        )
 
-    if category == "BUSINESS":
-        return (
-            f"The issue matters because business activity can "
-            f"affect jobs, investment, incomes and local revenue."
-        )
+# ============================================================
+# OFFICIAL STATEMENT
+# ============================================================
 
-    if category == "ACCOUNTABILITY":
-        return (
-            "The issue matters because public resources require "
-            "transparency, proper oversight and accountability."
-        )
+def get_official_statement(story):
 
-    if category == "SECURITY":
-        return (
-            f"The development matters because security conditions "
-            f"can directly affect residents and businesses in {county}."
-        )
+    statement = story.get(
+        "official_statement",
+        {}
+    )
 
-    if category == "POLITICS":
+    if not isinstance(statement, dict):
+        return {
+            "available": False,
+            "speaker": "",
+            "quote": ""
+        }
+
+    available = bool(
+        statement.get("available", False)
+    )
+
+    speaker = clean_text(
+        statement.get("speaker")
+    )
+
+    quote = clean_text(
+        statement.get("quote")
+    )
+
+    if not available:
+        return {
+            "available": False,
+            "speaker": "",
+            "quote": ""
+        }
+
+    if not speaker or not quote:
+        return {
+            "available": False,
+            "speaker": "",
+            "quote": ""
+        }
+
+    return {
+        "available": True,
+        "speaker": speaker,
+        "quote": quote
+    }
+
+
+# ============================================================
+# FIND FACT
+# ============================================================
+
+def find_fact(facts, label):
+
+    label = label.upper()
+
+    for fact in facts:
+
+        if fact["label"] == label:
+            return fact["value"]
+
+    return ""
+
+
+# ============================================================
+# BUILD HOOK
+# ============================================================
+
+def build_hook(story, facts):
+
+    title = clean_text(
+        story["title"]
+    )
+
+    county = clean_text(
+        story["county"]
+    )
+
+    status = find_fact(
+        facts,
+        "STATUS"
+    )
+
+    if status:
         return (
-            "The issue matters because political decisions can "
-            "influence public policy, priorities and public resources."
+            f"{county}: {title}. "
+            f"Current status: {status}."
         )
 
     return (
-        f"The development matters because it could affect "
-        f"residents and communities across {county}."
+        f"{county}: {title}."
     )
 
 
-def make_impact(story):
-    county = get_county(story)
-    category = get_category(story)
+# ============================================================
+# BUILD WHAT HAPPENED
+# ============================================================
 
-    if category == "DEVELOPMENT":
-        return (
-            f"For residents of {county}, the real test will be "
-            "whether the project is completed as planned and "
-            "delivers practical benefits."
+def build_what_happened(story, facts):
+
+    summary = clean_text(
+        story["summary"]
+    )
+
+    return summary
+
+
+# ============================================================
+# BUILD KEY FACTS
+# ============================================================
+
+def build_key_facts(facts):
+
+    lines = []
+
+    for fact in facts:
+
+        lines.append(
+            f"{fact['label'].title()}: "
+            f"{fact['value']}."
         )
 
-    if category == "AGRICULTURE":
+    return " ".join(lines)
+
+
+# ============================================================
+# BUILD CONTEXT
+# ============================================================
+
+def build_context(story):
+
+    editorial = story.get(
+        "editorial",
+        {}
+    )
+
+    unconfirmed = editorial.get(
+        "unconfirmed",
+        []
+    )
+
+    if not isinstance(
+        unconfirmed,
+        list
+    ):
+        unconfirmed = []
+
+    if not unconfirmed:
         return (
-            f"For farmers and households in {county}, the key "
-            "question is whether the development produces "
-            "measurable benefits over time."
+            "The available information confirms "
+            "the reported development."
         )
 
-    if category == "BUSINESS":
+    names = []
+
+    for item in unconfirmed[:4]:
+
+        item = clean_text(item)
+
+        if item:
+            names.append(item)
+
+    if not names:
         return (
-            "For businesses and workers, the key question is "
-            "whether the development creates sustainable "
-            "economic opportunities."
+            "The available information confirms "
+            "the reported development."
         )
 
-    if category == "ACCOUNTABILITY":
-        return (
-            "For taxpayers, the focus should remain on the "
-            "available evidence and how public resources are managed."
+    if len(names) == 1:
+
+        missing = names[0]
+
+    elif len(names) == 2:
+
+        missing = (
+            f"{names[0]} and {names[1]}"
+        )
+
+    else:
+
+        missing = (
+            ", ".join(names[:-1])
+            + " and "
+            + names[-1]
         )
 
     return (
-        f"For residents of {county}, the significance will "
-        "depend on what happens next and whether the reported "
-        "development produces tangible results."
+        "Some project details remain unconfirmed "
+        f"from the available source, including {missing}."
     )
 
 
-def make_close(story):
-    county = get_county(story)
+# ============================================================
+# BUILD OFFICIAL ATTRIBUTION
+# ============================================================
+
+def build_attribution(
+    story,
+    source,
+    statement
+):
+
+    source_name = source["name"]
+
+    if statement["available"]:
+
+        return (
+            f'{source_name}, through '
+            f'{statement["speaker"]}, said: '
+            f'"{statement["quote"]}"'
+        )
 
     return (
-        f"Rift Valley Watch will continue tracking developments "
-        f"across {county} and the wider Rift Valley. Follow for "
-        "verified regional news, accountability and development."
+        f"The information is attributed to "
+        f"{source_name}."
     )
 
+
+# ============================================================
+# BUILD IMPACT
+# ============================================================
+
+def build_impact(story):
+
+    summary = clean_text(
+        story["summary"]
+    )
+
+    # Only use impact language already present
+    # in the supplied story.
+    sentences = re.split(
+        r"(?<=[.!?])\s+",
+        summary
+    )
+
+    impact_sentences = []
+
+    keywords = [
+        "improve",
+        "support",
+        "movement",
+        "transport",
+        "business",
+        "residents",
+        "economic",
+        "access",
+        "connect"
+    ]
+
+    for sentence in sentences:
+
+        lower = sentence.lower()
+
+        if any(
+            keyword in lower
+            for keyword in keywords
+        ):
+            impact_sentences.append(
+                sentence.strip()
+            )
+
+    if impact_sentences:
+        return " ".join(
+            impact_sentences
+        )
+
+    return (
+        "The reported impact will depend on "
+        "implementation of the project and "
+        "the availability of further verified details."
+    )
+
+
+# ============================================================
+# BUILD CLOSE
+# ============================================================
+
+def build_close(story, source):
+
+    county = clean_text(
+        story["county"]
+    )
+
+    source_name = source["name"]
+
+    return (
+        f"Rift Valley Watch will track further "
+        f"updates from {source_name} on the project "
+        f"in {county}."
+    )
+
+
+# ============================================================
+# CLEAN GENERATED SECTION
+# ============================================================
+
+def clean_section(text):
+
+    text = clean_text(text)
+
+    for phrase in FORBIDDEN_PHRASES:
+
+        pattern = re.compile(
+            re.escape(phrase),
+            re.IGNORECASE
+        )
+
+        text = pattern.sub(
+            "",
+            text
+        )
+
+    text = re.sub(
+        r"\s+([,.!?])",
+        r"\1",
+        text
+    )
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    )
+
+    return text.strip()
+
+
+# ============================================================
+# BUILD SCRIPT
+# ============================================================
 
 def build_script(story):
 
-    title = get_title(story)
-
-    summary = clean_summary(
-        story.get("summary", ""),
-        title
+    validate_required_fields(
+        story
     )
 
-    facts = extract_facts(summary)
+    source = validate_source(
+        story
+    )
+
+    facts = validate_facts(
+        story
+    )
+
+    statement = get_official_statement(
+        story
+    )
+
+    hook = clean_section(
+        build_hook(
+            story,
+            facts
+        )
+    )
+
+    what_happened = clean_section(
+        build_what_happened(
+            story,
+            facts
+        )
+    )
+
+    key_facts = clean_section(
+        build_key_facts(
+            facts
+        )
+    )
+
+    context = clean_section(
+        build_context(
+            story
+        )
+    )
+
+    attribution = clean_section(
+        build_attribution(
+            story,
+            source,
+            statement
+        )
+    )
+
+    impact = clean_section(
+        build_impact(
+            story
+        )
+    )
+
+    close = clean_section(
+        build_close(
+            story,
+            source
+        )
+    )
 
     sections = {
-        "hook": make_hook(story),
-        "what_happened": make_what_happened(story, facts),
-        "key_facts": make_key_facts(facts),
-        "why_it_matters": make_why_it_matters(story),
-        "impact": make_impact(story),
-        "close": make_close(story),
+        "hook": hook,
+        "what_happened": what_happened,
+        "key_facts": key_facts,
+        "context": context,
+        "attribution": attribution,
+        "impact": impact,
+        "close": close
     }
 
-    narration = " ".join(sections.values())
-    narration = clean_text(narration)
+    full_text = " ".join(
+        sections.values()
+    )
 
-    sentences = split_sentences(narration)
+    words = full_text.split()
 
-    unique = []
-    seen = set()
+    word_count = len(words)
 
-    for sentence in sentences:
-        key = sentence.lower()
+    if word_count < MIN_WORDS:
 
-        if key not in seen:
-            seen.add(key)
-            unique.append(sentence)
+        raise RuntimeError(
+            "EDITORIAL QC FAILED.\n"
+            f"Script contains only {word_count} words.\n"
+            f"Minimum required: {MIN_WORDS}.\n"
+            "Add more verified facts to story.json."
+        )
 
-    narration = " ".join(unique)
+    if word_count > MAX_WORDS:
 
-    return sections, narration
+        raise RuntimeError(
+            "EDITORIAL QC FAILED.\n"
+            f"Script contains {word_count} words.\n"
+            f"Maximum allowed: {MAX_WORDS}."
+        )
+
+    return {
+        "version": "RIFT VALLEY WATCH V2",
+        "generated_at": datetime.utcnow().isoformat()
+        + "Z",
+
+        "title": clean_text(
+            story["title"]
+        ),
+
+        "county": clean_text(
+            story["county"]
+        ),
+
+        "category": clean_text(
+            story["category"]
+        ).upper(),
+
+        "date": clean_text(
+            story["date"]
+        ),
+
+        "source": source,
+
+        "official_statement": statement,
+
+        "verified_facts": facts,
+
+        "editorial": story.get(
+            "editorial",
+            {}
+        ),
+
+        "sections": sections,
+
+        "full_script": full_text,
+
+        "word_count": word_count,
+
+        "visual_plan": [
+            {
+                "sequence": 1,
+                "type": "HOOK",
+                "purpose": "Open with the strongest verified fact."
+            },
+            {
+                "sequence": 2,
+                "type": "VISUAL_EVIDENCE",
+                "purpose": "Show an available official/project visual."
+            },
+            {
+                "sequence": 3,
+                "type": "KEY_FACTS",
+                "purpose": "Display verified project information."
+            },
+            {
+                "sequence": 4,
+                "type": "CONTEXT",
+                "purpose": "Clearly separate confirmed and unconfirmed information."
+            },
+            {
+                "sequence": 5,
+                "type": "IMPACT",
+                "purpose": "Use only impact information supported by the source."
+            },
+            {
+                "sequence": 6,
+                "type": "SOURCE",
+                "purpose": "Display source and publication date."
+            }
+        ],
+
+        "caption_required": True,
+
+        "qc": {
+            "source_present": True,
+            "verified_facts_present": True,
+            "official_statement_available":
+                statement["available"],
+            "boilerplate_removed": True,
+            "word_count_passed": True,
+            "ready_for_video": True
+        }
+    }
 
 
-def trim_script(text, maximum):
-    sentences = split_sentences(text)
+# ============================================================
+# SAVE SCRIPT
+# ============================================================
 
-    result = []
-    count = 0
-
-    for sentence in sentences:
-        words = word_count(sentence)
-
-        if count + words > maximum:
-            break
-
-        result.append(sentence)
-        count += words
-
-    return " ".join(result)
-
-
-def quality_check(story, sections, narration):
-
-    words = word_count(narration)
-
-    print(f"      Word count: {words}")
-
-    if words < MIN_WORDS:
-        print(f"[ERROR] Script too short: minimum {MIN_WORDS} words.")
-        return False
-
-    if words > MAX_WORDS:
-        print(f"[ERROR] Script too long: maximum {MAX_WORDS} words.")
-        return False
-
-    required = [
-        "hook",
-        "what_happened",
-        "key_facts",
-        "why_it_matters",
-        "impact",
-        "close",
-    ]
-
-    for name in required:
-        if not clean_text(sections.get(name)):
-            print(f"[ERROR] Missing section: {name}")
-            return False
-
-    if not clean_text(story.get("source")):
-        print("[ERROR] Story source is missing.")
-        return False
-
-    if narration.rstrip()[-1:] not in ".!?":
-        print("[ERROR] Narration has incomplete ending.")
-        return False
-
-    forbidden = [
-        "click here",
-        "read more",
-        "cookie policy",
-        "privacy policy",
-        "terms and conditions",
-    ]
-
-    lowered = narration.lower()
-
-    for phrase in forbidden:
-        if phrase in lowered:
-            print(f"[ERROR] Webpage noise detected: {phrase}")
-            return False
-
-    print("      QC PASSED")
-    return True
-
-
-def save_script(story, sections, narration):
+def save_script(script):
 
     SCRIPT_FILE.parent.mkdir(
         parents=True,
         exist_ok=True
     )
 
-    output = {
-        "page": "Rift Valley Watch",
-        "status": "ready",
-
-        "story": {
-            "title": clean_text(story.get("title")),
-            "county": clean_text(story.get("county")),
-            "category": get_category(story),
-            "source": clean_text(story.get("source")),
-            "url": clean_text(story.get("url")),
-            "date": clean_text(story.get("date")),
-        },
-
-        "sections": sections,
-
-        "narration": narration,
-
-        "word_count": word_count(narration),
-    }
-
     with open(
         SCRIPT_FILE,
         "w",
         encoding="utf-8"
-    ) as file:
+    ) as f:
 
         json.dump(
-            output,
-            file,
+            script,
+            f,
             indent=2,
             ensure_ascii=False
         )
 
 
+# ============================================================
+# MAIN
+# ============================================================
+
 def main():
 
-    print()
     print("=" * 60)
-    print("RIFT VALLEY WATCH")
-    print("NEWS SCRIPT ENGINE V1.0")
+    print("RIFT VALLEY WATCH V2")
+    print("VERIFIED NEWS SCRIPT ENGINE")
     print("=" * 60)
 
     print()
-    print("[1/4] Loading story...")
+    print("[1/5] Loading story...")
 
     story = load_story()
 
-    if not story:
-        return
-
     print(
-        f"      Story: {get_title(story)}"
+        f"      Title: {story.get('title', '')}"
     )
 
     print(
-        f"      County: {get_county(story)}"
+        f"      County: {story.get('county', '')}"
     )
 
     print(
-        f"      Category: {get_category(story)}"
+        f"      Category: {story.get('category', '')}"
     )
 
     print()
-    print("[2/4] Building script...")
+    print("[2/5] Validating editorial fields...")
 
-    sections, narration = build_script(story)
+    validate_required_fields(
+        story
+    )
 
-    if word_count(narration) > MAX_WORDS:
-        narration = trim_script(
-            narration,
-            MAX_WORDS
+    source = validate_source(
+        story
+    )
+
+    facts = validate_facts(
+        story
+    )
+
+    print(
+        f"      Source: {source['name']}"
+    )
+
+    print(
+        f"      Verified facts: {len(facts)}"
+    )
+
+    print()
+    print("[3/5] Building verified script...")
+
+    script = build_script(
+        story
+    )
+
+    print(
+        f"      Word count: {script['word_count']}"
+    )
+
+    print()
+    print("[4/5] Running editorial QC...")
+
+    if not script["qc"]["ready_for_video"]:
+
+        raise RuntimeError(
+            "Editorial QC failed."
         )
 
-    print()
-    print("[3/4] Quality control...")
+    print(
+        "      Source check: PASS"
+    )
 
-    if not quality_check(
-        story,
-        sections,
-        narration
-    ):
-        print()
-        print("SCRIPT ENGINE STOPPED.")
-        return
+    print(
+        "      Facts check: PASS"
+    )
 
-    print()
-    print("[4/4] Saving script...")
+    print(
+        "      Boilerplate check: PASS"
+    )
 
-    save_script(
-        story,
-        sections,
-        narration
+    print(
+        "      Word count check: PASS"
     )
 
     print()
-    print("-" * 60)
-    print("SCRIPT PREVIEW")
-    print("-" * 60)
-    print()
-    print(narration)
-    print()
-    print("-" * 60)
+    print("[5/5] Saving script...")
 
+    save_script(
+        script
+    )
+
+    print()
     print(
         f"[SAVED] {SCRIPT_FILE}"
     )
 
     print()
-    print("RIFT VALLEY WATCH SCRIPT ENGINE COMPLETE.")
+    print(
+        "RIFT VALLEY WATCH V2 SCRIPT ENGINE COMPLETE."
+    )
 
 
 if __name__ == "__main__":
