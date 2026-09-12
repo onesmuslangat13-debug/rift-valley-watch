@@ -1,30 +1,22 @@
 # ============================================================
 # RIFT VALLEY WATCH
-# COMPLETE VIDEO GENERATOR
-#
-# Output:
-#   output/rift_valley_watch_reel.mp4
-#
-# Target:
-#   1080x1920
-#   H.264
-#   AAC
-#   ~35 seconds
-#   One verified story
-#   Real article image
-#   6 professional news scenes
+# rift_valley_main.py
+# COMPLETE REPLACEMENT
 # ============================================================
 
 import os
+import re
 import json
-import time
-import shutil
-import subprocess
+import html
+import hashlib
+import traceback
 from pathlib import Path
+from datetime import datetime, timezone, timedelta
+from urllib.parse import urlparse, urljoin, quote_plus
 
 import requests
-from PIL import Image, ImageDraw, ImageFont
-from gtts import gTTS
+import feedparser
+from bs4 import BeautifulSoup
 
 
 # ============================================================
@@ -32,175 +24,213 @@ from gtts import gTTS
 # ============================================================
 
 ROOT = Path(__file__).resolve().parent
-
 DATA_DIR = ROOT / "data"
 ASSETS_DIR = ROOT / "assets"
 SOURCE_DIR = ASSETS_DIR / "source"
 OUTPUT_DIR = ROOT / "output"
 
-STORY_FILE = DATA_DIR / "selected_story.json"
-SCRIPT_FILE = DATA_DIR / "selected_script.json"
+STORY_FILE = DATA_DIR / "story.json"
+SELECTED_STORY_FILE = DATA_DIR / "selected_story.json"
+SCRIPT_FILE = DATA_DIR / "script.json"
+SELECTED_SCRIPT_FILE = DATA_DIR / "selected_script.json"
 
 IMAGE_FILE = SOURCE_DIR / "story_image.jpg"
-AUDIO_FILE = OUTPUT_DIR / "narration.mp3"
+VIDEO_FILE = OUTPUT_DIR / "rift_valley_watch_reel.mp4"
 
-OUTPUT_FILE = OUTPUT_DIR / "rift_valley_watch_reel.mp4"
-
-SCENE_DIR = OUTPUT_DIR / "scenes"
-
-VISUAL_METADATA = DATA_DIR / "visual_metadata.json"
+REQUEST_TIMEOUT = 25
+MAX_AGE_HOURS = 72
 
 
 # ============================================================
-# VIDEO SETTINGS
+# HTTP
 # ============================================================
 
-WIDTH = 1080
-HEIGHT = 1920
-
-TARGET_DURATION = 35.0
-
-FPS = 30
-
-MIN_DURATION = 31.5
-MAX_DURATION = 38.5
-
-
-# ============================================================
-# COLORS
-# ============================================================
-
-BLACK = (8, 10, 14)
-WHITE = (255, 255, 255)
-LIGHT = (235, 238, 242)
-GRAY = (165, 170, 180)
-DARK_GRAY = (35, 39, 46)
-
-RED = (220, 35, 45)
-GOLD = (224, 173, 58)
-GREEN = (35, 170, 100)
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0 Safari/537.36"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,"
+        "application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
 
 # ============================================================
-# DIRECTORIES
+# COUNTIES
+# ============================================================
+
+COUNTIES = [
+    "Bomet",
+    "Kericho",
+    "Nakuru",
+    "Nandi",
+    "Uasin Gishu",
+    "Elgeyo-Marakwet",
+    "West Pokot",
+    "Narok",
+]
+
+ALIASES = {
+    "Bomet": [
+        "Bomet", "Chepalungu", "Sotik", "Konoin",
+        "Longisa", "Kaplong"
+    ],
+    "Kericho": [
+        "Kericho", "Ainamoi", "Belgut", "Bureti",
+        "Kipkelion", "Londiani", "Litein"
+    ],
+    "Nakuru": [
+        "Nakuru", "Naivasha", "Gilgil", "Molo",
+        "Njoro", "Bahati", "Rongai", "Subukia"
+    ],
+    "Nandi": [
+        "Nandi", "Kapsabet", "Mosop", "Aldai",
+        "Emgwen", "Chesumei", "Tindiret"
+    ],
+    "Uasin Gishu": [
+        "Uasin Gishu", "Eldoret", "Turbo", "Kesses",
+        "Soy", "Moiben", "Ainabkoi"
+    ],
+    "Elgeyo-Marakwet": [
+        "Elgeyo-Marakwet", "Iten", "Keiyo",
+        "Marakwet", "Keiyo South", "Keiyo North",
+        "Marakwet East", "Marakwet West"
+    ],
+    "West Pokot": [
+        "West Pokot", "Kapenguria", "Kacheliba",
+        "Pokot South", "Pokot Central", "Sigor"
+    ],
+    "Narok": [
+        "Narok", "Kilgoris", "Narok North",
+        "Narok South", "Transmara", "Emurua Dikirr"
+    ],
+}
+
+
+# ============================================================
+# SOURCES
+# ============================================================
+
+TRUSTED_DOMAINS = {
+    "citizen.digital",
+    "citizen.co.ke",
+    "nation.africa",
+    "standardmedia.co.ke",
+    "the-star.co.ke",
+    "peopledaily.digital",
+    "kenyanews.go.ke",
+    "capitalfm.co.ke",
+    "kbc.co.ke",
+    "ntvkenya.co.ke",
+    "tv47.digital",
+    "tuko.co.ke",
+    "businessdailyafrica.com",
+    "businessdailyafrica.co.ke",
+    "president.go.ke",
+    "deputypresident.go.ke",
+    "parliament.go.ke",
+    "kenyalaw.org",
+    "gov.ke",
+    "go.ke",
+}
+
+BLOCKED_DOMAINS = {
+    "facebook.com",
+    "instagram.com",
+    "youtube.com",
+    "tiktok.com",
+    "google.com",
+    "news.google.com",
+    "bing.com",
+    "r.bing.com",
+    "twitter.com",
+    "x.com",
+}
+
+BAD_PHRASES = [
+    "google news",
+    "news from around the web",
+    "facebook.com",
+    "instagram.com",
+    "youtube.com",
+    "tiktok.com",
+    "sign in to continue",
+    "log in to continue",
+    "cookie policy",
+    "privacy policy",
+    "subscribe to continue",
+    "javascript is disabled",
+]
+
+
+# ============================================================
+# BASIC HELPERS
 # ============================================================
 
 def ensure_directories():
-
-    DATA_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    SOURCE_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    OUTPUT_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    SCENE_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    SOURCE_DIR.mkdir(parents=True, exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
-# ============================================================
-# TEXT HELPERS
-# ============================================================
-
-def clean_text(value):
-
+def clean(value):
     if value is None:
         return ""
 
-    if isinstance(
-        value,
-        (dict, list),
-    ):
+    if isinstance(value, (dict, list)):
         return ""
 
-    return " ".join(
-        str(value)
-        .replace("\n", " ")
-        .split()
-    ).strip()
+    value = html.unescape(str(value))
+    value = re.sub(r"\s+", " ", value)
+
+    return value.strip()
 
 
-def first_nonempty(*values):
-
+def first(*values):
     for value in values:
-
-        value = clean_text(
-            value
-        )
-
+        value = clean(value)
         if value:
             return value
-
     return ""
 
 
-def shorten(text, maximum):
+def shorten(text, limit=400):
+    text = clean(text)
 
-    text = clean_text(
-        text
-    )
-
-    if len(text) <= maximum:
+    if len(text) <= limit:
         return text
 
-    value = text[:maximum]
+    text = text[:limit]
 
-    if " " in value:
-        value = value.rsplit(
-            " ",
-            1,
-        )[0]
+    if " " in text:
+        text = text.rsplit(" ", 1)[0]
 
-    return value.rstrip(
-        ".,;:"
-    ) + "..."
+    return text.rstrip(".,;:") + "..."
 
-
-# ============================================================
-# JSON
-# ============================================================
 
 def read_json(path):
-
     path = Path(path)
 
     if not path.exists():
         return {}
 
-    with open(
-        path,
-        "r",
-        encoding="utf-8",
-    ) as f:
-
-        return json.load(f)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as exc:
+        print("JSON read error:", path, exc)
+        return {}
 
 
 def write_json(path, data):
-
     path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
 
-    path.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    with open(
-        path,
-        "w",
-        encoding="utf-8",
-    ) as f:
-
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(
             data,
             f,
@@ -209,228 +239,252 @@ def write_json(path, data):
         )
 
 
-# ============================================================
-# FONTS
-# ============================================================
-
-def find_font(
-    size,
-    bold=False,
-):
-
-    candidates = []
-
-    if bold:
-
-        candidates.extend(
-            [
-                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-                "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
-            ]
+def fetch(url):
+    try:
+        response = requests.get(
+            url,
+            headers=HEADERS,
+            timeout=REQUEST_TIMEOUT,
+            allow_redirects=True,
         )
 
-    else:
+        if response.status_code >= 400:
+            return None
 
-        candidates.extend(
-            [
-                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-                "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-            ]
-        )
+        return response
 
-    candidates.extend(
-        [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        ]
+    except Exception as exc:
+        print("Request failed:", url, exc)
+        return None
+
+
+# ============================================================
+# URL HELPERS
+# ============================================================
+
+def normalize_url(url):
+    url = clean(url)
+
+    if url.startswith("//"):
+        url = "https:" + url
+
+    return url
+
+
+def domain(url):
+    try:
+        host = urlparse(normalize_url(url)).hostname or ""
+        host = host.lower()
+
+        if host.startswith("www."):
+            host = host[4:]
+
+        return host
+    except Exception:
+        return ""
+
+
+def blocked(url):
+    d = domain(url)
+
+    return (
+        d in BLOCKED_DOMAINS
+        or any(d.endswith("." + x) for x in BLOCKED_DOMAINS)
     )
 
-    for candidate in candidates:
 
-        if os.path.exists(
-            candidate
-        ):
+def trusted(url):
+    d = domain(url)
 
-            return ImageFont.truetype(
-                candidate,
-                size=size,
-            )
-
-    return ImageFont.load_default()
+    return (
+        d in TRUSTED_DOMAINS
+        or any(d.endswith("." + x) for x in TRUSTED_DOMAINS)
+    )
 
 
-FONT_HUGE = find_font(
-    82,
-    True,
-)
+def bad_text(text):
+    text = clean(text).lower()
 
-FONT_TITLE = find_font(
-    66,
-    True,
-)
+    return any(
+        phrase in text
+        for phrase in BAD_PHRASES
+    )
 
-FONT_SUBTITLE = find_font(
-    46,
-    True,
-)
 
-FONT_BODY = find_font(
-    39,
-    False,
-)
+# ============================================================
+# DATE
+# ============================================================
 
-FONT_BODY_BOLD = find_font(
-    40,
-    True,
-)
+def parse_date(value):
+    if not value:
+        return None
 
-FONT_SMALL = find_font(
-    30,
-    False,
-)
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
 
-FONT_SMALL_BOLD = find_font(
-    31,
-    True,
-)
+        return value.astimezone(timezone.utc)
 
-FONT_TINY = find_font(
-    25,
-    False,
-)
+    value = clean(value)
+
+    try:
+        return datetime.fromisoformat(
+            value.replace("Z", "+00:00")
+        ).astimezone(timezone.utc)
+    except Exception:
+        pass
+
+    formats = [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d",
+        "%d %b %Y %H:%M",
+        "%d %B %Y %H:%M",
+        "%a, %d %b %Y %H:%M:%S %z",
+    ]
+
+    for fmt in formats:
+        try:
+            result = datetime.strptime(value, fmt)
+
+            if result.tzinfo is None:
+                result = result.replace(
+                    tzinfo=timezone.utc
+                )
+
+            return result.astimezone(timezone.utc)
+
+        except Exception:
+            pass
+
+    return None
+
+
+def recent(value):
+    parsed = parse_date(value)
+
+    if parsed is None:
+        return False
+
+    return (
+        datetime.now(timezone.utc) - parsed
+        <= timedelta(hours=MAX_AGE_HOURS)
+    )
+
+
+# ============================================================
+# COUNTY
+# ============================================================
+
+def detect_county(text):
+    text = clean(text).lower()
+
+    for county in COUNTIES:
+        if county.lower() in text:
+            return county
+
+    for county, names in ALIASES.items():
+        for name in names:
+            if name.lower() in text:
+                return county
+
+    return ""
 
 
 # ============================================================
 # IMAGE VALIDATION
 # ============================================================
 
-def validate_image_file(
-    path
-):
+def valid_image(path):
+    if not path:
+        return False
 
     path = Path(path)
 
     if not path.exists():
         return False
 
-    if path.stat().st_size < 5000:
-        return False
-
     try:
+        if path.stat().st_size < 5000:
+            return False
 
-        with Image.open(
-            path
-        ) as image:
+        from PIL import Image
+
+        with Image.open(path) as image:
+            width, height = image.size
+
+            if width < 400 or height < 250:
+                return False
 
             image.verify()
 
         return True
 
     except Exception:
-
         return False
 
 
-# ============================================================
-# IMAGE DOWNLOAD
-# ============================================================
+def bad_image_url(url):
+    url = normalize_url(url)
 
-def download_image(
-    image_url
-):
+    if not url or blocked(url):
+        return True
 
-    if not image_url:
+    value = url.lower()
 
-        raise RuntimeError(
-            "No article image URL was provided."
-        )
-
-    blocked_terms = [
-        "google",
-        "facebook",
-        "instagram",
-        "youtube",
-        "tiktok",
+    bad = [
         "favicon",
         "placeholder",
         "avatar",
+        "google-news",
+        "google_news",
+        "facebook-icon",
+        "youtube-icon",
+        "instagram-icon",
+        "tiktok-icon",
     ]
 
-    url_low = image_url.lower()
+    return any(x in value for x in bad)
 
-    if any(
-        term in url_low
-        for term in blocked_terms
+
+def download_image(url):
+    if bad_image_url(url):
+        return False
+
+    response = fetch(url)
+
+    if response is None:
+        return False
+
+    raw = response.content
+    content_type = response.headers.get(
+        "content-type", ""
+    ).lower()
+
+    if (
+        "image" not in content_type
+        and not raw.startswith(b"\xff\xd8")
+        and not raw.startswith(b"\x89PNG")
+        and not raw.startswith(b"RIFF")
     ):
-
-        raise RuntimeError(
-            f"Rejected platform/logo image: {image_url}"
-        )
-
-    headers = {
-        "User-Agent":
-            "Mozilla/5.0 "
-            "(Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 "
-            "Chrome/120 Safari/537.36",
-    }
-
-    print()
-    print(
-        "Downloading real article image..."
-    )
+        return False
 
     try:
-
-        response = requests.get(
-            image_url,
-            headers=headers,
-            timeout=30,
-            allow_redirects=True,
-        )
-
-        response.raise_for_status()
-
-    except Exception as exc:
-
-        raise RuntimeError(
-            f"Image download failed: {exc}"
-        )
-
-    final_url = response.url
-
-    final_low = final_url.lower()
-
-    if any(
-        term in final_low
-        for term in blocked_terms
-    ):
-
-        raise RuntimeError(
-            f"Image redirected to blocked platform: "
-            f"{final_url}"
-        )
-
-    try:
-
         from io import BytesIO
+        from PIL import Image
 
         image = Image.open(
-            BytesIO(
-                response.content
-            )
-        )
+            BytesIO(raw)
+        ).convert("RGB")
 
         width, height = image.size
 
         if width < 400 or height < 250:
+            return False
 
-            raise RuntimeError(
-                f"Article image too small: "
-                f"{width}x{height}"
-            )
-
-        image = image.convert(
-            "RGB"
+        IMAGE_FILE.parent.mkdir(
+            parents=True,
+            exist_ok=True,
         )
 
         image.save(
@@ -439,1475 +493,1171 @@ def download_image(
             quality=95,
         )
 
+        if valid_image(IMAGE_FILE):
+            print("REAL ARTICLE IMAGE:", IMAGE_FILE)
+            return True
+
     except Exception as exc:
+        print("Image conversion failed:", exc)
 
-        raise RuntimeError(
-            f"Downloaded image is invalid: {exc}"
-        )
-
-    print(
-        f"REAL ARTICLE IMAGE SAVED: {IMAGE_FILE}"
-    )
-
-    return IMAGE_FILE
+    return False
 
 
 # ============================================================
-# IMAGE PREPARATION
+# IMAGE EXTRACTION
 # ============================================================
 
-def prepare_image():
-
-    if not validate_image_file(
-        IMAGE_FILE
-    ):
-
-        raise RuntimeError(
-            "No valid article image exists at "
-            f"{IMAGE_FILE}"
-        )
-
-    image = Image.open(
-        IMAGE_FILE
-    ).convert(
-        "RGB"
-    )
-
-    source_width, source_height = image.size
-
-    target_ratio = (
-        WIDTH / HEIGHT
-    )
-
-    source_ratio = (
-        source_width / source_height
-    )
-
-    if source_ratio > target_ratio:
-
-        new_height = HEIGHT
-
-        new_width = int(
-            source_width
-            * HEIGHT
-            / source_height
-        )
-
-    else:
-
-        new_width = WIDTH
-
-        new_height = int(
-            source_height
-            * WIDTH
-            / source_width
-        )
-
-    image = image.resize(
-        (
-            new_width,
-            new_height,
-        ),
-        Image.Resampling.LANCZOS,
-    )
-
-    left = (
-        new_width - WIDTH
-    ) // 2
-
-    top = (
-        new_height - HEIGHT
-    ) // 2
-
-    image = image.crop(
-        (
-            left,
-            top,
-            left + WIDTH,
-            top + HEIGHT,
-        )
-    )
-
-    prepared = SOURCE_DIR / "prepared_story_image.jpg"
-
-    image.save(
-        prepared,
-        "JPEG",
-        quality=94,
-    )
-
-    return prepared
-
-
-# ============================================================
-# TEXT WRAPPING
-# ============================================================
-
-def wrap_text(
-    draw,
-    text,
-    font,
-    max_width,
-):
-
-    words = clean_text(
-        text
-    ).split()
-
-    lines = []
-
-    current = ""
-
-    for word in words:
-
-        test = (
-            word
-            if not current
-            else current + " " + word
-        )
-
-        bbox = draw.textbbox(
-            (0, 0),
-            test,
-            font=font,
-        )
-
-        width = (
-            bbox[2] - bbox[0]
-        )
-
-        if width <= max_width:
-
-            current = test
-
-        else:
-
-            if current:
-                lines.append(
-                    current
-                )
-
-            current = word
-
-    if current:
-        lines.append(
-            current
-        )
-
-    return lines
-
-
-def draw_wrapped_text(
-    draw,
-    text,
-    x,
-    y,
-    font,
-    fill,
-    max_width,
-    line_spacing=12,
-):
-
-    lines = wrap_text(
-        draw,
-        text,
-        font,
-        max_width,
-    )
-
-    current_y = y
-
-    for line in lines:
-
-        draw.text(
-            (
-                x,
-                current_y,
-            ),
-            line,
-            font=font,
-            fill=fill,
-        )
-
-        bbox = draw.textbbox(
-            (x, current_y),
-            line,
-            font=font,
-        )
-
-        height = (
-            bbox[3] - bbox[1]
-        )
-
-        current_y += (
-            height
-            + line_spacing
-        )
-
-    return current_y
-
-
-# ============================================================
-# BASE SCENE
-# ============================================================
-
-def base_scene(
-    background
-):
-
-    image = background.copy()
-
-    draw = ImageDraw.Draw(
-        image
-    )
-
-    # Top broadcast bar
-    draw.rectangle(
-        (
-            0,
-            0,
-            WIDTH,
-            150,
-        ),
-        fill=BLACK,
-    )
-
-    draw.rectangle(
-        (
-            0,
-            145,
-            WIDTH,
-            152,
-        ),
-        fill=RED,
-    )
-
-    draw.text(
-        (
-            60,
-            42,
-        ),
-        "RIFT VALLEY WATCH",
-        font=FONT_SMALL_BOLD,
-        fill=WHITE,
-    )
-
-    draw.text(
-        (
-            60,
-            88,
-        ),
-        "REGIONAL NEWS",
-        font=FONT_TINY,
-        fill=GRAY,
-    )
-
-    return image, draw
-
-
-# ============================================================
-# BOTTOM PANEL
-# ============================================================
-
-def bottom_panel(
-    draw,
-    height=680,
-):
-
-    top = HEIGHT - height
-
-    draw.rectangle(
-        (
-            0,
-            top,
-            WIDTH,
-            HEIGHT,
-        ),
-        fill=BLACK,
-    )
-
-    draw.rectangle(
-        (
-            0,
-            top,
-            14,
-            HEIGHT,
-        ),
-        fill=RED,
-    )
-
-    return top
-
-
-# ============================================================
-# SCENE 1
-# ============================================================
-
-def create_title_scene(
-    background,
-    story,
-):
-
-    image, draw = base_scene(
-        background
-    )
-
-    draw.rectangle(
-        (
-            0,
-            150,
-            WIDTH,
-            HEIGHT,
-        ),
-        fill=None,
-    )
-
-    # Dark lower overlay
-    top = bottom_panel(
-        draw,
-        760,
-    )
-
-    draw.text(
-        (
-            60,
-            top + 55,
-        ),
-        "BREAKING REGIONAL UPDATE",
-        font=FONT_SMALL_BOLD,
-        fill=RED,
-    )
-
-    title = first_nonempty(
-        story.get("title"),
-        "Regional Update",
-    )
-
-    draw_wrapped_text(
-        draw,
-        title,
-        60,
-        top + 115,
-        FONT_TITLE,
-        WHITE,
-        WIDTH - 120,
-        15,
-    )
-
-    county = first_nonempty(
-        story.get("county"),
-        "Rift Valley",
-    )
-
-    draw.text(
-        (
-            60,
-            HEIGHT - 120,
-        ),
-        county.upper(),
-        font=FONT_SMALL_BOLD,
-        fill=GOLD,
-    )
-
-    return image
-
-
-# ============================================================
-# SCENE 2
-# ============================================================
-
-def create_context_scene(
-    background,
-    story,
-):
-
-    image, draw = base_scene(
-        background
-    )
-
-    top = bottom_panel(
-        draw,
-        800,
-    )
-
-    draw.text(
-        (
-            60,
-            top + 55,
-        ),
-        "WHERE IT HAPPENED",
-        font=FONT_SMALL_BOLD,
-        fill=GOLD,
-    )
-
-    county = first_nonempty(
-        story.get("county"),
-        "Rift Valley",
-    )
-
-    location = first_nonempty(
-        story.get("location"),
-        story.get("area"),
-        county,
-    )
-
-    draw.text(
-        (
-            60,
-            top + 125,
-        ),
-        county.upper(),
-        font=FONT_HUGE,
-        fill=WHITE,
-    )
-
-    draw_wrapped_text(
-        draw,
-        location,
-        60,
-        top + 235,
-        FONT_SUBTITLE,
-        LIGHT,
-        WIDTH - 120,
-        12,
-    )
-
-    summary = first_nonempty(
-        story.get("summary"),
-        story.get("description"),
-    )
-
-    draw_wrapped_text(
-        draw,
-        shorten(summary, 420),
-        60,
-        top + 370,
-        FONT_BODY,
-        WHITE,
-        WIDTH - 120,
-        12,
-    )
-
-    return image
-
-
-# ============================================================
-# SCENE 3
-# ============================================================
-
-def create_facts_scene(
-    background,
-    story,
-):
-
-    image, draw = base_scene(
-        background
-    )
-
-    top = bottom_panel(
-        draw,
-        820,
-    )
-
-    draw.text(
-        (
-            60,
-            top + 55,
-        ),
-        "KEY FACTS",
-        font=FONT_SMALL_BOLD,
-        fill=RED,
-    )
-
-    facts = story.get(
-        "verified_facts"
-    )
-
-    if isinstance(
-        facts,
-        dict,
-    ):
-
-        fact_list = []
-
-        for key, value in facts.items():
-
-            value = clean_text(
-                value
-            )
+def image_candidates(soup, base_url):
+    result = []
+
+    selectors = [
+        ("meta", {"property": "og:image"}),
+        ("meta", {"name": "twitter:image"}),
+        ("meta", {"property": "twitter:image"}),
+    ]
+
+    for tag_name, attrs in selectors:
+        for tag in soup.find_all(
+            tag_name,
+            attrs=attrs,
+        ):
+            value = tag.get("content")
 
             if value:
-                fact_list.append(
-                    f"{key}: {value}"
+                result.append(
+                    urljoin(base_url, value)
                 )
 
-    elif isinstance(
-        facts,
-        list,
-    ):
+    for image in soup.find_all("img"):
+        for attr in [
+            "src",
+            "data-src",
+            "data-original",
+            "data-lazy-src",
+            "data-image",
+        ]:
+            value = image.get(attr)
 
-        fact_list = [
-            clean_text(x)
-            for x in facts
-            if clean_text(x)
-        ]
+            if value:
+                result.append(
+                    urljoin(base_url, value)
+                )
 
-    else:
+    unique = []
+    seen = set()
 
-        fact_list = []
+    for url in result:
+        url = normalize_url(url)
 
-    if not fact_list:
+        if url and url not in seen:
+            seen.add(url)
+            unique.append(url)
 
-        fact_list = [
-            first_nonempty(
-                story.get("summary"),
-                "Verified regional development.",
+    return unique
+
+
+def recover_from_article(url):
+    response = fetch(url)
+
+    if response is None:
+        return ""
+
+    try:
+        soup = BeautifulSoup(
+            response.text,
+            "html.parser",
+        )
+
+        for candidate in image_candidates(
+            soup,
+            response.url,
+        ):
+            if download_image(candidate):
+                return candidate
+
+    except Exception as exc:
+        print(
+            "Article image recovery failed:",
+            exc,
+        )
+
+    return ""
+
+
+# ============================================================
+# CRITICAL IMAGE RECOVERY
+# ============================================================
+
+def recover_image(story):
+    story = story or {}
+
+    # 1. Existing local image
+    local_candidates = [
+        IMAGE_FILE,
+        SOURCE_DIR / "prepared_story_image.jpg",
+        ASSETS_DIR / "story_image.jpg",
+        ROOT / "story_image.jpg",
+    ]
+
+    for path in local_candidates:
+        if valid_image(path):
+
+            if Path(path).resolve() != IMAGE_FILE.resolve():
+                try:
+                    import shutil
+                    shutil.copy2(path, IMAGE_FILE)
+                except Exception:
+                    continue
+
+            if valid_image(IMAGE_FILE):
+                print(
+                    "IMAGE RECOVERY: existing local image"
+                )
+                story["local_image"] = str(
+                    IMAGE_FILE
+                )
+                return str(IMAGE_FILE)
+
+    # 2. URL fields
+    urls = [
+        story.get("image"),
+        story.get("image_url"),
+        story.get("imageUrl"),
+        story.get("featured_image"),
+        story.get("featuredImage"),
+        story.get("thumbnail"),
+    ]
+
+    for url in urls:
+        url = clean(url)
+
+        if url and download_image(url):
+            story["image"] = url
+            story["local_image"] = str(
+                IMAGE_FILE
             )
-        ]
+            return str(IMAGE_FILE)
 
-    y = top + 125
+    # 3. Article page
+    article_url = first(
+        story.get("source_url"),
+        story.get("url"),
+        story.get("link"),
+    )
 
-    for index, fact in enumerate(
-        fact_list[:4],
-        start=1,
-    ):
-
-        draw.ellipse(
-            (
-                60,
-                y + 7,
-                90,
-                y + 37,
-            ),
-            fill=RED,
+    if article_url:
+        image_url = recover_from_article(
+            article_url
         )
 
-        draw.text(
-            (
-                69,
-                y + 4,
-            ),
-            str(index),
-            font=FONT_TINY,
-            fill=WHITE,
-        )
-
-        y = draw_wrapped_text(
-            draw,
-            shorten(
-                fact,
-                240,
-            ),
-            120,
-            y,
-            FONT_BODY,
-            WHITE,
-            WIDTH - 180,
-            10,
-        )
-
-        y += 30
-
-    return image
-
-
-# ============================================================
-# SCENE 4
-# ============================================================
-
-def create_details_scene(
-    background,
-    story,
-):
-
-    image, draw = base_scene(
-        background
-    )
-
-    top = bottom_panel(
-        draw,
-        800,
-    )
-
-    draw.text(
-        (
-            60,
-            top + 55,
-        ),
-        "PROJECT / DEVELOPMENT DETAILS",
-        font=FONT_SMALL_BOLD,
-        fill=GOLD,
-    )
-
-    title = first_nonempty(
-        story.get("title"),
-        "Regional Development",
-    )
-
-    draw_wrapped_text(
-        draw,
-        title,
-        60,
-        top + 125,
-        FONT_SUBTITLE,
-        WHITE,
-        WIDTH - 120,
-        12,
-    )
-
-    details = []
-
-    for key in [
-        "amount",
-        "value",
-        "budget",
-        "cost",
-        "distance",
-        "length",
-        "project",
-        "route",
-        "location",
-        "area",
-    ]:
-
-        value = clean_text(
-            story.get(key)
-        )
-
-        if value:
-            details.append(
-                value
+        if image_url:
+            story["image"] = image_url
+            story["local_image"] = str(
+                IMAGE_FILE
             )
+            return str(IMAGE_FILE)
 
-    if not details:
-
-        details = [
-            shorten(
-                first_nonempty(
-                    story.get("summary"),
-                    story.get("description"),
-                ),
-                500,
-            )
-        ]
-
-    y = top + 300
-
-    for detail in details[:4]:
-
-        draw.rectangle(
-            (
-                60,
-                y,
-                1020,
-                y + 105,
-            ),
-            fill=DARK_GRAY,
-        )
-
-        draw_wrapped_text(
-            draw,
-            detail,
-            90,
-            y + 24,
-            FONT_BODY,
-            WHITE,
-            900,
-            8,
-        )
-
-        y += 125
-
-    return image
+    return ""
 
 
 # ============================================================
-# SCENE 5
+# STORY QUALITY
 # ============================================================
 
-def create_statement_scene(
-    background,
-    story,
-):
+def confirmed(story):
+    if story.get("confirmed") is True:
+        return True
 
-    image, draw = base_scene(
-        background
-    )
+    if story.get("verified") is True:
+        return True
 
-    top = bottom_panel(
-        draw,
-        820,
-    )
+    editorial = story.get("editorial")
 
-    draw.text(
-        (
-            60,
-            top + 55,
-        ),
-        "OFFICIAL STATEMENT",
-        font=FONT_SMALL_BOLD,
-        fill=RED,
-    )
+    if isinstance(editorial, dict):
+        if editorial.get("confirmed") is True:
+            return True
 
-    statement = first_nonempty(
+    facts = story.get("verified_facts")
+
+    if isinstance(facts, list) and facts:
+        return True
+
+    if isinstance(facts, dict) and facts:
+        return True
+
+    statement = first(
         story.get("official_statement"),
         story.get("official_quote"),
         story.get("statement"),
     )
 
-    if not statement:
+    return len(statement) >= 30
 
-        statement = (
-            "Officials have confirmed "
-            "the reported development."
-        )
 
-    draw_wrapped_text(
-        draw,
-        "“"
-        + shorten(
-            statement,
-            520,
-        )
-        + "”",
-        60,
-        top + 140,
-        FONT_SUBTITLE,
-        WHITE,
-        WIDTH - 120,
-        15,
+def quality_gate(story):
+    if not isinstance(story, dict):
+        return False
+
+    title = first(
+        story.get("title"),
+        story.get("headline"),
     )
 
-    speaker = first_nonempty(
-        story.get("official_source"),
-        story.get("speaker"),
-        story.get("quoted_person"),
+    summary = first(
+        story.get("summary"),
+        story.get("description"),
+        story.get("content"),
     )
 
-    if speaker:
+    url = first(
+        story.get("source_url"),
+        story.get("url"),
+        story.get("link"),
+    )
 
-        draw.text(
-            (
-                60,
-                HEIGHT - 170,
-            ),
-            "— "
-            + shorten(
-                speaker,
-                80,
-            ),
-            font=FONT_SMALL_BOLD,
-            fill=GOLD,
+    county = first(
+        story.get("county")
+    )
+
+    if not county:
+        county = detect_county(
+            title + " " + summary
         )
 
-    return image
+        if county:
+            story["county"] = county
+
+    if len(title) < 20:
+        return False
+
+    if len(summary) < 60:
+        return False
+
+    if title.lower() in {
+        "google news",
+        "news",
+        "latest news",
+    }:
+        return False
+
+    if bad_text(
+        title + " " + summary
+    ):
+        return False
+
+    if not county:
+        return False
+
+    if url and blocked(url):
+        return False
+
+    if not confirmed(story):
+        return False
+
+    return True
 
 
 # ============================================================
-# SCENE 6
+# EXISTING STRUCTURED STORY
 # ============================================================
 
-def create_source_scene(
-    background,
-    story,
-):
+def load_structured_story():
+    files = [
+        STORY_FILE,
+        DATA_DIR / "verified_story.json",
+        DATA_DIR / "verified_story_data.json",
+        DATA_DIR / "stories.json",
+    ]
 
-    image, draw = base_scene(
-        background
+    best = None
+    best_score = -1
+
+    for path in files:
+        data = read_json(path)
+
+        if not data:
+            continue
+
+        records = []
+
+        if isinstance(data, dict):
+            if isinstance(
+                data.get("stories"),
+                list,
+            ):
+                records = data["stories"]
+            else:
+                records = [data]
+
+        elif isinstance(data, list):
+            records = data
+
+        for story in records:
+            if not isinstance(story, dict):
+                continue
+
+            if not quality_gate(story):
+                continue
+
+            score = 100
+
+            if story.get("verified"):
+                score += 40
+
+            if story.get("verified_facts"):
+                score += 30
+
+            if story.get("official_statement"):
+                score += 30
+
+            if trusted(
+                first(
+                    story.get("source_url"),
+                    story.get("url"),
+                )
+            ):
+                score += 30
+
+            if recover_image(story):
+                score += 40
+
+            if score > best_score:
+                best = dict(story)
+                best_score = score
+
+    return best
+
+
+# ============================================================
+# RSS
+# ============================================================
+
+RSS_FEEDS = [
+    (
+        "People Daily",
+        "https://peopledaily.digital/feed",
+    ),
+    (
+        "Nation",
+        "https://nation.africa/kenya/rss.xml",
+    ),
+    (
+        "Citizen Digital",
+        "https://citizen.digital/feed",
+    ),
+    (
+        "The Star",
+        "https://www.the-star.co.ke/rss",
+    ),
+    (
+        "Capital FM",
+        "https://www.capitalfm.co.ke/news/feed/",
+    ),
+    (
+        "KBC",
+        "https://www.kbc.co.ke/feed/",
+    ),
+]
+
+
+def rss_candidates():
+    result = []
+
+    for source_name, feed_url in RSS_FEEDS:
+        print("Checking:", source_name)
+
+        try:
+            response = fetch(feed_url)
+
+            if response is None:
+                continue
+
+            feed = feedparser.parse(
+                response.content
+            )
+
+            for entry in feed.entries[:40]:
+                title = clean(
+                    entry.get("title")
+                )
+
+                link = clean(
+                    entry.get("link")
+                )
+
+                summary = clean(
+                    entry.get("summary")
+                )
+
+                if not title or not link:
+                    continue
+
+                if blocked(link):
+                    continue
+
+                county = detect_county(
+                    title + " " + summary
+                )
+
+                if not county:
+                    continue
+
+                result.append(
+                    {
+                        "title": title,
+                        "summary": summary,
+                        "source_name": source_name,
+                        "source_url": link,
+                        "published": first(
+                            entry.get("published"),
+                            entry.get("updated"),
+                        ),
+                        "county": county,
+                    }
+                )
+
+        except Exception as exc:
+            print(
+                "RSS error:",
+                source_name,
+                exc,
+            )
+
+    return result
+
+
+# ============================================================
+# GOOGLE NEWS DISCOVERY
+# GOOGLE IS NEVER TREATED AS THE SOURCE
+# ============================================================
+
+def google_candidates():
+    result = []
+
+    for county in COUNTIES:
+        query = (
+            f'"{county}" Kenya '
+            f'after:{datetime.now().strftime("%Y-%m-%d")}'
+        )
+
+        url = (
+            "https://news.google.com/rss/search?"
+            f"q={quote_plus(query)}"
+            "&hl=en-KE&gl=KE&ceid=KE:en"
+        )
+
+        try:
+            feed = feedparser.parse(url)
+
+            for entry in feed.entries[:10]:
+                title = clean(
+                    entry.get("title")
+                )
+
+                link = clean(
+                    entry.get("link")
+                )
+
+                summary = clean(
+                    entry.get("summary")
+                )
+
+                if not title or not link:
+                    continue
+
+                if title.lower() == "google news":
+                    continue
+
+                county_found = detect_county(
+                    title + " " + summary
+                ) or county
+
+                result.append(
+                    {
+                        "title": title,
+                        "summary": summary,
+                        "source_url": link,
+                        "source_name": "",
+                        "published": first(
+                            entry.get("published"),
+                            entry.get("updated"),
+                        ),
+                        "county": county_found,
+                    }
+                )
+
+        except Exception as exc:
+            print(
+                "Google discovery error:",
+                county,
+                exc,
+            )
+
+    return result
+
+
+# ============================================================
+# ARTICLE VERIFICATION
+# ============================================================
+
+def article_text(soup):
+    for tag in soup(
+        [
+            "script",
+            "style",
+            "noscript",
+            "svg",
+            "nav",
+            "footer",
+            "header",
+        ]
+    ):
+        tag.decompose()
+
+    return clean(
+        soup.get_text(
+            " ",
+            strip=True,
+        )
     )
 
-    top = bottom_panel(
-        draw,
-        780,
+
+def verify_candidate(candidate):
+    url = first(
+        candidate.get("source_url"),
+        candidate.get("url"),
+        candidate.get("link"),
     )
 
-    draw.text(
-        (
-            60,
-            top + 60,
+    if not url:
+        return None
+
+    response = fetch(url)
+
+    if response is None:
+        return None
+
+    final_url = response.url
+
+    if blocked(final_url):
+        return None
+
+    try:
+        soup = BeautifulSoup(
+            response.text,
+            "html.parser",
+        )
+    except Exception:
+        return None
+
+    title = first(
+        candidate.get("title"),
+        soup.title.get_text(
+            strip=True
+        ) if soup.title else "",
+    )
+
+    description_tag = soup.find(
+        "meta",
+        attrs={
+            "name": "description"
+        },
+    )
+
+    description = ""
+
+    if description_tag:
+        description = clean(
+            description_tag.get("content")
+        )
+
+    summary = first(
+        candidate.get("summary"),
+        description,
+    )
+
+    text = article_text(soup)
+
+    if len(text) < 300:
+        return None
+
+    if bad_text(
+        title + " " + summary
+    ):
+        return None
+
+    county = first(
+        candidate.get("county"),
+        detect_county(
+            title + " " + summary + " " + text[:3000]
         ),
-        "SOURCE",
-        font=FONT_SMALL_BOLD,
-        fill=GOLD,
     )
 
-    source = first_nonempty(
+    if not county:
+        return None
+
+    image = ""
+
+    for image_url in image_candidates(
+        soup,
+        final_url,
+    ):
+        if download_image(image_url):
+            image = image_url
+            break
+
+    if not valid_image(IMAGE_FILE):
+        return None
+
+    result = {
+        "title": title,
+        "summary": shorten(
+            summary,
+            800,
+        ),
+        "description": shorten(
+            text,
+            1500,
+        ),
+        "source_name": first(
+            candidate.get("source_name"),
+            domain(final_url),
+        ),
+        "source_url": final_url,
+        "source_domain": domain(final_url),
+        "published": first(
+            candidate.get("published"),
+            candidate.get("date"),
+        ),
+        "county": county,
+        "image": image,
+        "local_image": str(IMAGE_FILE),
+        "verified": trusted(final_url),
+        "verified_facts": [],
+        "editorial": {
+            "confirmed": trusted(final_url)
+        },
+    }
+
+    if not result["verified"]:
+        return None
+
+    return result
+
+
+# ============================================================
+# SCORE
+# ============================================================
+
+def score(story):
+    value = 0
+
+    if trusted(
+        story.get("source_url", "")
+    ):
+        value += 50
+
+    if story.get("verified"):
+        value += 50
+
+    if story.get("verified_facts"):
+        value += 30
+
+    if story.get("official_statement"):
+        value += 30
+
+    if valid_image(
+        story.get("local_image", "")
+    ):
+        value += 40
+
+    if len(
+        story.get("summary", "")
+    ) > 150:
+        value += 20
+
+    if bad_text(
+        story.get("title", "")
+        + " "
+        + story.get("summary", "")
+    ):
+        value -= 300
+
+    return value
+
+
+# ============================================================
+# SELECT STORY
+# ============================================================
+
+def select_story():
+    print()
+    print("=" * 60)
+    print("STORY SELECTION")
+    print("=" * 60)
+
+    # FIRST: use properly structured verified story
+    structured = load_structured_story()
+
+    if structured:
+        print(
+            "Using existing structured verified story:"
+        )
+        print(
+            structured.get("title")
+        )
+
+        if recover_image(structured):
+            structured["score"] = (
+                score(structured) + 200
+            )
+
+            return structured
+
+    # SECOND: collect fresh stories
+    candidates = (
+        rss_candidates()
+        + google_candidates()
+    )
+
+    # Deduplicate
+    unique = []
+    seen = set()
+
+    for item in candidates:
+        key = hashlib.sha1(
+            (
+                clean(item.get("title"))
+                + "|"
+                + clean(item.get("source_url"))
+            ).encode("utf-8")
+        ).hexdigest()
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        unique.append(item)
+
+    print(
+        "Candidates:",
+        len(unique)
+    )
+
+    verified = []
+
+    for item in unique:
+        print(
+            "Checking:",
+            shorten(
+                item.get("title"),
+                160,
+            )
+        )
+
+        try:
+            story = verify_candidate(
+                item
+            )
+
+            if not story:
+                continue
+
+            if story.get("published"):
+                if not recent(
+                    story.get("published")
+                ):
+                    continue
+
+            if not quality_gate(
+                story
+            ):
+                continue
+
+            if not recover_image(
+                story
+            ):
+                continue
+
+            story["score"] = score(
+                story
+            )
+
+            verified.append(
+                story
+            )
+
+        except Exception as exc:
+            print(
+                "Candidate failed:",
+                exc,
+            )
+
+    if not verified:
+        raise RuntimeError(
+            "No recent story passed verification "
+            "after checking available sources."
+        )
+
+    verified.sort(
+        key=lambda x: x.get(
+            "score",
+            0,
+        ),
+        reverse=True,
+    )
+
+    selected = verified[0]
+
+    print()
+    print("=" * 60)
+    print("SELECTED STORY")
+    print("=" * 60)
+    print(
+        "Title:",
+        selected.get("title"),
+    )
+    print(
+        "County:",
+        selected.get("county"),
+    )
+    print(
+        "Source:",
+        selected.get("source_name"),
+    )
+    print(
+        "Image:",
+        selected.get("local_image"),
+    )
+    print("=" * 60)
+
+    return selected
+
+
+# ============================================================
+# NORMALIZE
+# ============================================================
+
+def normalize_story(story):
+    story = dict(story)
+
+    story["title"] = first(
+        story.get("title"),
+        story.get("headline"),
+    )
+
+    story["summary"] = first(
+        story.get("summary"),
+        story.get("description"),
+    )
+
+    story["source_url"] = first(
+        story.get("source_url"),
+        story.get("url"),
+        story.get("link"),
+    )
+
+    story["source_name"] = first(
         story.get("source_name"),
         story.get("publisher"),
-        story.get("source"),
+        domain(
+            story.get("source_url")
+        ),
         "Verified report",
     )
 
-    # NEVER render raw URL.
-    draw_wrapped_text(
-        draw,
-        source,
-        60,
-        top + 145,
-        FONT_HUGE,
-        WHITE,
-        WIDTH - 120,
-        15,
-    )
-
-    county = first_nonempty(
+    story["county"] = first(
         story.get("county"),
-        "Rift Valley",
+        detect_county(
+            story["title"]
+            + " "
+            + story["summary"]
+        ),
     )
 
-    draw.text(
-        (
-            60,
-            top + 330,
-        ),
-        county,
-        font=FONT_SUBTITLE,
-        fill=LIGHT,
+    image = recover_image(
+        story
     )
 
-    draw.text(
-        (
-            60,
-            HEIGHT - 180,
-        ),
-        "RIFT VALLEY WATCH",
-        font=FONT_SMALL_BOLD,
-        fill=RED,
+    if not image:
+        raise RuntimeError(
+            "Selected story has no usable article image."
+        )
+
+    story["local_image"] = str(
+        IMAGE_FILE
     )
 
-    draw.text(
-        (
-            60,
-            HEIGHT - 125,
-        ),
-        "Verified regional reporting",
-        font=FONT_SMALL,
-        fill=GRAY,
-    )
+    story["verified"] = True
 
-    return image
-
-
-# ============================================================
-# SCENE CREATION
-# ============================================================
-
-def create_scenes(
-    background,
-    story,
-):
-
-    scenes = [
-        create_title_scene(
-            background,
-            story,
-        ),
-
-        create_context_scene(
-            background,
-            story,
-        ),
-
-        create_facts_scene(
-            background,
-            story,
-        ),
-
-        create_details_scene(
-            background,
-            story,
-        ),
-
-        create_statement_scene(
-            background,
-            story,
-        ),
-
-        create_source_scene(
-            background,
-            story,
-        ),
-    ]
-
-    paths = []
-
-    for index, scene in enumerate(
-        scenes,
-        start=1,
+    if not isinstance(
+        story.get("editorial"),
+        dict,
     ):
+        story["editorial"] = {}
 
-        path = (
-            SCENE_DIR
-            / f"scene_{index:02d}.jpg"
+    story["editorial"]["confirmed"] = True
+    story["editorial"]["one_story_reel"] = True
+
+    return story
+
+
+# ============================================================
+# VIDEO VALIDATION
+# ============================================================
+
+def validate_story_for_video(story):
+    if not isinstance(
+        story,
+        dict,
+    ):
+        raise RuntimeError(
+            "Selected story is invalid."
         )
 
-        scene.save(
-            path,
-            "JPEG",
-            quality=94,
+    if len(
+        first(story.get("title"))
+    ) < 15:
+        raise RuntimeError(
+            "Story has no usable title."
         )
 
-        paths.append(
-            path
+    if not first(
+        story.get("summary")
+    ):
+        raise RuntimeError(
+            "Story has no usable summary."
         )
 
-    return paths
+    if not first(
+        story.get("county")
+    ):
+        raise RuntimeError(
+            "Story has no county."
+        )
+
+    image = recover_image(
+        story
+    )
+
+    if not image:
+        raise RuntimeError(
+            "No usable article image URL or "
+            "local article image was provided."
+        )
+
+    if not valid_image(image):
+        raise RuntimeError(
+            "Recovered article image failed validation."
+        )
+
+    story["local_image"] = str(
+        IMAGE_FILE
+    )
+
+    return True
 
 
 # ============================================================
 # NARRATION
 # ============================================================
 
-def build_narration(
-    story,
-    script,
-):
-
-    narration = first_nonempty(
-        script.get("narration"),
-        story.get("narration"),
+def build_narration(story):
+    title = first(
+        story.get("title"),
+        "Regional update",
     )
 
-    if not narration:
+    county = first(
+        story.get("county"),
+        "the Rift Valley",
+    )
 
-        title = first_nonempty(
-            story.get("title"),
-            "Regional update",
-        )
-
-        county = first_nonempty(
-            story.get("county"),
-            "the Rift Valley",
-        )
-
-        summary = first_nonempty(
+    summary = shorten(
+        first(
             story.get("summary"),
             story.get("description"),
-        )
-
-        narration = (
-            f"Here is the latest verified "
-            f"update from {county}. "
-            f"{title}. "
-            f"{summary}. "
-            f"Rift Valley Watch will continue "
-            f"tracking verified developments "
-            f"across the region."
-        )
-
-    # Remove bad legacy attribution.
-    banned_phrases = [
-        "this is a county news story",
-        "reported by facebook.com",
-        "reported by facebook",
-        "google news",
-        "news from around the web",
-    ]
-
-    low = narration.lower()
-
-    for phrase in banned_phrases:
-
-        if phrase in low:
-
-            narration = narration.replace(
-                phrase,
-                "",
-            )
-
-            narration = narration.replace(
-                phrase.title(),
-                "",
-            )
-
-    narration = clean_text(
-        narration
+        ),
+        500,
     )
 
-    return narration
+    statement = shorten(
+        first(
+            story.get("official_statement"),
+            story.get("official_quote"),
+        ),
+        250,
+    )
+
+    speaker = first(
+        story.get("official_source"),
+        story.get("speaker"),
+        story.get("quoted_person"),
+    )
+
+    parts = [
+        f"Here is the latest verified update from {county}.",
+        title,
+    ]
+
+    if summary:
+        parts.append(summary)
+
+    if statement:
+        if speaker:
+            parts.append(
+                f"{speaker} said {statement}"
+            )
+        else:
+            parts.append(
+                f"Officials said {statement}"
+            )
+
+    parts.append(
+        "Rift Valley Watch will continue "
+        "tracking verified developments across the region."
+    )
+
+    narration = clean(
+        " ".join(parts)
+    )
+
+    for phrase in [
+        "Google News",
+        "google news",
+        "Facebook",
+        "facebook",
+        "Instagram",
+        "instagram",
+        "YouTube",
+        "youtube",
+        "TikTok",
+        "tiktok",
+    ]:
+        narration = narration.replace(
+            phrase,
+            "",
+        )
+
+    return clean(narration)
 
 
 # ============================================================
-# AUDIO
+# SCRIPT
 # ============================================================
 
-def create_audio(
-    narration
-):
+def build_script(story):
+    narration = build_narration(
+        story
+    )
 
     if not narration:
-
         raise RuntimeError(
-            "No narration was provided."
+            "No narration was generated."
         )
 
-    print()
-    print(
-        "Creating narration..."
+    return {
+        "project": "Rift Valley Watch",
+        "title": story["title"],
+        "county": story["county"],
+        "source_name": story["source_name"],
+        "source_url": story["source_url"],
+        "image": story.get("image", ""),
+        "local_image": story["local_image"],
+        "narration": narration,
+        "duration_target": 35,
+        "one_story": True,
+    }
+
+
+# ============================================================
+# GENERATE VIDEO
+# ============================================================
+
+def generate_video(story):
+    validate_story_for_video(
+        story
     )
 
-    temp_audio = OUTPUT_DIR / (
-        "narration_temp.mp3"
+    script = build_script(
+        story
+    )
+
+    write_json(
+        STORY_FILE,
+        story,
+    )
+
+    write_json(
+        SELECTED_STORY_FILE,
+        story,
+    )
+
+    write_json(
+        SCRIPT_FILE,
+        script,
+    )
+
+    write_json(
+        SELECTED_SCRIPT_FILE,
+        script,
+    )
+
+    print()
+    print("=" * 60)
+    print("VIDEO GENERATION")
+    print("=" * 60)
+    print(
+        "Image:",
+        story["local_image"],
     )
 
     try:
-
-        tts = gTTS(
-            text=narration,
-            lang="en",
-            slow=False,
+        from rift_valley_video_generator import (
+            generate_video as video_generator
         )
-
-        tts.save(
-            str(temp_audio)
-        )
-
     except Exception as exc:
-
         raise RuntimeError(
-            f"gTTS failed: {exc}"
+            "Could not import "
+            "rift_valley_video_generator.py: "
+            + str(exc)
         )
 
-    if not temp_audio.exists():
+    output = video_generator(
+        story,
+        script,
+    )
+
+    if output is None:
+        output = VIDEO_FILE
+
+    output = Path(output)
+
+    if not output.exists():
+        if VIDEO_FILE.exists():
+            output = VIDEO_FILE
+
+    if not output.exists():
         raise RuntimeError(
-            "Narration file was not created."
+            "Video generator completed but "
+            "no final MP4 was created."
         )
 
-    shutil.copy2(
-        temp_audio,
-        AUDIO_FILE,
-    )
-
-    print(
-        f"Narration saved: {AUDIO_FILE}"
-    )
-
-    return AUDIO_FILE
+    return output
 
 
 # ============================================================
-# AUDIO DURATION
+# FINAL MP4 QC
 # ============================================================
 
-def get_duration(
-    path
-):
+def final_video_qc(path):
+    import subprocess
 
-    command = [
-        "ffprobe",
-        "-v",
-        "error",
-        "-show_entries",
-        "format=duration",
-        "-of",
-        "default=noprint_wrappers=1:nokey=1",
-        str(path),
-    ]
-
-    result = subprocess.run(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-
-    if result.returncode != 0:
-        return 0.0
-
-    try:
-        return float(
-            result.stdout.strip()
-        )
-
-    except Exception:
-        return 0.0
-
-
-# ============================================================
-# SCENE VIDEO
-# ============================================================
-
-def create_silent_video(
-    scene_paths,
-    duration,
-):
-
-    print()
-    print(
-        "Creating six-scene video..."
-    )
-
-    # Six scenes.
-    # Slightly different durations prevent the reel from
-    # feeling like a static slide deck.
-
-    weights = [
-        1.10,
-        1.00,
-        1.00,
-        1.00,
-        0.95,
-        0.95,
-    ]
-
-    total_weight = sum(
-        weights
-    )
-
-    durations = [
-        duration
-        * weight
-        / total_weight
-        for weight in weights
-    ]
-
-    concat_file = OUTPUT_DIR / (
-        "scenes_concat.txt"
-    )
-
-    with open(
-        concat_file,
-        "w",
-        encoding="utf-8",
-    ) as f:
-
-        for path, scene_duration in zip(
-            scene_paths,
-            durations,
-        ):
-
-            f.write(
-                f"file '{path.resolve()}'\n"
-            )
-
-            f.write(
-                f"duration {scene_duration:.3f}\n"
-            )
-
-        # FFmpeg concat requires the final file
-        # to be repeated.
-        f.write(
-            f"file '{scene_paths[-1].resolve()}'\n"
-        )
-
-    silent_video = OUTPUT_DIR / (
-        "silent_video.mp4"
-    )
-
-    command = [
-        "ffmpeg",
-        "-y",
-        "-f",
-        "concat",
-        "-safe",
-        "0",
-        "-i",
-        str(concat_file),
-        "-vf",
-        (
-            f"scale={WIDTH}:{HEIGHT}:"
-            "force_original_aspect_ratio=decrease,"
-            f"pad={WIDTH}:{HEIGHT}:"
-            "(ow-iw)/2:(oh-ih)/2"
-        ),
-        "-r",
-        str(FPS),
-        "-c:v",
-        "libx264",
-        "-preset",
-        "medium",
-        "-crf",
-        "19",
-        "-pix_fmt",
-        "yuv420p",
-        "-movflags",
-        "+faststart",
-        str(silent_video),
-    ]
-
-    result = subprocess.run(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-
-    if result.returncode != 0:
-
-        print(
-            result.stderr[-5000:]
-        )
-
-        raise RuntimeError(
-            "FFmpeg failed while creating "
-            "the silent video."
-        )
-
-    return silent_video
-
-
-# ============================================================
-# COMBINE AUDIO
-# ============================================================
-
-def combine_video_audio(
-    silent_video,
-    audio,
-):
-
-    print()
-    print(
-        "Combining video and narration..."
-    )
-
-    command = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        str(silent_video),
-        "-i",
-        str(audio),
-        "-filter_complex",
-        (
-            "[1:a]"
-            "loudnorm="
-            "I=-16:"
-            "TP=-1.5:"
-            "LRA=11"
-            "[audio]"
-        ),
-        "-map",
-        "0:v:0",
-        "-map",
-        "[audio]",
-        "-c:v",
-        "copy",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "128k",
-        "-ar",
-        "44100",
-        "-shortest",
-        "-movflags",
-        "+faststart",
-        str(OUTPUT_FILE),
-    ]
-
-    result = subprocess.run(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-
-    if result.returncode != 0:
-
-        print(
-            result.stderr[-6000:]
-        )
-
-        raise RuntimeError(
-            "FFmpeg failed while combining "
-            "video and audio."
-        )
-
-    if not OUTPUT_FILE.exists():
-
-        raise RuntimeError(
-            "Final MP4 was not created."
-        )
-
-    return OUTPUT_FILE
-
-
-# ============================================================
-# EXTEND VIDEO TO TARGET
-# ============================================================
-
-def enforce_target_duration(
-    video_path,
-    target_duration,
-):
-
-    current = get_duration(
-        video_path
-    )
-
-    if current <= 0:
-        raise RuntimeError(
-            "Unable to determine generated video duration."
-        )
-
-    # Within acceptable range.
-    if (
-        MIN_DURATION
-        <= current
-        <= MAX_DURATION
-    ):
-        return video_path
-
-    print(
-        f"Duration before correction: "
-        f"{current:.2f}s"
-    )
-
-    corrected = OUTPUT_DIR / (
-        "corrected_duration.mp4"
-    )
-
-    # If video is too short, use a video filter to slow it
-    # slightly. This is preferable to producing a 17-second
-    # reel when the target is approximately 35 seconds.
-    if current < MIN_DURATION:
-
-        speed = (
-            current
-            / target_duration
-        )
-
-        speed = max(
-            0.45,
-            min(
-                speed,
-                0.98,
-            ),
-        )
-
-        video_filter = (
-            f"setpts={1/speed:.6f}*PTS"
-        )
-
-        command = [
-            "ffmpeg",
-            "-y",
-            "-i",
-            str(video_path),
-            "-filter:v",
-            video_filter,
-            "-an",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "medium",
-            "-crf",
-            "19",
-            "-pix_fmt",
-            "yuv420p",
-            str(corrected),
-        ]
-
-    else:
-
-        # Too long: trim to target.
-        command = [
-            "ffmpeg",
-            "-y",
-            "-i",
-            str(video_path),
-            "-t",
-            str(target_duration),
-            "-an",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "medium",
-            "-crf",
-            "19",
-            "-pix_fmt",
-            "yuv420p",
-            str(corrected),
-        ]
-
-    result = subprocess.run(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-
-    if result.returncode != 0:
-
-        print(
-            result.stderr[-5000:]
-        )
-
-        raise RuntimeError(
-            "Duration correction failed."
-        )
-
-    if not corrected.exists():
-
-        raise RuntimeError(
-            "Duration-corrected video was not created."
-        )
-
-    # Recombine audio if correction removed it.
-    final_corrected = OUTPUT_DIR / (
-        "final_corrected.mp4"
-    )
-
-    command = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        str(corrected),
-        "-i",
-        str(AUDIO_FILE),
-        "-map",
-        "0:v:0",
-        "-map",
-        "1:a:0",
-        "-c:v",
-        "copy",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "128k",
-        "-shortest",
-        "-movflags",
-        "+faststart",
-        str(final_corrected),
-    ]
-
-    result = subprocess.run(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-
-    if result.returncode != 0:
-
-        print(
-            result.stderr[-5000:]
-        )
-
-        raise RuntimeError(
-            "Failed to restore narration after "
-            "duration correction."
-        )
-
-    shutil.copy2(
-        final_corrected,
-        OUTPUT_FILE,
-    )
-
-    return OUTPUT_FILE
-
-
-# ============================================================
-# FINAL VALIDATION
-# ============================================================
-
-def validate_video(
-    path
-):
+    path = Path(path)
 
     if not path.exists():
-
         raise RuntimeError(
-            f"Final video missing: {path}"
+            "Final MP4 does not exist."
         )
 
     command = [
@@ -1929,76 +1679,50 @@ def validate_video(
     )
 
     if result.returncode != 0:
-
         raise RuntimeError(
-            "ffprobe could not inspect the final MP4."
+            "ffprobe failed."
         )
 
-    try:
-
-        data = json.loads(
-            result.stdout
-        )
-
-    except Exception:
-
-        raise RuntimeError(
-            "Invalid ffprobe response."
-        )
-
-    streams = data.get(
-        "streams",
-        [],
+    data = json.loads(
+        result.stdout
     )
 
     video = None
     audio = None
 
-    for stream in streams:
-
-        if stream.get(
-            "codec_type"
-        ) == "video":
-
+    for stream in data.get(
+        "streams",
+        [],
+    ):
+        if stream.get("codec_type") == "video":
             video = stream
 
-        elif stream.get(
-            "codec_type"
-        ) == "audio":
-
+        if stream.get("codec_type") == "audio":
             audio = stream
 
     if video is None:
-
         raise RuntimeError(
-            "Final MP4 contains no video stream."
+            "Final MP4 has no video stream."
         )
 
     if audio is None:
-
         raise RuntimeError(
-            "Final MP4 contains no audio stream."
+            "Final MP4 has no audio stream."
         )
 
     width = int(
-        video.get(
-            "width",
-            0,
-        )
+        video.get("width", 0)
     )
 
     height = int(
-        video.get(
-            "height",
-            0,
-        )
+        video.get("height", 0)
     )
 
-    codec = video.get(
+    vcodec = video.get(
         "codec_name"
     )
 
-    audio_codec = audio.get(
+    acodec = audio.get(
         "codec_name"
     )
 
@@ -2012,487 +1736,127 @@ def validate_video(
         )
     )
 
-    if width != WIDTH:
-
+    if width != 1080:
         raise RuntimeError(
             f"Wrong width: {width}"
         )
 
-    if height != HEIGHT:
-
+    if height != 1920:
         raise RuntimeError(
             f"Wrong height: {height}"
         )
 
-    if codec != "h264":
-
+    if vcodec != "h264":
         raise RuntimeError(
-            f"Wrong video codec: {codec}"
+            f"Wrong video codec: {vcodec}"
         )
 
-    if audio_codec != "aac":
-
+    if acodec != "aac":
         raise RuntimeError(
-            f"Wrong audio codec: {audio_codec}"
+            f"Wrong audio codec: {acodec}"
         )
 
-    if duration < MIN_DURATION:
-
+    if duration < 31.5:
         raise RuntimeError(
-            f"FINAL VIDEO TOO SHORT: "
-            f"{duration:.2f}s. "
-            f"Required at least {MIN_DURATION}s."
+            f"Video too short: {duration:.2f}s"
         )
 
-    if duration > MAX_DURATION:
-
+    if duration > 38.5:
         raise RuntimeError(
-            f"FINAL VIDEO TOO LONG: "
-            f"{duration:.2f}s. "
-            f"Maximum {MAX_DURATION}s."
+            f"Video too long: {duration:.2f}s"
         )
 
     print()
-    print(
-        "============================================================"
-    )
-    print(
-        "FINAL VIDEO QC PASSED"
-    )
-    print(
-        "============================================================"
-    )
-
+    print("=" * 60)
+    print("FINAL VIDEO QC PASSED")
+    print("=" * 60)
     print(
         f"Resolution: {width}x{height}"
     )
-
     print(
-        f"Duration:   {duration:.2f}s"
+        f"Duration: {duration:.2f}s"
     )
-
     print(
-        f"Video:      {codec}"
+        f"Video: {vcodec}"
     )
-
     print(
-        f"Audio:      {audio_codec}"
+        f"Audio: {acodec}"
     )
-
     print(
-        f"File size:  "
-        f"{path.stat().st_size / 1024 / 1024:.2f} MB"
+        f"MP4: {path}"
     )
-
-    print(
-        "============================================================"
-    )
-
-    return {
-        "duration": round(
-            duration,
-            2,
-        ),
-        "width": width,
-        "height": height,
-        "video_codec": codec,
-        "audio_codec": audio_codec,
-        "size_mb": round(
-            path.stat().st_size
-            / 1024
-            / 1024,
-            2,
-        ),
-    }
+    print("=" * 60)
 
 
 # ============================================================
-# VISUAL METADATA
+# MAIN
 # ============================================================
 
-def save_visual_metadata(
-    story,
-    scene_paths,
-    video_info,
-):
-
-    metadata = {
-        "project": "Rift Valley Watch",
-        "title": story.get(
-            "title"
-        ),
-        "county": story.get(
-            "county"
-        ),
-        "source": first_nonempty(
-            story.get("source_name"),
-            story.get("source"),
-            "Verified report",
-        ),
-        "source_url": story.get(
-            "source_url"
-        ),
-        "image_url": story.get(
-            "image"
-        ),
-        "image_file": str(
-            IMAGE_FILE
-        ),
-        "scene_count": len(
-            scene_paths
-        ),
-        "scenes": [
-            {
-                "scene": index + 1,
-                "file": str(path),
-            }
-            for index, path in enumerate(
-                scene_paths
-            )
-        ],
-        "duration_target": TARGET_DURATION,
-        "video": video_info,
-    }
-
-    write_json(
-        VISUAL_METADATA,
-        metadata,
-    )
-
-
-# ============================================================
-# MAIN GENERATOR
-# ============================================================
-
-def generate_video(
-    story,
-    script=None,
-):
-
+def main():
     ensure_directories()
 
-    story = dict(
-        story or {}
+    print()
+    print("=" * 60)
+    print("RIFT VALLEY WATCH")
+    print("AUTOMATED VERIFIED NEWS REEL")
+    print("=" * 60)
+
+    story = select_story()
+
+    if not story:
+        raise RuntimeError(
+            "No story selected."
+        )
+
+    story = normalize_story(
+        story
     )
 
-    script = dict(
-        script or {}
+    validate_story_for_video(
+        story
+    )
+
+    video = generate_video(
+        story
+    )
+
+    final_video_qc(
+        video
     )
 
     print()
+    print("=" * 60)
+    print("RIFT VALLEY WATCH COMPLETE")
+    print("=" * 60)
     print(
-        "============================================================"
-    )
-    print(
-        "RIFT VALLEY WATCH VIDEO GENERATOR"
-    )
-    print(
-        "============================================================"
-    )
-
-    # --------------------------------------------------------
-    # IMAGE RECOVERY
-    # --------------------------------------------------------
-
-    image_url = first_nonempty(
-        story.get("image"),
-        story.get("image_url"),
-        story.get("imageUrl"),
-        story.get("featured_image"),
-        story.get("thumbnail"),
-        script.get("image"),
-        script.get("image_url"),
-    )
-
-    local_image = first_nonempty(
-        story.get("local_image"),
-        script.get("local_image"),
-    )
-
-    if local_image:
-
-        local_path = Path(
-            local_image
-        )
-
-        if (
-            local_path.exists()
-            and validate_image_file(
-                local_path
-            )
-        ):
-
-            print()
-            print(
-                "IMAGE RECOVERY"
-            )
-
-            print(
-                "Using existing verified local article image:"
-            )
-
-            print(
-                local_path
-            )
-
-            if (
-                local_path.resolve()
-                != IMAGE_FILE.resolve()
-            ):
-
-                shutil.copy2(
-                    local_path,
-                    IMAGE_FILE,
-                )
-
-    if not validate_image_file(
-        IMAGE_FILE
-    ):
-
-        if image_url:
-
-            download_image(
-                image_url
-            )
-
-        else:
-
-            raise RuntimeError(
-                "No usable article image URL "
-                "or local article image was provided."
-            )
-
-    # --------------------------------------------------------
-    # PREPARE IMAGE
-    # --------------------------------------------------------
-
-    prepared_image = prepare_image()
-
-    background = Image.open(
-        prepared_image
-    ).convert(
-        "RGB"
-    )
-
-    # --------------------------------------------------------
-    # NARRATION
-    # --------------------------------------------------------
-
-    narration = build_narration(
-        story,
-        script,
-    )
-
-    if not narration:
-
-        raise RuntimeError(
-            "No narration was provided."
-        )
-
-    # --------------------------------------------------------
-    # AUDIO
-    # --------------------------------------------------------
-
-    create_audio(
-        narration
-    )
-
-    audio_duration = get_duration(
-        AUDIO_FILE
-    )
-
-    if audio_duration <= 0:
-
-        raise RuntimeError(
-            "Could not determine narration duration."
-        )
-
-    print(
-        f"Narration duration: "
-        f"{audio_duration:.2f}s"
-    )
-
-    # --------------------------------------------------------
-    # TARGET VIDEO DURATION
-    #
-    # We deliberately target 35 seconds instead of simply
-    # accepting the narration length. This prevents the old
-    # ~17-second output problem.
-    # --------------------------------------------------------
-
-    render_duration = TARGET_DURATION
-
-    # --------------------------------------------------------
-    # SCENES
-    # --------------------------------------------------------
-
-    scene_paths = create_scenes(
-        background,
-        story,
-    )
-
-    if len(scene_paths) != 6:
-
-        raise RuntimeError(
-            "Exactly six scenes are required."
-        )
-
-    print(
-        f"Created {len(scene_paths)} scenes."
-    )
-
-    # --------------------------------------------------------
-    # SILENT VIDEO
-    # --------------------------------------------------------
-
-    silent_video = create_silent_video(
-        scene_paths,
-        render_duration,
-    )
-
-    # --------------------------------------------------------
-    # COMBINE AUDIO
-    # --------------------------------------------------------
-
-    combine_video_audio(
-        silent_video,
-        AUDIO_FILE,
-    )
-
-    # --------------------------------------------------------
-    # DURATION CORRECTION
-    # --------------------------------------------------------
-
-    enforce_target_duration(
-        OUTPUT_FILE,
-        TARGET_DURATION,
-    )
-
-    # --------------------------------------------------------
-    # FINAL QC
-    # --------------------------------------------------------
-
-    video_info = validate_video(
-        OUTPUT_FILE
-    )
-
-    # --------------------------------------------------------
-    # METADATA
-    # --------------------------------------------------------
-
-    save_visual_metadata(
-        story,
-        scene_paths,
-        video_info,
-    )
-
-    # --------------------------------------------------------
-    # SUCCESS
-    # --------------------------------------------------------
-
-    print()
-    print(
-        "============================================================"
+        "Story:",
+        story["title"],
     )
     print(
-        "VIDEO GENERATION COMPLETE"
+        "County:",
+        story["county"],
     )
     print(
-        "============================================================"
+        "Source:",
+        story["source_name"],
     )
-
     print(
-        f"Title: "
-        f"{story.get('title', 'Regional Update')}"
+        "Image:",
+        story["local_image"],
     )
-
     print(
-        f"County: "
-        f"{story.get('county', 'Rift Valley')}"
+        "MP4:",
+        video,
     )
-
     print(
-        f"Image: "
-        f"{IMAGE_FILE}"
+        "YouTube upload: DISABLED"
     )
-
     print(
-        f"Output: "
-        f"{OUTPUT_FILE}"
+        "STATUS: SUCCESS"
     )
+    print("=" * 60)
 
-    print(
-        f"Duration: "
-        f"{video_info['duration']} seconds"
-    )
-
-    print(
-        "Status: SUCCESS"
-    )
-
-    print(
-        "============================================================"
-    )
-
-    return OUTPUT_FILE
-
-
-# ============================================================
-# STANDALONE MODE
-# ============================================================
-
-def standalone():
-
-    ensure_directories()
-
-    story = read_json(
-        STORY_FILE
-    )
-
-    script = read_json(
-        SCRIPT_FILE
-    )
-
-    # Prefer selected story.
-    if not story:
-
-        fallback = DATA_DIR / "story.json"
-
-        story = read_json(
-            fallback
-        )
-
-    if not script:
-
-        fallback = DATA_DIR / "script.json"
-
-        script = read_json(
-            fallback
-        )
-
-    if not story:
-
-        raise RuntimeError(
-            "No story JSON was found."
-        )
-
-    # Recover local image automatically.
-    if not story.get(
-        "local_image"
-    ):
-
-        if validate_image_file(
-            IMAGE_FILE
-        ):
-
-            story["local_image"] = str(
-                IMAGE_FILE
-            )
-
-    return generate_video(
-        story,
-        script,
-    )
+    return video
 
 
 # ============================================================
@@ -2500,32 +1864,20 @@ def standalone():
 # ============================================================
 
 if __name__ == "__main__":
-
     try:
-
-        standalone()
+        main()
 
     except Exception as exc:
-
         print()
+        print("=" * 60)
+        print("RIFT VALLEY WATCH FAILED")
+        print("=" * 60)
         print(
-            "============================================================"
+            type(exc).__name__ + ":",
+            str(exc),
         )
+        print("=" * 60)
 
-        print(
-            "RIFT VALLEY WATCH VIDEO GENERATOR FAILED"
-        )
-
-        print(
-            "============================================================"
-        )
-
-        print(
-            f"{type(exc).__name__}: {exc}"
-        )
-
-        print(
-            "============================================================"
-        )
+        traceback.print_exc()
 
         raise
