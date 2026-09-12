@@ -1,9 +1,9 @@
 import json
 import re
 import html
+import time
 from pathlib import Path
 from urllib.parse import urlparse, urljoin, quote_plus
-
 import requests
 import xml.etree.ElementTree as ET
 
@@ -11,21 +11,28 @@ from rift_valley_video_generator import generate_video
 
 
 # ============================================================
-# PATHS
+# RIFT VALLEY WATCH — NEWS ENGINE V9
+# ============================================================
+# Purpose:
+#   1. Find recent Rift Valley stories
+#   2. Resolve Google News stories to real publisher articles
+#   3. Verify the article
+#   4. Extract a REAL article image
+#   5. If article image is unavailable, search for a real image
+#      associated with the exact story/publisher
+#   6. Build story.json
+#   7. Generate the MP4 through rift_valley_video_generator.py
+#
+# Counties:
+#   Bomet, Kericho, Nakuru, Nandi, Uasin Gishu,
+#   Elgeyo-Marakwet, West Pokot, Narok
+#
+# No YouTube upload.
 # ============================================================
 
-BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data"
-OUTPUT_DIR = BASE_DIR / "output"
-
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-STORY_FILE = DATA_DIR / "story.json"
-
 
 # ============================================================
-# RIFT VALLEY COUNTIES
+# CONFIGURATION
 # ============================================================
 
 COUNTIES = [
@@ -39,408 +46,340 @@ COUNTIES = [
     "Narok",
 ]
 
-
-# ============================================================
-# STORY KEYWORDS
-# ============================================================
-
 KEYWORDS = [
-    "project",
+    "Bomet",
+    "Kericho",
+    "Nakuru",
+    "Nandi",
+    "Uasin Gishu",
+    "Eldoret",
+    "Elgeyo-Marakwet",
+    "Iten",
+    "West Pokot",
+    "Kapenguria",
+    "Narok",
+    "Kilgoris",
     "road",
+    "roads",
     "hospital",
     "school",
+    "university",
+    "market",
+    "dam",
     "water",
-    "jobs",
-    "investment",
-    "funding",
-    "billion",
-    "million",
-    "county",
-    "government",
-    "governor",
-    "president",
-    "minister",
+    "project",
     "development",
-    "agriculture",
-    "tourism",
-    "education",
-    "health",
-    "infrastructure",
-    "trade",
-    "manufacturing",
-    "farmers",
-    "construction",
-    "economy",
-    "business",
+    "county government",
+    "governor",
+    "MP",
+    "senator",
+    "president",
+    "deputy president",
+    "Kenya",
 ]
 
-
-# ============================================================
-# HTTP HEADERS
-# ============================================================
+RSS_URLS = [
+    "https://news.google.com/rss/search?q=Rift+Valley+Kenya&hl=en-KE&gl=KE&ceid=KE:en",
+    "https://news.google.com/rss/search?q=Bomet+Kenya&hl=en-KE&gl=KE&ceid=KE:en",
+    "https://news.google.com/rss/search?q=Kericho+Kenya&hl=en-KE&gl=KE&ceid=KE:en",
+    "https://news.google.com/rss/search?q=Nakuru+Kenya&hl=en-KE&gl=KE&ceid=KE:en",
+    "https://news.google.com/rss/search?q=Nandi+Kenya&hl=en-KE&gl=KE&ceid=KE:en",
+    "https://news.google.com/rss/search?q=Uasin+Gishu+Kenya&hl=en-KE&gl=KE&ceid=KE:en",
+    "https://news.google.com/rss/search?q=Elgeyo-Marakwet+Kenya&hl=en-KE&gl=KE&ceid=KE:en",
+    "https://news.google.com/rss/search?q=West+Pokot+Kenya&hl=en-KE&gl=KE:en",
+    "https://news.google.com/rss/search?q=Narok+Kenya&hl=en-KE&gl=KE:en",
+]
 
 HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 "
-        "(X11; Linux x86_64) "
-        "AppleWebKit/537.36 "
-        "(KHTML, like Gecko) "
-        "Chrome/120.0 Safari/537.36 "
-        "RiftValleyWatch/8.0"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 Chrome/126.0 Safari/537.36"
     ),
-    "Accept": (
-        "text/html,application/xhtml+xml,"
-        "application/xml;q=0.9,image/avif,image/webp,"
-        "*/*;q=0.8"
-    ),
-    "Accept-Language": "en-KE,en;q=0.9",
+    "Accept-Language": "en-US,en;q=0.9",
 }
 
+TIMEOUT = 20
 
-# ============================================================
-# BLOCKED DOMAINS
-# ============================================================
+OUTPUT_DIR = Path("output")
+DATA_DIR = Path("data")
+SOURCE_DIR = Path("assets/source")
 
-BLOCKED_FINAL_DOMAINS = {
+STORY_FILE = DATA_DIR / "story.json"
+
+BLOCKED_DOMAINS = {
     "facebook.com",
-    "m.facebook.com",
-    "instagram.com",
-    "youtube.com",
-    "youtu.be",
-    "tiktok.com",
-    "x.com",
+    "www.facebook.com",
     "twitter.com",
+    "x.com",
+    "www.x.com",
+    "youtube.com",
+    "www.youtube.com",
+    "instagram.com",
+    "www.instagram.com",
+    "tiktok.com",
+    "www.tiktok.com",
+    "linkedin.com",
+    "www.linkedin.com",
+    "pinterest.com",
+    "www.pinterest.com",
 }
-
-
-GOOGLE_NEWS_DOMAINS = {
-    "news.google.com",
-}
-
 
 SEARCH_ENGINE_DOMAINS = {
     "google.com",
+    "www.google.com",
+    "google.co.ke",
+    "www.google.co.ke",
     "bing.com",
-    "yahoo.com",
-    "search.yahoo.com",
+    "www.bing.com",
+    "news.google.com",
     "duckduckgo.com",
+    "www.duckduckgo.com",
+    "yahoo.com",
+    "www.yahoo.com",
 }
-
-
-# ============================================================
-# BLOCKED IMAGE TERMS
-# ============================================================
 
 BLOCKED_IMAGE_TERMS = [
     "logo",
-    "favicon",
     "icon",
-    "placeholder",
-    "default-image",
-    "default_image",
     "avatar",
-    "profile",
+    "favicon",
     "sprite",
-    "loading",
+    "placeholder",
+    "default",
     "blank",
-    "transparent",
+    "loading",
+    "advert",
+    "ads",
+    "banner-ad",
+    "pixel",
+    "tracking",
+    "emoji",
+    "profile",
 ]
 
 
 # ============================================================
-# TEXT CLEANING
+# SESSION
+# ============================================================
+
+SESSION = requests.Session()
+SESSION.headers.update(HEADERS)
+
+
+# ============================================================
+# BASIC HELPERS
 # ============================================================
 
 def clean_text(value):
-
     if not value:
         return ""
 
-    value = html.unescape(
-        str(value)
-    )
-
-    value = re.sub(
-        r"<[^>]+>",
-        " ",
-        value,
-    )
-
-    value = re.sub(
-        r"\s+",
-        " ",
-        value,
-    )
+    value = html.unescape(str(value))
+    value = re.sub(r"<script.*?</script>", " ", value, flags=re.I | re.S)
+    value = re.sub(r"<style.*?</style>", " ", value, flags=re.I | re.S)
+    value = re.sub(r"<[^>]+>", " ", value)
+    value = re.sub(r"\s+", " ", value)
 
     return value.strip()
 
 
-# ============================================================
-# DOMAIN HELPERS
-# ============================================================
+def normalize_text(value):
+    value = clean_text(value).lower()
+    value = re.sub(r"[^a-z0-9\s]", " ", value)
+    value = re.sub(r"\s+", " ", value)
+    return value.strip()
 
-def get_domain(url):
 
+def domain_of(url):
     try:
-
-        parsed = urlparse(
-            url
-        )
-
-        return (
-            parsed.netloc
-            .lower()
-            .split(":")[0]
-            .replace("www.", "")
-        )
-
+        return urlparse(url).netloc.lower().split(":")[0]
     except Exception:
-
         return ""
 
 
-def is_social_domain(url):
+def root_domain(url):
+    domain = domain_of(url)
 
-    domain = get_domain(
-        url
-    )
+    if domain.startswith("www."):
+        domain = domain[4:]
 
-    if not domain:
-        return False
+    parts = domain.split(".")
 
-    return any(
-        domain == blocked
-        or domain.endswith(
-            "." + blocked
-        )
-        for blocked in BLOCKED_FINAL_DOMAINS
-    )
+    if len(parts) >= 2:
+        return ".".join(parts[-2:])
+
+    return domain
 
 
-def is_google_news_url(url):
+def is_blocked_domain(url):
+    domain = domain_of(url)
 
-    domain = get_domain(
-        url
-    )
+    if domain in BLOCKED_DOMAINS:
+        return True
 
-    if not domain:
-        return False
+    if domain in SEARCH_ENGINE_DOMAINS:
+        return True
 
-    return (
-        domain == "news.google.com"
-        or domain.endswith(
-            ".news.google.com"
-        )
-    )
+    return False
 
 
-def is_search_engine_url(url):
+def same_domain(url1, url2):
+    return root_domain(url1) == root_domain(url2)
 
-    domain = get_domain(
-        url
-    )
 
-    if not domain:
-        return False
+def valid_http_url(url):
+    return bool(url and url.startswith(("http://", "https://")))
 
-    return (
-        domain in SEARCH_ENGINE_DOMAINS
-        or domain.endswith(
-            ".google.com"
-        )
-        or domain.endswith(
-            ".bing.com"
-        )
-        or domain.endswith(
-            ".yahoo.com"
-        )
-    )
+
+def make_absolute(base_url, value):
+    if not value:
+        return ""
+
+    value = html.unescape(value).strip()
+
+    if value.startswith("//"):
+        return "https:" + value
+
+    return urljoin(base_url, value)
 
 
 # ============================================================
-# RSS FETCH
+# RSS
 # ============================================================
 
-def fetch_rss(query):
-
-    url = (
-        "https://news.google.com/rss/search"
-    )
-
-    params = {
-        "q": query,
-        "hl": "en-KE",
-        "gl": "KE",
-        "ceid": "KE:en",
-    }
-
+def fetch_rss(url):
     try:
+        response = SESSION.get(url, timeout=TIMEOUT)
 
-        response = requests.get(
-            url,
-            params=params,
-            headers=HEADERS,
-            timeout=30,
-        )
+        if response.status_code != 200:
+            print(
+                f"RSS failed: HTTP {response.status_code} "
+                f"{url}"
+            )
+            return ""
 
-        response.raise_for_status()
-
-        return ET.fromstring(
-            response.content
-        )
+        return response.text
 
     except Exception as exc:
-
-        print(
-            f"RSS ERROR for [{query}]: {exc}"
-        )
-
-        return None
+        print(f"RSS exception: {exc}")
+        return ""
 
 
-# ============================================================
-# RSS IMAGE EXTRACTION
-# ============================================================
-
-def get_rss_media_image(item):
-
-    image_candidates = []
+def get_rss_media_image(item, raw_description=""):
+    candidates = []
 
     # --------------------------------------------------------
-    # MEDIA CONTENT / THUMBNAIL
+    # media/content/thumbnail elements
     # --------------------------------------------------------
 
-    for child in item.iter():
+    for element in item.iter():
 
-        tag = str(
-            child.tag
-        ).lower()
+        tag = element.tag
+
+        if not isinstance(tag, str):
+            continue
+
+        tag_lower = tag.lower()
 
         if (
-            tag.endswith("content")
-            or tag.endswith("thumbnail")
+            tag_lower.endswith("content")
+            or tag_lower.endswith("thumbnail")
+            or tag_lower.endswith("enclosure")
         ):
-
-            url = child.attrib.get(
+            for attr_name in [
                 "url",
-                "",
-            )
+                "href",
+                "src",
+                "media:url",
+            ]:
+                value = element.attrib.get(attr_name)
 
-            if url:
-
-                image_candidates.append(
-                    url.strip()
-                )
-
-    # --------------------------------------------------------
-    # RAW RSS DESCRIPTION HTML
-    # --------------------------------------------------------
-
-    raw_description = (
-        item.findtext(
-            "description",
-            "",
-        )
-        or ""
-    )
-
-    patterns = [
-        r'<img[^>]+src=["\']([^"\']+)["\']',
-        r'<img[^>]+data-src=["\']([^"\']+)["\']',
-        r'<img[^>]+data-original=["\']([^"\']+)["\']',
-        r'<img[^>]+data-lazy-src=["\']([^"\']+)["\']',
-    ]
-
-    for pattern in patterns:
-
-        matches = re.findall(
-            pattern,
-            raw_description,
-            flags=re.I | re.S,
-        )
-
-        for match in matches:
-
-            if match:
-
-                image_candidates.append(
-                    html.unescape(
-                        match.strip()
-                    )
-                )
+                if value:
+                    candidates.append(value)
 
     # --------------------------------------------------------
-    # FIRST USABLE UNIQUE IMAGE
+    # raw RSS HTML
     # --------------------------------------------------------
 
-    seen = set()
+    if raw_description:
 
-    for candidate in image_candidates:
+        patterns = [
+            r'<img[^>]+src=["\']([^"\']+)["\']',
+            r'<img[^>]+data-src=["\']([^"\']+)["\']',
+            r'<img[^>]+data-original=["\']([^"\']+)["\']',
+            r'<img[^>]+data-lazy-src=["\']([^"\']+)["\']',
+        ]
 
-        candidate = candidate.strip()
+        for pattern in patterns:
 
-        if not candidate:
-            continue
+            for match in re.findall(
+                pattern,
+                raw_description,
+                flags=re.I,
+            ):
+                candidates.append(match)
 
-        if candidate in seen:
-            continue
+    # --------------------------------------------------------
+    # clean
+    # --------------------------------------------------------
 
-        seen.add(
-            candidate
-        )
+    result = []
 
-        if not is_bad_image_url(
-            candidate
-        ):
+    for candidate in candidates:
 
-            return candidate
+        candidate = html.unescape(candidate).strip()
 
-    return ""
+        if candidate and candidate not in result:
+            result.append(candidate)
+
+    return result
 
 
-# ============================================================
-# RSS PARSER
-# ============================================================
-
-def parse_feed(root):
-
+def parse_feed(xml_text):
     stories = []
 
-    if root is None:
+    if not xml_text:
         return stories
 
-    channel = root.find(
-        "channel"
-    )
-
-    if channel is None:
+    try:
+        root = ET.fromstring(xml_text)
+    except Exception as exc:
+        print(f"RSS XML parse failed: {exc}")
         return stories
 
-    for item in channel.findall(
-        "item"
-    ):
+    for item in root.findall(".//item"):
 
         title = clean_text(
-            item.findtext(
-                "title",
-                "",
-            )
+            item.findtext("title", "")
         )
 
         link = clean_text(
-            item.findtext(
-                "link",
-                "",
-            )
+            item.findtext("link", "")
         )
 
-        # IMPORTANT:
-        # Preserve the original HTML.
-        raw_description = (
-            item.findtext(
-                "description",
-                "",
+        pub_date = clean_text(
+            item.findtext("pubDate", "")
+        )
+
+        source_el = item.find("source")
+
+        source_name = ""
+
+        source_url = ""
+
+        if source_el is not None:
+
+            source_name = clean_text(
+                source_el.text or ""
             )
+
+            source_url = (
+                source_el.attrib.get("url", "")
+                or ""
+            )
+
+        raw_description = (
+            item.findtext("description", "")
             or ""
         )
 
@@ -448,53 +387,21 @@ def parse_feed(root):
             raw_description
         )
 
-        pub_date = clean_text(
-            item.findtext(
-                "pubDate",
-                "",
-            )
+        image_candidates = get_rss_media_image(
+            item,
+            raw_description,
         )
-
-        source_element = item.find(
-            "source"
-        )
-
-        source = ""
-        source_url = ""
-
-        if source_element is not None:
-
-            source = clean_text(
-                source_element.text or ""
-            )
-
-            source_url = clean_text(
-                source_element.attrib.get(
-                    "url",
-                    "",
-                )
-            )
-
-        rss_image = get_rss_media_image(
-            item
-        )
-
-        if not title or not link:
-            continue
 
         stories.append(
             {
                 "title": title,
-                "url": link,
-                "summary": description,
-
-                # REAL RAW HTML
-                "raw_description": raw_description,
-
+                "link": link,
                 "published": pub_date,
-                "source": source,
+                "publisher": source_name,
                 "source_url": source_url,
-                "rss_image": rss_image,
+                "description": description,
+                "raw_description": raw_description,
+                "rss_image_candidates": image_candidates,
             }
         )
 
@@ -502,802 +409,670 @@ def parse_feed(root):
 
 
 # ============================================================
-# IMAGE URL VALIDATION
+# IMAGE VERIFICATION
 # ============================================================
 
-def is_bad_image_url(url):
-
-    if not url:
-        return True
-
-    lower = url.lower()
+def image_looks_bad(url):
+    lowered = url.lower()
 
     for term in BLOCKED_IMAGE_TERMS:
 
-        if term in lower:
+        if term in lowered:
             return True
 
     return False
 
 
-# ============================================================
-# IMAGE VALIDATION
-# ============================================================
+def verify_image(url):
+    """
+    Verify that URL points to an actual image.
 
-def verify_image(image_url):
+    We intentionally do NOT require Content-Length because
+    many legitimate image/CDN servers omit it.
 
-    if not image_url:
+    We accept:
+      - image/* Content-Type
+      - JPEG magic bytes
+      - PNG magic bytes
+      - GIF magic bytes
+      - WEBP magic bytes
+    """
+
+    if not valid_http_url(url):
         return False
 
-    if is_bad_image_url(
-        image_url
-    ):
+    if image_looks_bad(url):
         return False
 
     try:
 
-        response = requests.get(
-            image_url,
-            headers={
-                **HEADERS,
-                "Accept": (
-                    "image/avif,"
-                    "image/webp,"
-                    "image/apng,"
-                    "image/svg+xml,"
-                    "image/*,"
-                    "*/*;q=0.8"
-                ),
-            },
-            timeout=20,
+        response = SESSION.get(
+            url,
+            timeout=TIMEOUT,
             stream=True,
             allow_redirects=True,
         )
 
-        response.raise_for_status()
+        if response.status_code != 200:
+            return False
 
         content_type = (
             response.headers.get(
                 "Content-Type",
-                "",
-            )
-            .lower()
-            .split(";")[0]
-            .strip()
+                ""
+            ).lower()
         )
 
-        # ----------------------------------------------------
-        # NORMAL IMAGE RESPONSE
-        # ----------------------------------------------------
-
-        if content_type.startswith(
-            "image/"
-        ):
-
-            content_length = (
-                response.headers.get(
-                    "Content-Length"
-                )
-            )
-
-            if content_length:
-
-                try:
-
-                    if int(
-                        content_length
-                    ) < 3000:
-
-                        return False
-
-                except Exception:
-                    pass
-
+        if content_type.startswith("image/"):
             return True
 
-        # ----------------------------------------------------
-        # SERVERS SOMETIMES RETURN WRONG CONTENT-TYPE
-        # ----------------------------------------------------
-
-        first_chunk = next(
+        chunk = next(
             response.iter_content(
-                chunk_size=16384
+                chunk_size=8192
             ),
             b"",
         )
 
-        if not first_chunk:
+        if not chunk:
             return False
 
-        # JPEG
-        if first_chunk.startswith(
-            b"\xff\xd8\xff"
-        ):
-            return True
+        signatures = [
+            b"\xff\xd8\xff",       # JPEG
+            b"\x89PNG\r\n\x1a\n", # PNG
+            b"GIF87a",             # GIF
+            b"GIF89a",             # GIF
+            b"RIFF",               # WEBP container
+        ]
 
-        # PNG
-        if first_chunk.startswith(
-            b"\x89PNG"
-        ):
-            return True
+        for signature in signatures:
 
-        # GIF
-        if (
-            first_chunk.startswith(
-                b"GIF87a"
-            )
-            or first_chunk.startswith(
-                b"GIF89a"
-            )
-        ):
-            return True
-
-        # WEBP
-        if (
-            first_chunk.startswith(
-                b"RIFF"
-            )
-            and b"WEBP"
-            in first_chunk[:32]
-        ):
-            return True
+            if chunk.startswith(signature):
+                return True
 
         return False
+
+    except Exception:
+        return False
+
+
+def download_image(url, output_path):
+    """
+    Download a verified image for the video generator.
+    """
+
+    if not verify_image(url):
+        return False
+
+    try:
+
+        response = SESSION.get(
+            url,
+            timeout=TIMEOUT,
+            stream=True,
+        )
+
+        if response.status_code != 200:
+            return False
+
+        output_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        with open(output_path, "wb") as file:
+
+            total = 0
+
+            for chunk in response.iter_content(
+                chunk_size=8192
+            ):
+
+                if not chunk:
+                    continue
+
+                file.write(chunk)
+
+                total += len(chunk)
+
+                if total > 15 * 1024 * 1024:
+                    break
+
+        return output_path.exists() and output_path.stat().st_size > 3000
 
     except Exception as exc:
 
         print(
-            f"Image validation failed: "
-            f"{image_url} | {exc}"
+            f"Image download failed: {exc}"
         )
 
         return False
 
 
 # ============================================================
-# META EXTRACTION
+# HTML META / JSON-LD
 # ============================================================
 
-def extract_meta(
-    page,
-    property_name=None,
-    name=None,
-):
-
-    pattern = r"<meta\b[^>]*>"
-
-    for match in re.finditer(
-        pattern,
-        page,
+def get_meta_content(soup_html, property_name):
+    pattern = re.compile(
+        rf'<meta[^>]+(?:property|name)=["\']'
+        rf'{re.escape(property_name)}'
+        rf'["\'][^>]+content=["\']([^"\']+)["\']',
         flags=re.I,
-    ):
+    )
 
-        tag = match.group(
-            0
-        )
+    match = pattern.search(soup_html)
 
-        if property_name:
+    if match:
+        return html.unescape(
+            match.group(1)
+        ).strip()
 
-            property_match = re.search(
-                r'property\s*=\s*["\']([^"\']+)["\']',
-                tag,
-                flags=re.I,
-            )
+    reverse_pattern = re.compile(
+        rf'<meta[^>]+content=["\']([^"\']+)["\']'
+        rf'[^>]+(?:property|name)=["\']'
+        rf'{re.escape(property_name)}'
+        rf'["\']',
+        flags=re.I,
+    )
 
-            if (
-                property_match
-                and property_match.group(
-                    1
-                ).lower()
-                == property_name.lower()
-            ):
+    match = reverse_pattern.search(
+        soup_html
+    )
 
-                content_match = re.search(
-                    r'content\s*=\s*["\'](.*?)["\']',
-                    tag,
-                    flags=re.I | re.S,
-                )
-
-                if content_match:
-
-                    return clean_text(
-                        content_match.group(
-                            1
-                        )
-                    )
-
-        if name:
-
-            name_match = re.search(
-                r'name\s*=\s*["\']([^"\']+)["\']',
-                tag,
-                flags=re.I,
-            )
-
-            if (
-                name_match
-                and name_match.group(
-                    1
-                ).lower()
-                == name.lower()
-            ):
-
-                content_match = re.search(
-                    r'content\s*=\s*["\'](.*?)["\']',
-                    tag,
-                    flags=re.I | re.S,
-                )
-
-                if content_match:
-
-                    return clean_text(
-                        content_match.group(
-                            1
-                        )
-                    )
+    if match:
+        return html.unescape(
+            match.group(1)
+        ).strip()
 
     return ""
 
 
-# ============================================================
-# JSON-LD
-# ============================================================
+def extract_json_ld_images(html_text):
+    images = []
 
-def extract_jsonld_objects(page):
-
-    objects = []
-
-    scripts = re.findall(
-        r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>'
-        r'(.*?)'
-        r'</script>',
-        page,
-        flags=re.I | re.S,
+    pattern = re.compile(
+        r'"(?:image|thumbnailUrl)"\s*:\s*'
+        r'(?:"([^"]+)"|\[([^\]]+)\])',
+        flags=re.I,
     )
 
-    for script in scripts:
+    for match in pattern.finditer(html_text):
 
-        try:
+        single = match.group(1)
 
-            data = json.loads(
-                html.unescape(
-                    script
-                )
+        if single:
+            images.append(
+                html.unescape(single)
             )
 
-        except Exception:
+        array_value = match.group(2)
 
-            continue
+        if array_value:
 
-        if isinstance(
-            data,
-            list
-        ):
-
-            objects.extend(
-                data
-            )
-
-        elif isinstance(
-            data,
-            dict
-        ):
-
-            graph = data.get(
-                "@graph"
-            )
-
-            if isinstance(
-                graph,
-                list
+            for value in re.findall(
+                r'"([^"]+)"',
+                array_value,
             ):
-
-                objects.extend(
-                    graph
+                images.append(
+                    html.unescape(value)
                 )
 
-            objects.append(
-                data
-            )
+    return images
 
-    return objects
-
-
-def extract_jsonld_description(page):
-
-    objects = extract_jsonld_objects(
-        page
-    )
-
-    for obj in objects:
-
-        if not isinstance(
-            obj,
-            dict
-        ):
-            continue
-
-        description = clean_text(
-            obj.get(
-                "description",
-                "",
-            )
-        )
-
-        if description:
-
-            return description
-
-    return ""
-
-
-# ============================================================
-# IMAGE EXTRACTION FROM HTML
-# ============================================================
 
 def extract_image_from_html(
-    page,
-    base_url,
+    page_url,
+    html_text,
 ):
-
     candidates = []
 
     # --------------------------------------------------------
-    # OPEN GRAPH
+    # OpenGraph
     # --------------------------------------------------------
 
     for property_name in [
         "og:image",
         "og:image:url",
         "og:image:secure_url",
-    ]:
-
-        value = extract_meta(
-            page,
-            property_name=property_name,
-        )
-
-        if value:
-
-            candidates.append(
-                value
-            )
-
-    # --------------------------------------------------------
-    # TWITTER
-    # --------------------------------------------------------
-
-    for name in [
         "twitter:image",
         "twitter:image:src",
     ]:
 
-        value = extract_meta(
-            page,
-            name=name,
+        value = get_meta_content(
+            html_text,
+            property_name,
         )
 
         if value:
-
             candidates.append(
-                value
+                make_absolute(
+                    page_url,
+                    value,
+                )
             )
 
     # --------------------------------------------------------
     # JSON-LD
     # --------------------------------------------------------
 
-    objects = extract_jsonld_objects(
-        page
-    )
+    for value in extract_json_ld_images(
+        html_text
+    ):
 
-    for obj in objects:
-
-        if not isinstance(
-            obj,
-            dict
-        ):
-            continue
-
-        image = obj.get(
-            "image"
+        candidates.append(
+            make_absolute(
+                page_url,
+                value,
+            )
         )
 
-        if isinstance(
-            image,
-            str
-        ):
-
-            candidates.append(
-                image
-            )
-
-        elif isinstance(
-            image,
-            dict
-        ):
-
-            value = (
-                image.get(
-                    "url"
-                )
-                or image.get(
-                    "contentUrl"
-                )
-            )
-
-            if value:
-
-                candidates.append(
-                    value
-                )
-
-        elif isinstance(
-            image,
-            list
-        ):
-
-            for item in image:
-
-                if isinstance(
-                    item,
-                    str
-                ):
-
-                    candidates.append(
-                        item
-                    )
-
-                elif isinstance(
-                    item,
-                    dict
-                ):
-
-                    value = (
-                        item.get(
-                            "url"
-                        )
-                        or item.get(
-                            "contentUrl"
-                        )
-                    )
-
-                    if value:
-
-                        candidates.append(
-                            value
-                        )
-
     # --------------------------------------------------------
-    # IMAGE TAGS
+    # IMG tags
     # --------------------------------------------------------
 
-    img_tags = re.findall(
+    for match in re.finditer(
         r"<img\b[^>]*>",
-        page,
+        html_text,
         flags=re.I,
-    )
+    ):
 
-    for tag in img_tags:
+        tag = match.group(0)
 
-        for attribute in [
+        attributes = [
             "src",
             "data-src",
             "data-original",
             "data-lazy-src",
             "data-image",
-            "data-url",
-        ]:
+        ]
 
-            match = re.search(
-                rf'{attribute}\s*=\s*["\']([^"\']+)["\']',
+        for attr in attributes:
+
+            attr_match = re.search(
+                rf'{attr}\s*=\s*["\']([^"\']+)["\']',
                 tag,
                 flags=re.I,
             )
 
-            if match:
+            if attr_match:
+
+                value = attr_match.group(1)
 
                 candidates.append(
-                    match.group(
-                        1
+                    make_absolute(
+                        page_url,
+                        value,
                     )
                 )
 
-    # --------------------------------------------------------
-    # NORMALIZE
-    # --------------------------------------------------------
-
-    final_candidates = []
+    cleaned = []
 
     for candidate in candidates:
 
-        candidate = html.unescape(
-            candidate.strip()
-        )
-
-        if not candidate:
+        if not valid_http_url(candidate):
             continue
 
-        candidate = urljoin(
-            base_url,
-            candidate,
+        if candidate not in cleaned:
+            cleaned.append(candidate)
+
+    return cleaned
+
+
+# ============================================================
+# ARTICLE FETCH
+# ============================================================
+
+def fetch_page(url):
+    try:
+
+        response = SESSION.get(
+            url,
+            timeout=TIMEOUT,
+            allow_redirects=True,
         )
 
-        if (
-            candidate
-            not in final_candidates
-        ):
+        if response.status_code != 200:
+            return None, ""
 
-            final_candidates.append(
-                candidate
+        return response.url, response.text
+
+    except Exception as exc:
+
+        print(
+            f"Article fetch failed: {exc}"
+        )
+
+        return None, ""
+
+
+def extract_article_data(
+    article_url,
+    html_text,
+):
+    if not html_text:
+        return None
+
+    title = ""
+
+    # --------------------------------------------------------
+    # Title
+    # --------------------------------------------------------
+
+    title = get_meta_content(
+        html_text,
+        "og:title",
+    )
+
+    if not title:
+
+        match = re.search(
+            r"<title[^>]*>(.*?)</title>",
+            html_text,
+            flags=re.I | re.S,
+        )
+
+        if match:
+            title = clean_text(
+                match.group(1)
             )
 
-    return final_candidates
+    # --------------------------------------------------------
+    # Description
+    # --------------------------------------------------------
 
+    summary = ""
 
-# ============================================================
-# TITLE NORMALIZATION
-# ============================================================
+    for name in [
+        "description",
+        "og:description",
+        "twitter:description",
+    ]:
 
-def normalize_title(title):
+        summary = get_meta_content(
+            html_text,
+            name,
+        )
 
-    title = clean_text(
-        title
-    ).lower()
+        if summary:
+            break
 
-    title = re.sub(
-        r"[^a-z0-9\s]",
-        " ",
-        title,
+    # --------------------------------------------------------
+    # Article paragraphs
+    # --------------------------------------------------------
+
+    if len(summary) < 80:
+
+        paragraphs = re.findall(
+            r"<p\b[^>]*>(.*?)</p>",
+            html_text,
+            flags=re.I | re.S,
+        )
+
+        cleaned_paragraphs = []
+
+        for paragraph in paragraphs:
+
+            text = clean_text(
+                paragraph
+            )
+
+            if len(text) >= 40:
+                cleaned_paragraphs.append(
+                    text
+                )
+
+        if cleaned_paragraphs:
+
+            summary = " ".join(
+                cleaned_paragraphs[:4]
+            )
+
+    summary = clean_text(
+        summary
     )
 
-    words = title.split()
+    # --------------------------------------------------------
+    # Images
+    # --------------------------------------------------------
 
-    stopwords = {
-        "the",
-        "a",
-        "an",
-        "and",
-        "or",
-        "of",
-        "to",
-        "in",
-        "on",
-        "for",
-        "with",
-        "as",
-        "at",
-        "by",
-        "from",
-        "is",
-        "are",
-        "was",
-        "were",
-        "this",
-        "that",
-        "kenya",
-        "kenyan",
+    image_candidates = extract_image_from_html(
+        article_url,
+        html_text,
+    )
+
+    verified_image = ""
+
+    for image_url in image_candidates:
+
+        print(
+            "Checking article image:",
+            image_url[:180],
+        )
+
+        if verify_image(image_url):
+
+            verified_image = image_url
+
+            print(
+                "VALID ARTICLE IMAGE:",
+                image_url,
+            )
+
+            break
+
+    if not title:
+        return None
+
+    if len(summary) < 40:
+        return None
+
+    return {
+        "title": clean_text(title),
+        "summary": summary,
+        "image": verified_image,
+        "url": article_url,
     }
 
-    return [
-        word
-        for word in words
-        if word not in stopwords
-    ]
 
+# ============================================================
+# TITLE MATCHING
+# ============================================================
 
 def title_similarity(
-    title_a,
-    title_b,
+    rss_title,
+    article_title,
 ):
-
-    words_a = set(
-        normalize_title(
-            title_a
-        )
+    a = set(
+        normalize_text(
+            rss_title
+        ).split()
     )
 
-    words_b = set(
-        normalize_title(
-            title_b
-        )
+    b = set(
+        normalize_text(
+            article_title
+        ).split()
     )
 
-    if not words_a or not words_b:
-
+    if not a or not b:
         return 0.0
 
-    overlap = (
-        words_a
-        .intersection(
-            words_b
-        )
-    )
+    common = a.intersection(b)
 
-    return (
-        len(overlap)
-        / max(
-            len(words_a),
-            len(words_b),
-        )
+    return len(common) / max(
+        len(a),
+        len(b),
     )
 
 
-def title_has_reasonable_match(
-    original_title,
-    candidate_title,
+def title_match(
+    rss_title,
+    article_title,
 ):
-
-    original_words = normalize_title(
-        original_title
+    score = title_similarity(
+        rss_title,
+        article_title,
     )
 
-    candidate_words = set(
-        normalize_title(
-            candidate_title
-        )
-    )
-
-    if not original_words:
-
-        return False
-
-    overlap = len(
-        set(
-            original_words
-        ).intersection(
-            candidate_words
-        )
-    )
-
-    similarity = title_similarity(
-        original_title,
-        candidate_title,
-    )
-
-    minimum_overlap = 2
-
-    if len(
-        original_words
-    ) <= 5:
-
-        minimum_overlap = 1
-
-    return (
-        overlap >= minimum_overlap
-        and similarity >= 0.12
-    )
-
-
-# ============================================================
-# PUBLISHER DOMAIN
-# ============================================================
-
-def normalize_publisher_domain(
-    source_url="",
-    source_name="",
-):
-
-    domain = get_domain(
-        source_url
-    )
-
-    if domain:
-
-        if not is_search_engine_url(
-            "https://" + domain
-        ):
-
-            return domain
-
-    return ""
-
-
-def publisher_domains_match(
-    candidate_domain,
-    publisher_domain,
-):
-
-    if not candidate_domain:
-
-        return False
-
-    if not publisher_domain:
-
+    if score >= 0.35:
         return True
 
-    return (
-        candidate_domain
-        == publisher_domain
-        or candidate_domain.endswith(
-            "." + publisher_domain
-        )
-        or publisher_domain.endswith(
-            "." + candidate_domain
-        )
+    a = normalize_text(
+        rss_title
+    )
+
+    b = normalize_text(
+        article_title
+    )
+
+    if a in b or b in a:
+        return True
+
+    # Compare important words
+    important = [
+        word
+        for word in a.split()
+        if len(word) >= 5
+    ]
+
+    if not important:
+        return False
+
+    matches = sum(
+        1
+        for word in important
+        if word in b
+    )
+
+    return matches >= max(
+        2,
+        len(important) // 3,
     )
 
 
 # ============================================================
-# DIRECT GOOGLE NEWS RESOLUTION
+# GOOGLE NEWS RESOLUTION
 # ============================================================
 
-def try_direct_google_resolution(
+def resolve_google_redirect(
     google_url,
 ):
+    """
+    Attempt to resolve a Google News URL directly.
+    """
 
     try:
 
-        response = requests.get(
+        response = SESSION.get(
             google_url,
-            headers=HEADERS,
-            timeout=25,
+            timeout=TIMEOUT,
             allow_redirects=True,
         )
 
         final_url = response.url
 
         if (
-            final_url
-            and not is_google_news_url(
-                final_url
-            )
-            and not is_social_domain(
-                final_url
-            )
-            and not is_search_engine_url(
-                final_url
+            valid_http_url(final_url)
+            and not final_url.startswith(
+                "https://news.google.com"
             )
         ):
 
             return final_url
 
-    except Exception as exc:
+    except Exception:
+        pass
 
-        print(
-            f"Google direct resolution failed: {exc}"
-        )
-
-    return None
+    return ""
 
 
 # ============================================================
-# BING ARTICLE SEARCH
+# BING SEARCH
 # ============================================================
 
-def search_bing_for_article(
-    title,
-    publisher_domain="",
-):
-
-    query = clean_text(
-        title
-    )
-
-    if publisher_domain:
-
-        query += (
-            f" site:{publisher_domain}"
-        )
-
-    search_url = (
+def bing_search(query):
+    url = (
         "https://www.bing.com/search?q="
-        + quote_plus(
-            query
-        )
+        + quote_plus(query)
     )
 
     try:
 
-        response = requests.get(
-            search_url,
-            headers=HEADERS,
-            timeout=25,
+        response = SESSION.get(
+            url,
+            timeout=TIMEOUT,
         )
 
-        response.raise_for_status()
+        if response.status_code != 200:
+            return []
 
-        page = response.text
+        results = []
+
+        for match in re.finditer(
+            r'<li class="b_algo".*?</li>',
+            response.text,
+            flags=re.I | re.S,
+        ):
+
+            block = match.group(0)
+
+            link_match = re.search(
+                r'<a[^>]+href="([^"]+)"',
+                block,
+                flags=re.I,
+            )
+
+            if not link_match:
+                continue
+
+            result_url = html.unescape(
+                link_match.group(1)
+            )
+
+            title_match = re.search(
+                r"<h2[^>]*>(.*?)</h2>",
+                block,
+                flags=re.I | re.S,
+            )
+
+            result_title = (
+                clean_text(
+                    title_match.group(1)
+                )
+                if title_match
+                else ""
+            )
+
+            snippet_match = re.search(
+                r'<p[^>]*>(.*?)</p>',
+                block,
+                flags=re.I | re.S,
+            )
+
+            snippet = (
+                clean_text(
+                    snippet_match.group(1)
+                )
+                if snippet_match
+                else ""
+            )
+
+            if (
+                valid_http_url(result_url)
+                and not is_blocked_domain(
+                    result_url
+                )
+            ):
+
+                results.append(
+                    {
+                        "url": result_url,
+                        "title": result_title,
+                        "snippet": snippet,
+                    }
+                )
+
+        return results
 
     except Exception as exc:
 
@@ -1307,959 +1082,759 @@ def search_bing_for_article(
 
         return []
 
-    candidates = []
-
-    # --------------------------------------------------------
-    # BING RESULT BLOCKS
-    # --------------------------------------------------------
-
-    result_blocks = re.findall(
-        r'<li[^>]+class=["\'][^"\']*b_algo[^"\']*["\'][^>]*>'
-        r'(.*?)'
-        r'</li>',
-        page,
-        flags=re.I | re.S,
-    )
-
-    for block in result_blocks:
-
-        links = re.findall(
-            r'<a[^>]+href=["\']([^"\']+)["\']',
-            block,
-            flags=re.I,
-        )
-
-        for link in links:
-
-            link = html.unescape(
-                link.strip()
-            )
-
-            if not link.startswith(
-                (
-                    "http://",
-                    "https://",
-                )
-            ):
-                continue
-
-            if (
-                is_google_news_url(
-                    link
-                )
-                or is_social_domain(
-                    link
-                )
-                or is_search_engine_url(
-                    link
-                )
-            ):
-                continue
-
-            if link not in candidates:
-
-                candidates.append(
-                    link
-                )
-
-    # --------------------------------------------------------
-    # GENERAL FALLBACK
-    # --------------------------------------------------------
-
-    if not candidates:
-
-        links = re.findall(
-            r'href=["\'](https?://[^"\']+)["\']',
-            page,
-            flags=re.I,
-        )
-
-        for link in links:
-
-            link = html.unescape(
-                link.strip()
-            )
-
-            if (
-                is_google_news_url(
-                    link
-                )
-                or is_social_domain(
-                    link
-                )
-                or is_search_engine_url(
-                    link
-                )
-            ):
-                continue
-
-            if link not in candidates:
-
-                candidates.append(
-                    link
-                )
-
-    return candidates[:30]
-
 
 # ============================================================
-# VERIFY PUBLISHER ARTICLE
+# VERIFY ARTICLE CANDIDATE
 # ============================================================
 
 def verify_article_candidate(
     candidate_url,
-    original_title,
+    rss_title,
     publisher_domain="",
 ):
-
-    if not candidate_url:
-
-        return None
-
-    if (
-        is_social_domain(
-            candidate_url
-        )
-        or is_google_news_url(
-            candidate_url
-        )
-        or is_search_engine_url(
-            candidate_url
-        )
+    if not valid_http_url(
+        candidate_url
     ):
-
         return None
 
-    candidate_domain = get_domain(
+    if is_blocked_domain(
+        candidate_url
+    ):
+        return None
+
+    candidate_domain = root_domain(
         candidate_url
     )
 
     if (
         publisher_domain
-        and candidate_domain
-        and not publisher_domains_match(
-            candidate_domain,
-            publisher_domain,
-        )
+        and candidate_domain != publisher_domain
     ):
-
         return None
 
-    try:
+    final_url, page_html = fetch_page(
+        candidate_url
+    )
 
-        response = requests.get(
-            candidate_url,
-            headers=HEADERS,
-            timeout=25,
-            allow_redirects=True,
-        )
-
-        response.raise_for_status()
-
-    except Exception as exc:
-
-        print(
-            f"Candidate fetch failed: {exc}"
-        )
-
+    if not final_url or not page_html:
         return None
 
-    resolved_url = response.url
-
-    if not resolved_url:
-
-        return None
-
-    if (
-        is_google_news_url(
-            resolved_url
-        )
-        or is_social_domain(
-            resolved_url
-        )
-        or is_search_engine_url(
-            resolved_url
-        )
-    ):
-
-        return None
-
-    resolved_domain = get_domain(
-        resolved_url
+    final_domain = root_domain(
+        final_url
     )
 
     if (
         publisher_domain
-        and resolved_domain
-        and not publisher_domains_match(
-            resolved_domain,
-            publisher_domain,
-        )
+        and final_domain != publisher_domain
     ):
-
         return None
 
-    page = response.text
-
-    if not page:
-
-        return None
-
-    candidate_title = (
-        extract_meta(
-            page,
-            property_name="og:title",
-        )
-        or extract_meta(
-            page,
-            name="twitter:title",
-        )
+    article_data = extract_article_data(
+        final_url,
+        page_html,
     )
 
-    if not candidate_title:
-
-        title_match = re.search(
-            r"<title[^>]*>(.*?)</title>",
-            page,
-            flags=re.I | re.S,
-        )
-
-        if title_match:
-
-            candidate_title = clean_text(
-                title_match.group(
-                    1
-                )
-            )
-
-    candidate_title = clean_text(
-        candidate_title
-    )
-
-    if not candidate_title:
-
+    if not article_data:
         return None
 
-    if not title_has_reasonable_match(
-        original_title,
-        candidate_title,
+    if not title_match(
+        rss_title,
+        article_data["title"],
     ):
-
-        print(
-            "Candidate rejected: title mismatch."
-        )
-
         return None
 
-    print(
-        f"ARTICLE MATCH: {candidate_title}"
-    )
+    if not article_data.get("image"):
+        return None
 
-    print(
-        f"ARTICLE URL: {resolved_url}"
-    )
-
-    return {
-        "url": resolved_url,
-        "page": page,
-        "title": candidate_title,
-    }
+    return article_data
 
 
 # ============================================================
-# GOOGLE NEWS ARTICLE RESOLUTION
+# GOOGLE NEWS ARTICLE RESOLVER
 # ============================================================
 
 def resolve_google_news_article(
     story,
 ):
-
-    google_url = story.get(
-        "url",
+    rss_title = story.get(
+        "title",
         "",
     )
 
-    original_title = clean_text(
-        story.get(
-            "title",
-            "",
-        )
+    google_url = story.get(
+        "link",
+        "",
     )
 
-    source = clean_text(
-        story.get(
-            "source",
-            "",
-        )
+    source_url = story.get(
+        "source_url",
+        "",
     )
 
-    source_url = clean_text(
-        story.get(
-            "source_url",
-            "",
-        )
+    publisher_domain = root_domain(
+        source_url
     )
 
-    print()
+    print("")
     print(
-        "=" * 70
+        "============================================================"
     )
     print(
         "GOOGLE NEWS RESOLUTION"
     )
     print(
-        "=" * 70
+        "============================================================"
     )
 
     print(
-        f"Original title : {original_title}"
+        "Title:",
+        rss_title,
     )
 
     print(
-        f"Publisher      : {source}"
+        "Publisher:",
+        story.get(
+            "publisher",
+            "",
+        ),
     )
 
     print(
-        f"Publisher URL  : {source_url}"
+        "Publisher domain:",
+        publisher_domain,
+    )
+
+    print(
+        "Google URL:",
+        google_url,
     )
 
     # --------------------------------------------------------
-    # METHOD 1 — DIRECT
+    # Method 1: direct redirect
     # --------------------------------------------------------
 
-    direct_url = (
-        try_direct_google_resolution(
-            google_url
-        )
+    print("")
+    print(
+        "Method 1: direct Google News redirect"
+    )
+
+    direct_url = resolve_google_redirect(
+        google_url
     )
 
     if direct_url:
 
         print(
-            "DIRECT GOOGLE RESOLUTION: SUCCESS"
+            "Resolved URL:",
+            direct_url,
         )
 
-        return {
-            "url": direct_url,
-            "method": "direct",
-        }
-
-    print(
-        "Direct Google resolution did not reach publisher."
-    )
-
-    # --------------------------------------------------------
-    # PUBLISHER DOMAIN
-    # --------------------------------------------------------
-
-    publisher_domain = (
-        normalize_publisher_domain(
-            source_url=source_url,
-            source_name=source,
+        article = verify_article_candidate(
+            direct_url,
+            rss_title,
+            publisher_domain,
         )
-    )
+
+        if article:
+
+            print(
+                "SUCCESS: direct publisher article"
+            )
+
+            return article
+
+        print(
+            "Direct URL failed article verification."
+        )
+
+    # --------------------------------------------------------
+    # Method 2: publisher-restricted Bing
+    # --------------------------------------------------------
 
     if publisher_domain:
 
+        print("")
         print(
-            f"Publisher domain: {publisher_domain}"
+            "Method 2: publisher-restricted Bing search"
         )
 
-    else:
-
-        print(
-            "Publisher domain unavailable."
+        query = (
+            f'"{rss_title}" '
+            f"site:{publisher_domain}"
         )
 
-    # --------------------------------------------------------
-    # METHOD 2 — BING + PUBLISHER
-    # --------------------------------------------------------
-
-    candidates = search_bing_for_article(
-        original_title,
-        publisher_domain,
-    )
-
-    print(
-        f"Bing publisher search returned "
-        f"{len(candidates)} candidates."
-    )
-
-    for index, candidate in enumerate(
-        candidates,
-        start=1,
-    ):
-
-        print(
-            f"Trying publisher candidate "
-            f"{index}: {candidate}"
+        results = bing_search(
+            query
         )
 
-        verified = (
-            verify_article_candidate(
-                candidate_url=candidate,
-                original_title=original_title,
-                publisher_domain=publisher_domain,
+        for result in results:
+
+            print(
+                "Candidate:",
+                result["url"],
             )
-        )
 
-        if verified:
+            article = verify_article_candidate(
+                result["url"],
+                rss_title,
+                publisher_domain,
+            )
 
-            return {
-                "url": verified["url"],
-                "page": verified["page"],
-                "title": verified["title"],
-                "method": "bing_publisher",
-            }
+            if article:
+
+                print(
+                    "SUCCESS: publisher search"
+                )
+
+                return article
 
     # --------------------------------------------------------
-    # METHOD 3 — BROAD BING
+    # Method 3: broad Bing search
     # --------------------------------------------------------
 
+    print("")
     print(
-        "Trying broad Bing article search..."
+        "Method 3: broad Bing search"
     )
 
-    candidates = search_bing_for_article(
-        original_title,
-        "",
+    results = bing_search(
+        f'"{rss_title}" Kenya'
     )
 
-    print(
-        f"Broad Bing returned "
-        f"{len(candidates)} candidates."
-    )
-
-    for index, candidate in enumerate(
-        candidates,
-        start=1,
-    ):
+    for result in results:
 
         print(
-            f"Trying broad candidate "
-            f"{index}: {candidate}"
+            "Candidate:",
+            result["url"],
         )
 
-        verified = (
-            verify_article_candidate(
-                candidate_url=candidate,
-                original_title=original_title,
-                publisher_domain="",
+        candidate_domain = root_domain(
+            result["url"]
+        )
+
+        if (
+            publisher_domain
+            and candidate_domain
+            != publisher_domain
+        ):
+            continue
+
+        article = verify_article_candidate(
+            result["url"],
+            rss_title,
+            publisher_domain,
+        )
+
+        if article:
+
+            print(
+                "SUCCESS: broad search"
             )
-        )
 
-        if verified:
+            return article
 
-            return {
-                "url": verified["url"],
-                "page": verified["page"],
-                "title": verified["title"],
-                "method": "bing_broad",
-            }
-
+    print("")
     print(
-        "Publisher article could not be resolved."
+        "Google News story failed all article "
+        "resolution methods."
     )
 
     return None
 
 
 # ============================================================
-# GOOGLE GENERIC TEXT
+# IMAGE SEARCH FALLBACK
 # ============================================================
 
-def is_google_generic_text(text):
-
-    text = clean_text(
-        text
-    ).lower()
-
-    if not text:
-
-        return True
-
-    generic_phrases = [
-        "google news",
-        "news.google.com",
-        "google account",
-        "search results",
-        "before continuing",
-        "privacy",
-        "terms of service",
-    ]
-
-    matches = sum(
-        phrase in text
-        for phrase in generic_phrases
-    )
-
-    return matches >= 2
-
-
-# ============================================================
-# SUMMARY VALIDATION
-# ============================================================
-
-def usable_summary(text):
-
-    text = clean_text(
-        text
-    )
-
-    if not text:
-
-        return False
-
-    if is_google_generic_text(
-        text
-    ):
-
-        return False
-
-    return len(text) >= 60
-
-
-# ============================================================
-# EXTRACT ARTICLE DATA
-# ============================================================
-
-def extract_article_data(
-    page,
-    resolved_url,
-    story,
+def extract_bing_image_urls(
+    html_text,
 ):
+    """
+    Extract likely image URLs from Bing image-search
+    result HTML.
 
-    if not page:
+    Bing stores image metadata in several forms.
+    """
 
-        return None
+    candidates = []
 
-    # --------------------------------------------------------
-    # TITLE
-    # --------------------------------------------------------
-
-    title = (
-        extract_meta(
-            page,
-            property_name="og:title",
-        )
-        or extract_meta(
-            page,
-            name="twitter:title",
-        )
-    )
-
-    if not title:
-
-        title_match = re.search(
-            r"<title[^>]*>(.*?)</title>",
-            page,
-            flags=re.I | re.S,
-        )
-
-        if title_match:
-
-            title = clean_text(
-                title_match.group(
-                    1
-                )
-            )
-
-    title = clean_text(
-        title
-    )
-
-    if not title:
-
-        title = clean_text(
-            story.get(
-                "title",
-                "",
-            )
-        )
-
-    if not title:
-
-        print(
-            "Article rejected: no title."
-        )
-
-        return None
-
-    # --------------------------------------------------------
-    # SOURCE
-    # --------------------------------------------------------
-
-    source = (
-        extract_meta(
-            page,
-            property_name="og:site_name",
-        )
-        or story.get(
-            "source",
-            "",
-        )
-        or get_domain(
-            resolved_url
-        )
-    )
-
-    source = clean_text(
-        source
-    )
-
-    # --------------------------------------------------------
-    # SUMMARY
-    # --------------------------------------------------------
-
-    summary_candidates = [
-
-        extract_meta(
-            page,
-            property_name="og:description",
-        ),
-
-        extract_meta(
-            page,
-            name="description",
-        ),
-
-        extract_meta(
-            page,
-            name="twitter:description",
-        ),
-
-        extract_jsonld_description(
-            page
-        ),
-
-        story.get(
-            "summary",
-            "",
-        ),
-
-        story.get(
-            "raw_description",
-            "",
-        ),
-    ]
-
-    summary = ""
-
-    for candidate in summary_candidates:
-
-        candidate = clean_text(
-            candidate
-        )
-
-        if usable_summary(
-            candidate
-        ):
-
-            summary = candidate
-
-            break
-
-    if not summary:
-
-        print(
-            "Article rejected: no usable summary."
-        )
-
-    # --------------------------------------------------------
-    # IMAGE
-    # --------------------------------------------------------
-
-    image_candidates = (
-        extract_image_from_html(
-            page,
-            resolved_url,
-        )
-    )
-
-    rss_image = clean_text(
-        story.get(
-            "rss_image",
-            "",
-        )
-    )
-
-    if rss_image:
-
-        image_candidates.append(
-            rss_image
-        )
-
-    image_url = ""
-
-    checked = set()
-
-    for candidate in image_candidates:
-
-        candidate = clean_text(
-            candidate
-        )
-
-        if not candidate:
-            continue
-
-        candidate = urljoin(
-            resolved_url,
-            candidate,
-        )
-
-        if candidate in checked:
-            continue
-
-        checked.add(
-            candidate
-        )
-
-        if is_bad_image_url(
-            candidate
-        ):
-            continue
-
-        print(
-            f"Checking image: {candidate}"
-        )
-
-        if verify_image(
-            candidate
-        ):
-
-            image_url = candidate
-
-            print(
-                f"VALID ARTICLE IMAGE: "
-                f"{candidate}"
-            )
-
-            break
-
-        print(
-            "Image rejected."
-        )
-
-    if not summary:
-
-        return None
-
-    if not image_url:
-
-        print(
-            "Article rejected: no valid image."
-        )
-
-        return None
-
-    return {
-        "title": title,
-        "summary": summary,
-        "source": source,
-        "url": resolved_url,
-        "resolved_url": resolved_url,
-        "image_url": image_url,
-    }
-
-
-# ============================================================
-# RSS FALLBACK
-# ============================================================
-
-def build_rss_verified_story(
-    story
-):
-
-    print()
-    print(
-        "=" * 70
-    )
-    print(
-        "RSS FALLBACK VERIFICATION"
-    )
-    print(
-        "=" * 70
-    )
-
-    title = clean_text(
-        story.get(
-            "title",
-            "",
-        )
-    )
-
-    source = clean_text(
-        story.get(
-            "source",
-            "",
-        )
-    )
-
-    summary = clean_text(
-        story.get(
-            "summary",
-            "",
-        )
-    )
-
-    raw_description = (
-        story.get(
-            "raw_description",
-            "",
-        )
-        or ""
-    )
-
-    if not title:
-
-        print(
-            "RSS fallback rejected: no title."
-        )
-
-        return None
-
-    if not source:
-
-        print(
-            "RSS fallback rejected: no publisher."
-        )
-
-        return None
-
-    if not usable_summary(
-        summary
-    ):
-
-        print(
-            "RSS fallback rejected: weak summary."
-        )
-
-        return None
-
-    # --------------------------------------------------------
-    # COLLECT POSSIBLE IMAGES
-    # --------------------------------------------------------
-
-    image_candidates = []
-
-    rss_image = clean_text(
-        story.get(
-            "rss_image",
-            "",
-        )
-    )
-
-    if rss_image:
-
-        image_candidates.append(
-            rss_image
-        )
-
-    # --------------------------------------------------------
-    # EXTRACT IMAGES FROM RAW RSS HTML
-    # --------------------------------------------------------
-
+    # Direct URLs
     patterns = [
-        r'<img[^>]+src=["\']([^"\']+)["\']',
-        r'<img[^>]+data-src=["\']([^"\']+)["\']',
-        r'<img[^>]+data-original=["\']([^"\']+)["\']',
-        r'<img[^>]+data-lazy-src=["\']([^"\']+)["\']',
+        r'"murl":"(https?://[^"]+)"',
+        r'"mediaurl":"(https?://[^"]+)"',
+        r'"turl":"(https?://[^"]+)"',
     ]
 
     for pattern in patterns:
 
-        matches = re.findall(
+        for match in re.findall(
             pattern,
-            raw_description,
-            flags=re.I | re.S,
+            html_text,
+            flags=re.I,
+        ):
+
+            value = (
+                match
+                .replace("\\/", "/")
+                .replace("\\u002f", "/")
+            )
+
+            candidates.append(
+                html.unescape(value)
+            )
+
+    # Generic image URLs
+    for match in re.findall(
+        r'https?://[^"\']+\.(?:jpg|jpeg|png|webp)(?:\?[^"\']*)?',
+        html_text,
+        flags=re.I,
+    ):
+
+        candidates.append(
+            html.unescape(match)
         )
 
-        for match in matches:
+    cleaned = []
 
-            if match:
+    for candidate in candidates:
 
-                image_candidates.append(
-                    html.unescape(
-                        match.strip()
-                    )
-                )
-
-    # --------------------------------------------------------
-    # NORMALIZE + DEDUPLICATE
-    # --------------------------------------------------------
-
-    unique_images = []
-
-    seen = set()
-
-    for image in image_candidates:
-
-        image = image.strip()
-
-        if not image:
-            continue
-
-        image = urljoin(
-            story.get(
-                "url",
-                "",
-            ),
-            image,
-        )
-
-        if image in seen:
-            continue
-
-        seen.add(
-            image
-        )
-
-        unique_images.append(
-            image
-        )
-
-    print(
-        f"RSS image candidates: "
-        f"{len(unique_images)}"
-    )
-
-    # --------------------------------------------------------
-    # VERIFY IMAGES
-    # --------------------------------------------------------
-
-    valid_image = ""
-
-    for image_url in unique_images:
-
-        if is_bad_image_url(
-            image_url
+        if not valid_http_url(
+            candidate
         ):
             continue
 
+        if candidate not in cleaned:
+            cleaned.append(
+                candidate
+            )
+
+    return cleaned
+
+
+def bing_image_search(
+    query,
+):
+    """
+    Search Bing Images for the exact story.
+    """
+
+    url = (
+        "https://www.bing.com/images/search?q="
+        + quote_plus(query)
+    )
+
+    print("")
+    print(
+        "IMAGE SEARCH:"
+    )
+
+    print(
+        query
+    )
+
+    try:
+
+        response = SESSION.get(
+            url,
+            timeout=TIMEOUT,
+        )
+
+        if response.status_code != 200:
+            print(
+                "Image search HTTP:",
+                response.status_code,
+            )
+            return []
+
+        return extract_bing_image_urls(
+            response.text
+        )
+
+    except Exception as exc:
+
         print(
-            f"Checking RSS image: "
-            f"{image_url}"
+            "Image search failed:",
+            exc,
+        )
+
+        return []
+
+
+def image_search_fallback(
+    story,
+    article_url="",
+):
+    """
+    Find a REAL photo when the article itself doesn't
+    expose a usable image.
+
+    Priority:
+      1. exact title + publisher
+      2. exact title + Kenya
+      3. title + key county
+      4. title + publisher domain
+    """
+
+    title = story.get(
+        "title",
+        "",
+    )
+
+    publisher = story.get(
+        "publisher",
+        "",
+    )
+
+    publisher_domain = root_domain(
+        article_url
+        or story.get(
+            "source_url",
+            "",
+        )
+    )
+
+    county = ""
+
+    title_lower = title.lower()
+
+    for candidate_county in COUNTIES:
+
+        if candidate_county.lower() in title_lower:
+
+            county = candidate_county
+            break
+
+    queries = []
+
+    if publisher:
+        queries.append(
+            f'"{title}" "{publisher}"'
+        )
+
+    if publisher_domain:
+        queries.append(
+            f'"{title}" {publisher_domain}'
+        )
+
+    queries.append(
+        f'"{title}" Kenya news'
+    )
+
+    if county:
+        queries.append(
+            f'"{title}" {county} Kenya'
+        )
+
+    seen = set()
+
+    for query in queries:
+
+        if query in seen:
+            continue
+
+        seen.add(query)
+
+        image_urls = bing_image_search(
+            query
+        )
+
+        print(
+            "Image candidates:",
+            len(image_urls),
+        )
+
+        for image_url in image_urls:
+
+            if image_looks_bad(
+                image_url
+            ):
+                continue
+
+            print(
+                "Checking fallback image:",
+                image_url[:180],
+            )
+
+            if verify_image(
+                image_url
+            ):
+
+                print(
+                    "VALID FALLBACK IMAGE:"
+                )
+
+                print(
+                    image_url
+                )
+
+                return image_url
+
+        time.sleep(0.5)
+
+    return ""
+
+
+# ============================================================
+# RSS IMAGE FALLBACK
+# ============================================================
+
+def build_rss_verified_story(
+    story,
+):
+    title = story.get(
+        "title",
+        "",
+    )
+
+    publisher = story.get(
+        "publisher",
+        "",
+    )
+
+    description = story.get(
+        "description",
+        "",
+    )
+
+    candidates = list(
+        story.get(
+            "rss_image_candidates",
+            [],
+        )
+    )
+
+    print("")
+    print(
+        "RSS IMAGE CHECK"
+    )
+
+    print(
+        "Title:",
+        title,
+    )
+
+    print(
+        "Publisher:",
+        publisher,
+    )
+
+    print(
+        "RSS image candidates:",
+        len(candidates),
+    )
+
+    verified_image = ""
+
+    for image_url in candidates:
+
+        print(
+            "Checking RSS image:",
+            image_url[:180],
         )
 
         if verify_image(
             image_url
         ):
 
-            valid_image = image_url
+            verified_image = image_url
 
             print(
-                f"VALID RSS IMAGE: "
-                f"{image_url}"
+                "VALID RSS IMAGE:",
+                image_url,
             )
 
             break
 
+    if not verified_image:
+
         print(
-            "RSS image rejected."
+            "RSS did not contain a valid image."
         )
 
-    if not valid_image:
+        return None
 
+    if len(description) < 40:
+
+        description = (
+            f"{title}. "
+            f"Latest developments reported by "
+            f"{publisher}."
+        )
+
+    return {
+        "title": title,
+        "summary": description,
+        "image": verified_image,
+        "url": story.get(
+            "link",
+            "",
+        ),
+    }
+
+
+# ============================================================
+# STORY ENRICHMENT
+# ============================================================
+
+def enrich_story(
+    story,
+):
+    publisher = story.get(
+        "publisher",
+        "",
+    )
+
+    link = story.get(
+        "link",
+        "",
+    )
+
+    # --------------------------------------------------------
+    # Google News
+    # --------------------------------------------------------
+
+    if (
+        "news.google.com"
+        in domain_of(link)
+    ):
+
+        article = resolve_google_news_article(
+            story
+        )
+
+        if article:
+
+            story["resolved_url"] = article[
+                "url"
+            ]
+
+            story["article_title"] = article[
+                "title"
+            ]
+
+            story["summary"] = article[
+                "summary"
+            ]
+
+            story["image"] = article[
+                "image"
+            ]
+
+            print("")
+            print(
+                "ARTICLE VERIFIED"
+            )
+
+            print(
+                "URL:",
+                article["url"],
+            )
+
+            print(
+                "IMAGE:",
+                article["image"],
+            )
+
+            return story
+
+        # ----------------------------------------------------
+        # RSS image fallback
+        # ----------------------------------------------------
+
+        rss_story = build_rss_verified_story(
+            story
+        )
+
+        if rss_story:
+
+            story["resolved_url"] = (
+                story.get(
+                    "link",
+                    "",
+                )
+            )
+
+            story["article_title"] = (
+                rss_story["title"]
+            )
+
+            story["summary"] = (
+                rss_story["summary"]
+            )
+
+            story["image"] = (
+                rss_story["image"]
+            )
+
+            print(
+                "Using verified RSS story."
+            )
+
+            return story
+
+        # ----------------------------------------------------
+        # NEW: IMAGE SEARCH FALLBACK
+        # ----------------------------------------------------
+
+        print("")
+        print(
+            "No valid article/RSS image."
+        )
+
+        print(
+            "Trying real-image search fallback..."
+        )
+
+        image_url = image_search_fallback(
+            story
+        )
+
+        if image_url:
+
+            summary = story.get(
+                "description",
+                "",
+            )
+
+            if len(summary) < 40:
+
+                summary = (
+                    f"{story['title']}. "
+                    f"Latest developments reported by "
+                    f"{publisher}."
+                )
+
+            story["resolved_url"] = (
+                story.get(
+                    "link",
+                    "",
+                )
+            )
+
+            story["article_title"] = (
+                story["title"]
+            )
+
+            story["summary"] = summary
+
+            story["image"] = image_url
+
+            story["image_source"] = (
+                "verified_image_search"
+            )
+
+            print("")
+            print(
+                "IMAGE FALLBACK SUCCESS"
+            )
+
+            print(
+                image_url
+            )
+
+            return story
+
+        print("")
         print(
             "RSS fallback rejected: "
             "no valid RSS/article image found."
@@ -2267,453 +1842,208 @@ def build_rss_verified_story(
 
         return None
 
-    print(
-        "RSS FALLBACK PASSED"
+    # --------------------------------------------------------
+    # Direct publisher article
+    # --------------------------------------------------------
+
+    final_url, page_html = fetch_page(
+        link
     )
 
-    print(
-        f"Publisher: {source}"
-    )
+    if final_url and page_html:
 
-    print(
-        f"Image: {valid_image}"
-    )
-
-    return {
-        "title": title,
-        "summary": summary,
-        "source": source,
-
-        # Google News URL retained because
-        # this is RSS verification.
-        "url": story.get(
-            "url",
-            "",
-        ),
-
-        "resolved_url": story.get(
-            "url",
-            "",
-        ),
-
-        "image_url": valid_image,
-
-        "verification": "google_news_rss",
-    }
-
-
-# ============================================================
-# ARTICLE ENRICHMENT
-# ============================================================
-
-def enrich_story(story):
-
-    original_url = story.get(
-        "url",
-        "",
-    )
-
-    if not original_url:
-
-        print(
-            "Rejected: story has no URL."
+        article = extract_article_data(
+            final_url,
+            page_html,
         )
 
-        return None
+        if article:
 
-    if is_social_domain(
-        original_url
-    ):
-
-        print(
-            "Rejected: social-media URL."
-        )
-
-        return None
-
-    # ========================================================
-    # GOOGLE NEWS
-    # ========================================================
-
-    if is_google_news_url(
-        original_url
-    ):
-
-        resolution = (
-            resolve_google_news_article(
-                story
-            )
-        )
-
-        # ----------------------------------------------------
-        # PUBLISHER ARTICLE FOUND
-        # ----------------------------------------------------
-
-        if resolution:
-
-            article_url = resolution.get(
-                "url",
-                "",
+            story["resolved_url"] = (
+                final_url
             )
 
-            print(
-                f"Resolved publisher article: "
-                f"{article_url}"
+            story["article_title"] = (
+                article["title"]
             )
 
-            try:
-
-                response = requests.get(
-                    article_url,
-                    headers=HEADERS,
-                    timeout=30,
-                    allow_redirects=True,
-                )
-
-                response.raise_for_status()
-
-                resolved_url = response.url
-                page = response.text
-
-            except Exception as exc:
-
-                print(
-                    f"Publisher fetch failed: "
-                    f"{exc}"
-                )
-
-                page = ""
-                resolved_url = ""
-
-            if (
-                page
-                and resolved_url
-                and not is_google_news_url(
-                    resolved_url
-                )
-            ):
-
-                article = extract_article_data(
-                    page,
-                    resolved_url,
-                    story,
-                )
-
-                if article:
-
-                    story.update(
-                        article
-                    )
-
-                    story[
-                        "verification"
-                    ] = resolution.get(
-                        "method",
-                        "publisher",
-                    )
-
-                    print()
-                    print(
-                        "=" * 70
-                    )
-                    print(
-                        "ARTICLE VERIFICATION PASSED"
-                    )
-                    print(
-                        "=" * 70
-                    )
-
-                    return story
-
-                print(
-                    "Publisher page did not provide "
-                    "complete article data."
-                )
-
-        # ----------------------------------------------------
-        # RSS FALLBACK
-        # ----------------------------------------------------
-
-        fallback = (
-            build_rss_verified_story(
-                story
+            story["summary"] = (
+                article["summary"]
             )
-        )
 
-        if fallback:
-
-            story.update(
-                fallback
+            story["image"] = (
+                article["image"]
             )
 
             return story
 
-        print(
-            "Google News story failed all "
-            "verification methods."
-        )
+    # --------------------------------------------------------
+    # Direct page failed image extraction
+    # --------------------------------------------------------
 
-        return None
+    print(
+        "Direct article failed."
+    )
 
-    # ========================================================
-    # NON-GOOGLE ARTICLE
-    # ========================================================
-
-    try:
-
-        response = requests.get(
-            original_url,
-            headers=HEADERS,
-            timeout=30,
-            allow_redirects=True,
-        )
-
-        response.raise_for_status()
-
-    except Exception as exc:
-
-        print(
-            f"Rejected: article fetch failed: "
-            f"{exc}"
-        )
-
-        return None
-
-    resolved_url = response.url
-
-    if not resolved_url:
-
-        print(
-            "Rejected: no resolved URL."
-        )
-
-        return None
-
-    if (
-        is_google_news_url(
-            resolved_url
-        )
-        or is_social_domain(
-            resolved_url
-        )
-        or is_search_engine_url(
-            resolved_url
-        )
-    ):
-
-        print(
-            "Rejected: resolved URL is not a "
-            "publisher article."
-        )
-
-        return None
-
-    page = response.text
-
-    article = extract_article_data(
-        page,
-        resolved_url,
+    image_url = image_search_fallback(
         story,
+        link,
     )
 
-    if not article:
+    if image_url:
 
-        print(
-            "Rejected: article data incomplete."
+        story["resolved_url"] = (
+            link
         )
 
-        return None
+        story["article_title"] = (
+            story["title"]
+        )
 
-    story.update(
-        article
-    )
+        story["summary"] = (
+            story.get(
+                "description",
+                "",
+            )
+            or story["title"]
+        )
 
-    story[
-        "verification"
-    ] = "direct"
+        story["image"] = image_url
 
-    print()
-    print(
-        "=" * 70
-    )
-    print(
-        "ARTICLE VERIFICATION PASSED"
-    )
-    print(
-        "=" * 70
-    )
+        story["image_source"] = (
+            "verified_image_search"
+        )
 
-    return story
+        return story
+
+    return None
+
+
+# ============================================================
+# STORY RELEVANCE
+# ============================================================
+
+def is_rift_valley_story(
+    story,
+):
+    text = " ".join(
+        [
+            story.get(
+                "title",
+                "",
+            ),
+            story.get(
+                "description",
+                "",
+            ),
+            story.get(
+                "publisher",
+                "",
+            ),
+        ]
+    ).lower()
+
+    for county in COUNTIES:
+
+        if county.lower() in text:
+            return True
+
+    return False
 
 
 # ============================================================
 # STORY SCORING
 # ============================================================
 
-def score_story(story):
-
-    title = clean_text(
-        story.get(
-            "title",
-            "",
-        )
+def score_story(
+    story,
+):
+    title = story.get(
+        "title",
+        "",
     )
 
-    summary = clean_text(
-        story.get(
-            "summary",
-            "",
-        )
+    summary = story.get(
+        "summary",
+        "",
     )
 
-    text = (
-        f"{title} {summary}"
-    ).lower()
+    publisher = story.get(
+        "publisher",
+        "",
+    )
 
     score = 0
 
-    # --------------------------------------------------------
-    # COUNTY RELEVANCE
-    # --------------------------------------------------------
+    text = (
+        title
+        + " "
+        + summary
+    ).lower()
 
+    # County relevance
     for county in COUNTIES:
 
         if county.lower() in text:
+            score += 20
 
-            score += 10
-
-    # --------------------------------------------------------
-    # KEYWORDS
-    # --------------------------------------------------------
-
-    for keyword in KEYWORDS:
-
-        if keyword in text:
-
-            score += 2
-
-    # --------------------------------------------------------
-    # NUMBERS
-    # --------------------------------------------------------
-
-    if re.search(
-        r"\d",
-        title,
-    ):
-
-        score += 5
-
-    # --------------------------------------------------------
-    # MONEY
-    # --------------------------------------------------------
-
-    if re.search(
-        r"\b(?:kes|ksh|sh|million|billion)\b",
-        text,
-    ):
-
-        score += 5
-
-    # --------------------------------------------------------
-    # ACTION TERMS
-    # --------------------------------------------------------
-
-    action_terms = [
-        "announced",
-        "approved",
-        "launched",
-        "opened",
-        "started",
-        "began",
-        "signed",
-        "funded",
-        "awarded",
-        "construction",
-        "completed",
-        "commissioned",
-        "invest",
-        "investment",
-        "development",
-    ]
-
-    for term in action_terms:
-
-        if term in text:
-
-            score += 4
-
-    # --------------------------------------------------------
-    # PUBLIC INTEREST
-    # --------------------------------------------------------
-
-    public_interest_terms = [
+    # Strong news terms
+    strong_terms = [
+        "project",
         "road",
         "hospital",
         "school",
         "water",
-        "jobs",
-        "farmers",
-        "health",
-        "education",
-        "housing",
-        "electricity",
-        "bridge",
+        "dam",
         "market",
+        "development",
+        "governor",
+        "president",
+        "deputy president",
+        "senator",
+        "mp",
+        "government",
+        "funding",
+        "construction",
+        "launch",
+        "opened",
+        "approved",
+        "announced",
     ]
 
-    for term in public_interest_terms:
+    for term in strong_terms:
 
         if term in text:
+            score += 5
 
-            score += 3
+    # Publisher bonus
+    publisher_lower = publisher.lower()
 
-    # --------------------------------------------------------
-    # STORY DEPTH
-    # --------------------------------------------------------
-
-    if len(summary) >= 150:
-
-        score += 5
-
-    if len(summary) >= 300:
-
-        score += 5
-
-    if len(summary) >= 500:
-
-        score += 3
-
-    # --------------------------------------------------------
-    # WEAK STORIES
-    # --------------------------------------------------------
-
-    weak_terms = [
-        "opinion",
-        "podcast",
-        "newsletter",
-        "sports results",
-        "horoscope",
-        "celebrity",
-        "gossip",
-        "weekly roundup",
-        "daily roundup",
+    trusted_publishers = [
+        "citizen",
+        "nation",
+        "standard",
+        "star",
+        "capital",
+        "ntv",
+        "kbc",
+        "county government",
+        "government",
     ]
 
-    for term in weak_terms:
+    for publisher_name in trusted_publishers:
 
-        if term in text:
+        if publisher_name in publisher_lower:
+            score += 10
+            break
 
-            score -= 10
+    # Image bonus
+    if story.get("image"):
+        score += 25
 
-    if len(
-        title.split()
-    ) < 4:
-
-        score -= 5
-
-    if len(summary) < 60:
-
-        score -= 10
+    # Article verification bonus
+    if story.get("resolved_url"):
+        score += 20
 
     return score
 
@@ -2722,58 +2052,27 @@ def score_story(story):
 # HEADLINE
 # ============================================================
 
-def create_short_headline(
-    title
+def build_headline(
+    story,
 ):
-
     title = clean_text(
-        title
+        story.get(
+            "article_title",
+            "",
+        )
+        or story.get(
+            "title",
+            "",
+        )
     )
 
-    if len(title) <= 100:
-
-        return title
-
-    words = title.split()
-
-    result = []
-
-    current_length = 0
-
-    for word in words:
-
-        extra = (
-            len(word)
-            + (
-                1
-                if result
-                else 0
-            )
-        )
-
-        if (
-            current_length
-            + extra
-            > 100
-        ):
-
-            break
-
-        result.append(
-            word
-        )
-
-        current_length += extra
-
-    shortened = " ".join(
-        result
+    title = re.sub(
+        r"\s+[-|]\s+[^-|]+$",
+        "",
+        title,
     )
 
-    if not shortened:
-
-        return title[:100]
-
-    return shortened
+    return title.strip()
 
 
 # ============================================================
@@ -2781,14 +2080,10 @@ def create_short_headline(
 # ============================================================
 
 def build_narration(
-    story
+    story,
 ):
-
-    title = clean_text(
-        story.get(
-            "title",
-            "",
-        )
+    headline = build_headline(
+        story
     )
 
     summary = clean_text(
@@ -2798,394 +2093,144 @@ def build_narration(
         )
     )
 
-    county = clean_text(
+    publisher = clean_text(
         story.get(
-            "county",
+            "publisher",
             "",
         )
     )
 
-    source = clean_text(
-        story.get(
-            "source",
-            "",
-        )
-    )
+    if not summary:
+        summary = headline
 
-    if county:
-
-        opening = (
-            f"Here is the latest development "
-            f"from {county}."
-        )
-
-    else:
-
-        opening = (
-            "Here is the latest major "
-            "development from the Rift Valley."
-        )
+    if len(summary) > 700:
+        summary = summary[:700]
 
     narration = (
-        f"{opening} "
-        f"{title}. "
-        f"{summary} "
-        f"This is Rift Valley Watch, "
-        f"bringing you verified developments "
-        f"from across the region."
+        f"Rift Valley Watch. "
+        f"{headline}. "
+        f"{summary}. "
+        f"According to {publisher}, "
+        f"these are the latest developments."
     )
 
-    if source:
-
-        narration += (
-            f" The report comes from {source}."
-        )
-
-    return " ".join(
-        narration.split()
-    )
+    return narration
 
 
 # ============================================================
-# COLLECT CANDIDATES
+# COLLECT STORIES
 # ============================================================
 
-def collect_candidates():
-
-    all_candidates = []
+def collect_stories():
+    all_stories = []
 
     seen_titles = set()
 
-    print()
+    print("")
     print(
-        "=" * 70
+        "============================================================"
     )
     print(
-        "COLLECTING RIFT VALLEY NEWS"
+        "RIFT VALLEY WATCH NEWS ENGINE V9"
     )
     print(
-        "=" * 70
+        "============================================================"
     )
 
-    for county in COUNTIES:
+    for rss_url in RSS_URLS:
 
-        query = (
-            f'"{county}" Kenya when:1d'
-        )
-
-        print()
+        print("")
         print(
-            f"SEARCHING: {county}"
+            "Fetching:",
+            rss_url,
         )
 
-        root = fetch_rss(
-            query
+        xml_text = fetch_rss(
+            rss_url
         )
 
-        stories = parse_feed(
-            root
+        if not xml_text:
+            continue
+
+        feed_stories = parse_feed(
+            xml_text
         )
 
         print(
-            f"Found {len(stories)} RSS stories."
+            "Stories found:",
+            len(feed_stories),
         )
 
-        for story in stories:
+        for story in feed_stories:
 
-            title = clean_text(
-                story.get(
-                    "title",
-                    "",
-                )
+            title = story.get(
+                "title",
+                "",
             )
 
             if not title:
-
                 continue
 
-            normalized = " ".join(
-                normalize_title(
-                    title
-                )
+            normalized = normalize_text(
+                title
             )
 
             if normalized in seen_titles:
-
                 continue
 
             seen_titles.add(
                 normalized
             )
 
-            story[
-                "county"
-            ] = county
+            if not is_rift_valley_story(
+                story
+            ):
+                continue
 
-            story[
-                "score"
-            ] = score_story(
+            all_stories.append(
                 story
             )
 
-            all_candidates.append(
-                story
-            )
-
-    all_candidates.sort(
-        key=lambda story: story.get(
-            "score",
-            0,
-        ),
-        reverse=True,
+    print("")
+    print(
+        "Total relevant candidates:",
+        len(all_stories),
     )
 
-    return all_candidates
+    return all_stories
 
 
 # ============================================================
-# SELECT VERIFIED STORY
+# SELECT STORY
 # ============================================================
 
 def select_story():
-
-    candidates = collect_candidates()
+    candidates = collect_stories()
 
     if not candidates:
-
         raise RuntimeError(
-            "No recent Rift Valley stories found."
+            "No Rift Valley news candidates found."
         )
 
-    print()
-    print(
-        f"Found {len(candidates)} candidates."
-    )
+    # Most recent-looking RSS order first.
+    candidates = candidates[:80]
 
-    maximum_checks = min(
-        len(candidates),
-        80,
-    )
+    verified = []
 
     for index, candidate in enumerate(
-        candidates[
-            :maximum_checks
-        ],
+        candidates,
         start=1,
     ):
 
-        print()
+        print("")
         print(
-            "=" * 70
-        )
-
-        print(
-            f"CHECKING STORY "
-            f"{index}/{maximum_checks}"
+            "============================================================"
         )
 
         print(
-            f"County : "
-            f"{candidate.get('county', '')}"
+            f"CHECKING CANDIDATE {index}/{len(candidates)}"
         )
 
         print(
-            f"Title  : "
-            f"{candidate.get('title', '')}"
-        )
-
-        print(
-            f"Source : "
-            f"{candidate.get('source', '')}"
-        )
-
-        print(
-            f"Score  : "
-            f"{candidate.get('score', 0)}"
-        )
-
-        print(
-            f"Image  : "
-            f"{candidate.get('rss_image', '')}"
-        )
-
-        print(
-            "=" * 70
-        )
-
-        story = enrich_story(
-            candidate
-        )
-
-        if not story:
-
-            print(
-                "Rejected: article did not "
-                "pass verification."
-            )
-
-            continue
-
-        story[
-            "title"
-        ] = create_short_headline(
-            story[
-                "title"
-            ]
-        )
-
-        story[
-            "narration"
-        ] = build_narration(
-            story
-        )
-
-        story[
-            "brand"
-        ] = "Rift Valley Watch"
-
-        print()
-        print(
-            "=" * 70
-        )
-
-        print(
-            "SELECTED STORY"
-        )
-
-        print(
-            f"County       : "
-            f"{story.get('county', '')}"
-        )
-
-        print(
-            f"Title        : "
-            f"{story.get('title', '')}"
-        )
-
-        print(
-            f"Source       : "
-            f"{story.get('source', '')}"
-        )
-
-        print(
-            f"Verification : "
-            f"{story.get('verification', '')}"
-        )
-
-        print(
-            f"Image        : "
-            f"{story.get('image_url', '')}"
-        )
-
-        print(
-            "=" * 70
-        )
-
-        return story
-
-    raise RuntimeError(
-        "No recent story passed verification "
-        "after checking all available candidates."
-    )
-
-
-# ============================================================
-# SAVE STORY
-# ============================================================
-
-def save_story(
-    story
-):
-
-    STORY_FILE.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    with STORY_FILE.open(
-        "w",
-        encoding="utf-8",
-    ) as file:
-
-        json.dump(
-            story,
-            file,
-            indent=2,
-            ensure_ascii=False,
-        )
-
-    print()
-    print(
-        f"Story saved to: {STORY_FILE}"
-    )
-
-    return STORY_FILE
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-def main():
-
-    print()
-    print(
-        "=" * 70
-    )
-
-    print(
-        "RIFT VALLEY WATCH — NEWS ENGINE V8"
-    )
-
-    print(
-        "=" * 70
-    )
-
-    story = select_story()
-
-    save_story(
-        story
-    )
-
-    print()
-    print(
-        "=" * 70
-    )
-
-    print(
-        "GENERATING VIDEO"
-    )
-
-    print(
-        "=" * 70
-    )
-
-    output = generate_video(
-        story
-    )
-
-    print()
-    print(
-        "=" * 70
-    )
-
-    print(
-        "RIFT VALLEY WATCH COMPLETE"
-    )
-
-    print(
-        f"VIDEO: {output}"
-    )
-
-    print(
-        "=" * 70
-    )
-
-
-# ============================================================
-# ENTRY POINT
-# ============================================================
-
-if __name__ == "__main__":
-
-    main()
+            "Title:",
+           
