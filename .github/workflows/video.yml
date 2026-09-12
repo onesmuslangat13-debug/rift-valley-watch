@@ -1,51 +1,50 @@
-name: Rift Valley Watch — Generate MP4
+name: Rift Valley Watch
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 7 * * *"
+    - cron: "0 6 * * *"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  generate-video:
+  generate:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
 
     steps:
-      # ------------------------------------------------------
-      # CHECKOUT
-      # ------------------------------------------------------
+
+      # ============================================================
+      # 1. CHECKOUT
+      # ============================================================
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ------------------------------------------------------
-      # PYTHON
-      # ------------------------------------------------------
+      # ============================================================
+      # 2. PYTHON
+      # ============================================================
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
-      # ------------------------------------------------------
-      # FFMPEG
-      # ------------------------------------------------------
+      # ============================================================
+      # 3. FFMPEG
+      # ============================================================
       - name: Install FFmpeg
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
 
-          echo "=== FFmpeg ==="
-          ffmpeg -version
+          echo "=== FFMPEG VERSION ==="
+          ffmpeg -version | head -n 2
 
-          echo "=== FFprobe ==="
-          ffprobe -version
-
-      # ------------------------------------------------------
-      # PYTHON DEPENDENCIES
-      # ------------------------------------------------------
-      - name: Install Python dependencies
+      # ============================================================
+      # 4. INSTALL PYTHON PACKAGES
+      # ============================================================
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
 
@@ -53,79 +52,193 @@ jobs:
             requests \
             feedparser \
             beautifulsoup4 \
+            gTTS \
             Pillow \
-            gTTS
+            moviepy \
+            numpy
 
-          echo "=== Installed packages ==="
-          python -m pip list
-
-      # ------------------------------------------------------
-      # VERIFY IMPORTS BEFORE RUNNING
-      # ------------------------------------------------------
-      - name: Verify Python dependencies
+      # ============================================================
+      # 5. CREATE DIRECTORIES
+      # ============================================================
+      - name: Prepare directories
         run: |
-          python - <<'PY'
-          import requests
-          import feedparser
-          import bs4
-          import PIL
-          import gtts
+          mkdir -p output
+          mkdir -p data
+          mkdir -p audio
+          mkdir -p assets
 
-          print("All required Python packages imported successfully.")
-          print("requests:", requests.__version__)
-          print("feedparser:", feedparser.__version__)
-          print("beautifulsoup4: OK")
-          print("Pillow:", PIL.__version__)
-          print("gTTS: OK")
-          PY
+          echo "=== DIRECTORY STRUCTURE ==="
+          find . -maxdepth 2 -type d | sort
 
-      # ------------------------------------------------------
-      # GENERATE VIDEO
-      # ------------------------------------------------------
+      # ============================================================
+      # 6. CHECK IMPORTANT FILES
+      # ============================================================
+      - name: Check Rift Valley Watch files
+        run: |
+          echo "=== ROOT FILES ==="
+          ls -lah
+
+          echo "=== DATA ==="
+          ls -lah data || true
+
+          echo "=== OUTPUT ==="
+          ls -lah output || true
+
+          echo "=== PYTHON FILES ==="
+          find . -maxdepth 3 -name "*.py" -print
+
+      # ============================================================
+      # 7. GENERATE VIDEO
+      # ============================================================
       - name: Generate Rift Valley Watch video
+        env:
+          PYTHONUNBUFFERED: "1"
         run: |
-          python rift_valley_main.py
+          echo "============================================================"
+          echo "STARTING RIFT VALLEY WATCH"
+          echo "============================================================"
 
-      # ------------------------------------------------------
-      # FINAL MP4 QC
-      # ------------------------------------------------------
-      - name: Final MP4 QC
+          python -u rift_valley_main.py
+
+          echo "============================================================"
+          echo "RIFT VALLEY WATCH PYTHON PROCESS FINISHED"
+          echo "============================================================"
+
+      # ============================================================
+      # 8. INSPECT EVERYTHING GENERATED
+      # ============================================================
+      - name: Inspect generated files
+        if: always()
         run: |
-          test -f output/rift_valley_watch_reel.mp4
-
           echo "============================================================"
-          echo "VIDEO QC"
+          echo "ALL MP4 FILES"
           echo "============================================================"
 
-          ffprobe -v error \
-            -select_streams v:0 \
-            -show_entries stream=codec_name,width,height,duration \
-            -of default=noprint_wrappers=1 \
-            output/rift_valley_watch_reel.mp4
+          find . -type f -iname "*.mp4" -print -exec ls -lh {} \; || true
 
+          echo ""
           echo "============================================================"
-          echo "AUDIO QC"
+          echo "OUTPUT DIRECTORY"
           echo "============================================================"
 
-          ffprobe -v error \
-            -select_streams a:0 \
-            -show_entries stream=codec_name,sample_rate,channels,duration \
-            -of default=noprint_wrappers=1 \
-            output/rift_valley_watch_reel.mp4
+          ls -lah output || true
 
+          echo ""
           echo "============================================================"
-          echo "FILE QC"
+          echo "DATA DIRECTORY"
           echo "============================================================"
 
+          ls -lah data || true
+
+          echo ""
+          echo "============================================================"
+          echo "AUDIO DIRECTORY"
+          echo "============================================================"
+
+          ls -lah audio || true
+
+      # ============================================================
+      # 9. VERIFY VIDEO
+      # ============================================================
+      - name: Verify Rift Valley Watch MP4
+        run: |
+          echo "Checking for:"
+          echo "output/rift_valley_watch_reel.mp4"
+          echo ""
+
+          if [ ! -f "output/rift_valley_watch_reel.mp4" ]; then
+            echo "::error::Rift Valley Watch MP4 was NOT generated."
+            echo ""
+            echo "Available MP4 files:"
+            find . -type f -iname "*.mp4" -print || true
+            echo ""
+            echo "Output directory:"
+            ls -lah output || true
+            exit 1
+          fi
+
+          echo "SUCCESS: MP4 exists."
           ls -lh output/rift_valley_watch_reel.mp4
 
-      # ------------------------------------------------------
-      # UPLOAD MP4 AS GITHUB ARTIFACT
-      # ------------------------------------------------------
-      - name: Upload MP4 artifact
+      # ============================================================
+      # 10. VERIFY MP4 IS NOT EMPTY
+      # ============================================================
+      - name: Verify MP4 size
+        run: |
+          FILE="output/rift_valley_watch_reel.mp4"
+
+          SIZE=$(stat -c%s "$FILE")
+
+          echo "MP4 size: $SIZE bytes"
+
+          if [ "$SIZE" -lt 100000 ]; then
+            echo "::error::MP4 exists but is suspiciously small."
+            exit 1
+          fi
+
+          echo "MP4 size check passed."
+
+      # ============================================================
+      # 11. VERIFY MP4 WITH FFPROBE
+      # ============================================================
+      - name: Verify video with FFprobe
+        run: |
+          FILE="output/rift_valley_watch_reel.mp4"
+
+          echo "============================================================"
+          echo "FFPROBE"
+          echo "============================================================"
+
+          ffprobe \
+            -v error \
+            -show_entries format=duration,size \
+            -show_entries stream=codec_name,width,height,r_frame_rate \
+            -of default=noprint_wrappers=1 \
+            "$FILE"
+
+      # ============================================================
+      # 12. SHOW STORY
+      # ============================================================
+      - name: Show selected story
+        if: always()
+        run: |
+          echo "============================================================"
+          echo "STORY JSON"
+          echo "============================================================"
+
+          if [ -f data/story.json ]; then
+            cat data/story.json
+          else
+            echo "No data/story.json found."
+          fi
+
+      # ============================================================
+      # 13. SHOW SCRIPT
+      # ============================================================
+      - name: Show generated script
+        if: always()
+        run: |
+          echo "============================================================"
+          echo "SCRIPT JSON"
+          echo "============================================================"
+
+          if [ -f data/script.json ]; then
+            cat data/script.json
+          else
+            echo "No data/script.json found."
+          fi
+
+      # ============================================================
+      # 14. UPLOAD ARTIFACTS
+      # ============================================================
+      - name: Upload Rift Valley Watch artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: rift-valley-watch-mp4
-          path: output/rift_valley_watch_reel.mp4
-          if-no-files-found: error
-          retention-days: 7
+          name: rift-valley-watch-output
+          path: |
+            output/
+            data/
+            audio/
+          if-no-files-found: warn
+          retention-days: 14
