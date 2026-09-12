@@ -1,6 +1,6 @@
 # ============================================================
 # RIFT VALLEY WATCH
-# FAST NEWS SELECTION + VERIFICATION + IMAGE FALLBACK
+# MAIN NEWS ENGINE
 # ============================================================
 
 import os
@@ -34,7 +34,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
 # ============================================================
-# RIFT VALLEY COUNTIES
+# COUNTIES
 # ============================================================
 
 COUNTIES = [
@@ -48,85 +48,108 @@ COUNTIES = [
     "Narok",
 ]
 
+
 COUNTY_ALIASES = {
     "Bomet": [
         "bomet",
         "sotik",
-        "konoin",
         "chepalungu",
+        "konoin",
         "bomet east",
         "bomet central",
+        "longisa",
+        "kaplong",
+        "sigorwet",
+        "mogogosiek",
     ],
     "Kericho": [
         "kericho",
         "litein",
         "belgut",
-        "kipkelion",
         "ainamoi",
+        "kipkelion",
+        "kipkelion east",
+        "kipkelion west",
+        "bureti",
         "sigowet",
         "soin",
+        "kapsoit",
     ],
     "Nakuru": [
         "nakuru",
         "naivasha",
         "gilgil",
         "molo",
+        "njoro",
         "bahati",
         "subukia",
         "rongai",
-        "njoro",
+        "kuresoi",
+        "kuresoi north",
+        "kuresoi south",
     ],
     "Nandi": [
         "nandi",
         "kapsabet",
         "mosop",
         "chesumei",
-        "aldai",
         "emgwen",
-        "tinderet",
+        "aldai",
         "nandi hills",
+        "tindiret",
+        "baringo",
     ],
     "Uasin Gishu": [
         "uasin gishu",
         "eldoret",
         "soy",
+        "turbo",
         "ainabkoi",
         "kapseret",
         "kesses",
-        "turbo",
+        "moiben",
     ],
     "Elgeyo-Marakwet": [
         "elgeyo-marakwet",
         "elgeyo marakwet",
-        "keiyo",
         "marakwet",
-        "itEn",
+        "elgeyo",
+        "itEN",
         "iten",
-        "kapsowar",
+        "keiyo",
+        "keiyo north",
+        "keiyo south",
+        "marakwet east",
+        "marakwet west",
         "cherangany",
     ],
     "West Pokot": [
         "west pokot",
         "kapenguria",
-        "pokot",
         "sigor",
-        "kacheliba",
         "pokot south",
+        "pokot central",
+        "pokot north",
+        "kipkomo",
+        "kacheliba",
     ],
     "Narok": [
         "narok",
-        "kilgoris",
-        "transmara",
-        "suswa",
-        "ololulunga",
         "narok north",
         "narok south",
+        "transmara",
+        "transmara west",
+        "transmara east",
+        "ololulunga",
+        "suswa",
+        "maasai mara",
+        "mara",
     ],
 }
 
 
 # ============================================================
-# FAST SETTINGS
+# SPEED / QUALITY SETTINGS
 # ============================================================
 
 RSS_TIMEOUT = 5
@@ -136,8 +159,8 @@ SEARCH_TIMEOUT = 5
 
 MAX_AGE_HOURS = 72
 
-MAX_CANDIDATES_TO_VERIFY = 4
-MAX_VERIFIED_TO_COMPARE = 2
+MAX_CANDIDATES_TO_VERIFY = 12
+MAX_VERIFIED_TO_COMPARE = 6
 
 BING_RESULT_LIMIT = 5
 MAX_BING_IMAGES = 5
@@ -178,18 +201,35 @@ def clean_text(value):
 
 def normalize_title(value):
     value = clean_text(value).lower()
-    value = re.sub(r"[^a-z0-9\s]", " ", value)
-    value = re.sub(r"\s+", " ", value)
+
+    value = re.sub(
+        r"https?://\S+",
+        "",
+        value,
+    )
+
+    value = re.sub(
+        r"[^a-z0-9\s]",
+        " ",
+        value,
+    )
+
+    value = re.sub(
+        r"\s+",
+        " ",
+        value,
+    )
+
     return value.strip()
 
 
-def truncate_text(value, length=240):
-    value = clean_text(value)
+def truncate_text(text, limit=800):
+    text = clean_text(text)
 
-    if len(value) <= length:
-        return value
+    if len(text) <= limit:
+        return text
 
-    return value[:length].rsplit(" ", 1)[0] + "..."
+    return text[:limit].rsplit(" ", 1)[0] + "..."
 
 
 def valid_http_url(url):
@@ -218,31 +258,37 @@ def hostname(url):
 def is_search_engine_url(url):
     host = hostname(url)
 
-    return any(
-        x in host
-        for x in [
-            "google.",
-            "bing.com",
-            "search.yahoo.",
-        ]
-    )
+    blocked = [
+        "google.",
+        "bing.com",
+        "search.yahoo.",
+        "duckduckgo.com",
+    ]
+
+    return any(x in host for x in blocked)
 
 
 def is_svg_url(url):
     if not url:
-        return False
+        return True
 
-    return ".svg" in url.lower()
+    lower = url.lower()
+
+    return (
+        ".svg" in lower
+        or "sprite" in lower
+        or "favicon" in lower
+    )
 
 
-def story_hash(title, url):
+def story_hash(title, url=""):
     raw = (
         normalize_title(title)
         + "|"
         + clean_text(url)
     )
 
-    return hashlib.sha256(
+    return hashlib.sha1(
         raw.encode("utf-8")
     ).hexdigest()[:16]
 
@@ -252,7 +298,7 @@ def now_utc():
 
 
 # ============================================================
-# DATE PARSING
+# DATE HELPERS
 # ============================================================
 
 def parse_date(value):
@@ -260,57 +306,74 @@ def parse_date(value):
         return None
 
     if isinstance(value, datetime):
-        if value.tzinfo is None:
-            return value.replace(tzinfo=timezone.utc)
+        dt = value
 
-        return value.astimezone(timezone.utc)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+
+        return dt.astimezone(timezone.utc)
 
     text = clean_text(value)
+
+    if not text:
+        return None
 
     formats = [
         "%a, %d %b %Y %H:%M:%S %z",
         "%a, %d %b %Y %H:%M %z",
+        "%d %b %Y %H:%M:%S %z",
+        "%d %b %Y %H:%M %z",
         "%Y-%m-%dT%H:%M:%S%z",
         "%Y-%m-%dT%H:%M:%SZ",
         "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
         "%Y-%m-%d",
     ]
 
     for fmt in formats:
         try:
-            result = datetime.strptime(text, fmt)
+            dt = datetime.strptime(text, fmt)
 
-            if result.tzinfo is None:
-                result = result.replace(
-                    tzinfo=timezone.utc
-                )
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
 
-            return result.astimezone(timezone.utc)
+            return dt.astimezone(timezone.utc)
 
         except Exception:
             pass
 
-    return None
+    try:
+        from email.utils import parsedate_to_datetime
+
+        dt = parsedate_to_datetime(text)
+
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+
+        return dt.astimezone(timezone.utc)
+
+    except Exception:
+        return None
 
 
-def is_recent(date_value):
-    parsed = parse_date(date_value)
+def is_recent(dt, max_hours=MAX_AGE_HOURS):
+    if not dt:
+        return True
 
-    if parsed is None:
-        return False
+    age = now_utc() - dt
 
-    cutoff = now_utc() - timedelta(
-        hours=MAX_AGE_HOURS
-    )
-
-    return parsed >= cutoff
+    return age <= timedelta(hours=max_hours)
 
 
 # ============================================================
 # REQUEST
 # ============================================================
 
-def get_response(url, timeout):
+def get_response(
+    url,
+    timeout=RSS_TIMEOUT,
+    allow_redirects=True,
+):
     if not valid_http_url(url):
         return None
 
@@ -319,7 +382,7 @@ def get_response(url, timeout):
             url,
             headers=HEADERS,
             timeout=timeout,
-            allow_redirects=True,
+            allow_redirects=allow_redirects,
         )
 
         if response.status_code >= 400:
@@ -327,12 +390,7 @@ def get_response(url, timeout):
 
         return response
 
-    except Exception as exc:
-        print(
-            f"Request failed: "
-            f"{url} | {exc}"
-        )
-
+    except Exception:
         return None
 
 
@@ -343,133 +401,155 @@ def get_response(url, timeout):
 def google_news_rss(query):
     encoded = quote_plus(query)
 
-    return (
+    url = (
         "https://news.google.com/rss/search?"
-        f"q={encoded}&"
-        "hl=en-KE&"
-        "gl=KE&"
-        "ceid=KE:en"
+        f"q={encoded}&hl=en-KE&gl=KE&ceid=KE:en"
+    )
+
+    return get_response(
+        url,
+        timeout=RSS_TIMEOUT,
     )
 
 
-def parse_feed(feed_url, county):
-    print(
-        f"RSS: {county} -> {feed_url}"
-    )
-
-    response = get_response(
-        feed_url,
-        RSS_TIMEOUT,
-    )
+def parse_feed(response, county_hint):
+    candidates = []
 
     if response is None:
-        return []
+        return candidates
 
     try:
         feed = feedparser.parse(
             response.content
         )
-
-    except Exception as exc:
-        print(
-            f"RSS parse failed: {exc}"
-        )
-
-        return []
-
-    results = []
+    except Exception:
+        return candidates
 
     for entry in feed.entries[:8]:
+
         title = clean_text(
-            entry.get("title", "")
+            getattr(entry, "title", "")
         )
 
-        url = clean_text(
-            entry.get("link", "")
+        link = clean_text(
+            getattr(entry, "link", "")
         )
 
         summary = clean_text(
-            entry.get("summary", "")
+            getattr(
+                entry,
+                "summary",
+                getattr(entry, "description", ""),
+            )
         )
 
-        published = (
-            entry.get("published")
-            or entry.get("updated")
-            or ""
+        published_raw = (
+            getattr(entry, "published", "")
+            or getattr(entry, "updated", "")
         )
 
-        if not title or not url:
+        published = parse_date(
+            published_raw
+        )
+
+        if not title:
             continue
 
-        if not valid_http_url(url):
+        if not link:
             continue
 
-        date_value = parse_date(
+        if published and not is_recent(
             published
-        )
+        ):
+            continue
 
-        results.append(
+        image = get_rss_media_image(entry)
+
+        candidates.append(
             {
                 "title": title,
-                "url": url,
+                "url": link,
                 "summary": summary,
                 "published": (
-                    date_value.isoformat()
-                    if date_value
+                    published.isoformat()
+                    if published
                     else ""
                 ),
-                "county_hint": county,
-                "source_name": "",
-                "image_url": "",
+                "county_hint": county_hint,
+                "rss_image": image,
             }
         )
 
-    return results
+    return candidates
 
 
 # ============================================================
-# RSS MEDIA IMAGE
+# RSS IMAGE
 # ============================================================
 
 def get_rss_media_image(entry):
-    candidates = []
+    try:
+        media_content = getattr(
+            entry,
+            "media_content",
+            [],
+        )
 
-    media_content = entry.get(
-        "media_content",
-        [],
-    )
+        for item in media_content or []:
+            url = item.get("url")
 
-    if isinstance(media_content, list):
-        for item in media_content:
-            if isinstance(item, dict):
-                candidates.append(
-                    item.get("url", "")
-                )
+            if valid_http_url(url):
+                if not is_svg_url(url):
+                    return url
 
-    media_thumbnail = entry.get(
-        "media_thumbnail",
-        [],
-    )
+    except Exception:
+        pass
 
-    if isinstance(media_thumbnail, list):
-        for item in media_thumbnail:
-            if isinstance(item, dict):
-                candidates.append(
-                    item.get("url", "")
-                )
+    try:
+        media_thumbnail = getattr(
+            entry,
+            "media_thumbnail",
+            [],
+        )
 
-    for url in candidates:
-        if (
-            valid_http_url(url)
-            and not is_svg_url(url)
-        ):
-            return url
+        for item in media_thumbnail or []:
+            url = item.get("url")
+
+            if valid_http_url(url):
+                if not is_svg_url(url):
+                    return url
+
+    except Exception:
+        pass
+
+    try:
+        links = getattr(
+            entry,
+            "links",
+            [],
+        )
+
+        for item in links or []:
+            rel = item.get("rel", "")
+            typ = item.get("type", "")
+            url = item.get("href")
+
+            if rel == "enclosure":
+                if (
+                    "image" in typ.lower()
+                    and valid_http_url(url)
+                ):
+                    if not is_svg_url(url):
+                        return url
+
+    except Exception:
+        pass
 
     return ""
 
 
 # ============================================================
-# GOOGLE NEWS URL UNWRAP
+# GOOGLE NEWS URL
 # ============================================================
 
 def unwrap_google_news_url(url):
@@ -481,7 +561,8 @@ def unwrap_google_news_url(url):
 
     response = get_response(
         url,
-        ARTICLE_TIMEOUT,
+        timeout=ARTICLE_TIMEOUT,
+        allow_redirects=True,
     )
 
     if response is None:
@@ -489,31 +570,9 @@ def unwrap_google_news_url(url):
 
     final_url = response.url
 
-    if (
-        valid_http_url(final_url)
-        and "news.google.com" not in hostname(
-            final_url
-        )
-    ):
-        return final_url
-
-    soup = BeautifulSoup(
-        response.text,
-        "html.parser",
-    )
-
-    for tag in soup.find_all(
-        "a",
-        href=True,
-    ):
-        href = tag.get("href", "")
-
-        if (
-            valid_http_url(href)
-            and "news.google.com"
-            not in hostname(href)
-        ):
-            return href
+    if valid_http_url(final_url):
+        if "news.google.com" not in hostname(final_url):
+            return final_url
 
     return url
 
@@ -522,19 +581,22 @@ def unwrap_google_news_url(url):
 # BING SEARCH
 # ============================================================
 
-def bing_search(query, limit=5):
+def bing_search(query):
     url = (
         "https://www.bing.com/search?"
         f"q={quote_plus(query)}"
+        f"&count={BING_RESULT_LIMIT}"
     )
 
     response = get_response(
         url,
-        SEARCH_TIMEOUT,
+        timeout=SEARCH_TIMEOUT,
     )
 
     if response is None:
         return []
+
+    results = []
 
     try:
         soup = BeautifulSoup(
@@ -542,169 +604,144 @@ def bing_search(query, limit=5):
             "html.parser",
         )
 
-    except Exception as exc:
-        print(
-            f"Bing parse failed: {exc}"
-        )
+        for item in soup.select("li.b_algo"):
 
-        return []
+            link = item.select_one("h2 a")
 
-    results = []
+            if not link:
+                continue
 
-    for item in soup.select("li.b_algo"):
-        link = item.select_one(
-            "h2 a"
-        )
+            href = link.get("href", "")
 
-        if link is None:
-            continue
+            title = clean_text(
+                link.get_text(" ", strip=True)
+            )
 
-        href = link.get(
-            "href",
-            "",
-        )
+            snippet_node = item.select_one(
+                ".b_caption p"
+            )
 
-        title = clean_text(
-            link.get_text(" ", strip=True)
-        )
+            snippet = ""
 
-        paragraph = item.select_one(
-            ".b_caption p"
-        )
-
-        summary = ""
-
-        if paragraph:
-            summary = clean_text(
-                paragraph.get_text(
-                    " ",
-                    strip=True,
+            if snippet_node:
+                snippet = clean_text(
+                    snippet_node.get_text(
+                        " ",
+                        strip=True,
+                    )
                 )
-            )
 
-        if (
-            valid_http_url(href)
-            and not is_search_engine_url(
-                href
-            )
-        ):
+            if not valid_http_url(href):
+                continue
+
+            if is_search_engine_url(href):
+                continue
+
             results.append(
                 {
                     "title": title,
                     "url": href,
-                    "summary": summary,
+                    "summary": snippet,
                 }
             )
 
-        if len(results) >= limit:
-            break
+    except Exception:
+        return []
 
     return results
 
 
 # ============================================================
-# IMAGE CANDIDATES
+# IMAGE EXTRACTION
 # ============================================================
 
 def extract_image_candidates(
     soup,
-    page_url,
+    base_url,
 ):
-    candidates = []
+    images = []
+
+    if soup is None:
+        return images
 
     meta_names = [
         "og:image",
         "twitter:image",
         "twitter:image:src",
-        "thumbnail",
     ]
 
     for name in meta_names:
-        tag = soup.find(
+
+        node = soup.find(
             "meta",
             attrs={
-                "property": name
+                "property": name,
             },
         )
 
-        if tag is None:
-            tag = soup.find(
+        if node is None:
+            node = soup.find(
                 "meta",
                 attrs={
-                    "name": name
+                    "name": name,
                 },
             )
 
-        if tag:
-            content = tag.get(
+        if node:
+            content = node.get(
                 "content",
                 "",
             )
 
             if content:
-                candidates.append(
+                images.append(
                     content
                 )
 
-    for link in soup.find_all(
-        "link",
-        href=True,
-    ):
-        rel = " ".join(
-            link.get("rel", [])
-        ).lower()
+    for img in soup.find_all("img")[:30]:
 
-        if (
-            "image" in rel
-            or "thumbnail" in rel
-        ):
-            candidates.append(
-                link.get("href", "")
-            )
-
-    for image in soup.find_all(
-        "img",
-        src=True,
-    )[:30]:
-        candidates.append(
-            image.get("src", "")
+        src = (
+            img.get("src")
+            or img.get("data-src")
+            or img.get("data-lazy-src")
+            or img.get("data-original")
         )
 
-    cleaned = []
+        if src:
+            images.append(src)
 
-    for candidate in candidates:
-        candidate = html.unescape(
-            candidate
+    normalized = []
+
+    for image in images:
+
+        if not image:
+            continue
+
+        image = html.unescape(
+            image.strip()
         )
 
-        if not valid_http_url(
-            candidate
-        ):
-            try:
-                from urllib.parse import urljoin
+        if image.startswith("//"):
+            image = "https:" + image
 
-                candidate = urljoin(
-                    page_url,
-                    candidate,
-                )
-
-            except Exception:
-                continue
-
-        if not valid_http_url(
-            candidate
-        ):
-            continue
-
-        if is_svg_url(candidate):
-            continue
-
-        if candidate not in cleaned:
-            cleaned.append(
-                candidate
+        elif image.startswith("/"):
+            image = (
+                urlparse(base_url).scheme
+                + "://"
+                + urlparse(base_url).netloc
+                + image
             )
 
-    return cleaned
+        if not valid_http_url(image):
+            continue
+
+        if is_svg_url(image):
+            continue
+
+        if image not in normalized:
+            normalized.append(image)
+
+    return normalized
 
 
 # ============================================================
@@ -731,15 +768,23 @@ def validate_image_url(url):
             return False
 
         content_type = (
-            response.headers
-            .get("content-type", "")
+            response.headers.get(
+                "Content-Type",
+                "",
+            )
             .lower()
         )
 
         if (
             "image/" not in content_type
-            and "octet-stream"
-            not in content_type
+            and not url.lower().endswith(
+                (
+                    ".jpg",
+                    ".jpeg",
+                    ".png",
+                    ".webp",
+                )
+            )
         ):
             return False
 
@@ -754,47 +799,32 @@ def validate_image_url(url):
 # ============================================================
 
 def find_article_image(
+    article_html,
     article_url,
 ):
-    if not valid_http_url(
-        article_url
-    ):
-        return ""
-
-    response = get_response(
-        article_url,
-        ARTICLE_TIMEOUT,
-    )
-
-    if response is None:
+    if not article_html:
         return ""
 
     try:
         soup = BeautifulSoup(
-            response.text,
+            article_html,
             "html.parser",
         )
 
+        candidates = extract_image_candidates(
+            soup,
+            article_url,
+        )
+
+        for image in candidates[
+            :MAX_IMAGE_CHECKS
+        ]:
+
+            if validate_image_url(image):
+                return image
+
     except Exception:
-        return ""
-
-    candidates = extract_image_candidates(
-        soup,
-        response.url,
-    )
-
-    checked = 0
-
-    for candidate in candidates:
-        if checked >= MAX_IMAGE_CHECKS:
-            break
-
-        checked += 1
-
-        if validate_image_url(
-            candidate
-        ):
-            return candidate
+        pass
 
     return ""
 
@@ -808,21 +838,19 @@ def bing_image_fallback(
     county,
 ):
     query = (
-        f"{title} {county} Kenya"
+        f"{title} {county} Kenya news photo"
     )
 
-    print(
-        f'Image search: "{query}"'
-    )
-
-    search_url = (
+    url = (
         "https://www.bing.com/images/search?"
         f"q={quote_plus(query)}"
+        f"&form=HDRSC2"
+        f"&first=1"
     )
 
     response = get_response(
-        search_url,
-        SEARCH_TIMEOUT,
+        url,
+        timeout=SEARCH_TIMEOUT,
     )
 
     if response is None:
@@ -834,67 +862,50 @@ def bing_image_fallback(
             "html.parser",
         )
 
-    except Exception:
-        return ""
+        candidates = []
 
-    candidates = []
+        for node in soup.select(
+            "a.iusc"
+        )[:MAX_BING_IMAGES]:
 
-    for tag in soup.find_all(
-        "a",
-        class_="iusc",
-    )[:MAX_BING_IMAGES]:
-        raw = tag.get(
-            "m",
-            "",
-        )
-
-        if not raw:
-            continue
-
-        try:
-            metadata = json.loads(
-                raw
-            )
-
-        except Exception:
-            continue
-
-        for key in [
-            "turl",
-            "murl",
-        ]:
-            candidate = metadata.get(
-                key,
+            metadata = node.get(
+                "m",
                 "",
             )
 
-            if (
-                valid_http_url(candidate)
-                and not is_svg_url(
-                    candidate
-                )
-            ):
-                candidates.append(
-                    candidate
+            if not metadata:
+                continue
+
+            try:
+                data = json.loads(
+                    metadata
                 )
 
-    checked = 0
+                image_url = data.get(
+                    "murl",
+                    "",
+                )
 
-    for candidate in candidates:
-        if checked >= MAX_IMAGE_CHECKS:
-            break
+                if valid_http_url(
+                    image_url
+                ):
+                    candidates.append(
+                        image_url
+                    )
 
-        checked += 1
+            except Exception:
+                pass
 
-        if validate_image_url(
-            candidate
-        ):
-            print(
-                "REAL IMAGE FOUND: "
-                + candidate
-            )
+        for image in candidates:
 
-            return candidate
+            if is_svg_url(image):
+                continue
+
+            if validate_image_url(image):
+                return image
+
+    except Exception:
+        pass
 
     return ""
 
@@ -903,35 +914,31 @@ def bing_image_fallback(
 # ARTICLE FETCH
 # ============================================================
 
-def fetch_article(
-    candidate,
-):
-    url = candidate.get(
-        "url",
-        "",
-    )
-
+def fetch_article(url):
     if not valid_http_url(url):
-        return None
+        return {}
 
-    resolved_url = unwrap_google_news_url(
+    resolved = unwrap_google_news_url(
         url
     )
 
-    if (
-        not valid_http_url(
-            resolved_url
-        )
-    ):
-        resolved_url = url
+    if not valid_http_url(resolved):
+        resolved = url
 
     response = get_response(
-        resolved_url,
-        ARTICLE_TIMEOUT,
+        resolved,
+        timeout=ARTICLE_TIMEOUT,
     )
 
     if response is None:
-        return None
+        return {
+            "url": resolved,
+            "title": "",
+            "body": "",
+            "image": "",
+            "source": hostname(resolved),
+            "published": None,
+        }
 
     try:
         soup = BeautifulSoup(
@@ -939,100 +946,142 @@ def fetch_article(
             "html.parser",
         )
 
-    except Exception:
-        return None
-
-    title = candidate.get(
-        "title",
-        "",
-    )
-
-    page_title = soup.title
-
-    if page_title:
-        page_title = clean_text(
-            page_title.get_text(
-                " ",
-                strip=True,
-            )
-        )
-
-        if page_title:
-            title = page_title
-
-    paragraphs = []
-
-    for paragraph in soup.find_all(
-        "p"
-    ):
-        text = clean_text(
-            paragraph.get_text(
-                " ",
-                strip=True,
-            )
-        )
-
-        if len(text) >= 40:
-            paragraphs.append(text)
-
-    body = " ".join(
-        paragraphs[:20]
-    )
-
-    image_url = ""
-
-    images = extract_image_candidates(
-        soup,
-        response.url,
-    )
-
-    checked = 0
-
-    for image in images:
-        if checked >= MAX_IMAGE_CHECKS:
-            break
-
-        checked += 1
-
-        if validate_image_url(
-            image
+        for node in soup(
+            [
+                "script",
+                "style",
+                "noscript",
+                "svg",
+            ]
         ):
-            image_url = image
-            break
+            node.decompose()
 
-    source_name = ""
+        title = ""
 
-    source_meta = soup.find(
-        "meta",
-        attrs={
-            "property": "og:site_name"
-        },
-    )
+        og_title = soup.find(
+            "meta",
+            property="og:title",
+        )
 
-    if source_meta:
-        source_name = clean_text(
-            source_meta.get(
-                "content",
-                "",
+        if og_title:
+            title = clean_text(
+                og_title.get(
+                    "content",
+                    "",
+                )
             )
+
+        if not title and soup.title:
+            title = clean_text(
+                soup.title.get_text(
+                    " ",
+                    strip=True,
+                )
+            )
+
+        paragraphs = []
+
+        for p in soup.find_all(
+            "p"
+        ):
+
+            text = clean_text(
+                p.get_text(
+                    " ",
+                    strip=True,
+                )
+            )
+
+            if len(text) >= 35:
+                paragraphs.append(text)
+
+        body = " ".join(
+            paragraphs
         )
 
-    if not source_name:
-        source_name = hostname(
-            resolved_url
+        image = find_article_image(
+            response.text,
+            response.url,
         )
 
-    return {
-        "title": title,
-        "url": resolved_url,
-        "body": body,
-        "image_url": image_url,
-        "source_name": source_name,
-    }
+        source = ""
+
+        meta_site = soup.find(
+            "meta",
+            property="og:site_name",
+        )
+
+        if meta_site:
+            source = clean_text(
+                meta_site.get(
+                    "content",
+                    "",
+                )
+            )
+
+        if not source:
+            source = hostname(
+                response.url
+            )
+
+        published = None
+
+        for meta_name in [
+            "article:published_time",
+            "datePublished",
+            "pubdate",
+        ]:
+
+            node = soup.find(
+                "meta",
+                attrs={
+                    "property": meta_name,
+                },
+            )
+
+            if node is None:
+                node = soup.find(
+                    "meta",
+                    attrs={
+                        "name": meta_name,
+                    },
+                )
+
+            if node:
+                published = parse_date(
+                    node.get(
+                        "content",
+                        "",
+                    )
+                )
+
+                if published:
+                    break
+
+        return {
+            "url": response.url,
+            "title": title,
+            "body": body,
+            "image": image,
+            "source": source,
+            "published": published,
+        }
+
+    except Exception:
+        return {
+            "url": resolved,
+            "title": "",
+            "body": "",
+            "image": "",
+            "source": hostname(
+                resolved
+            ),
+            "published": None,
+        }
 
 
 # ============================================================
-# COUNTY MATCH
+# COUNTY DETECTION
 # ============================================================
 
 def county_match_score(
@@ -1045,46 +1094,57 @@ def county_match_score(
 
     score = 0
 
-    for alias in COUNTY_ALIASES.get(
+    aliases = COUNTY_ALIASES.get(
         county,
         [],
-    ):
+    )
+
+    for alias in aliases:
+
         alias = alias.lower()
 
         if alias in text:
+            score += 1
+
             if alias == county.lower():
-                score += 10
-            else:
-                score += 5
+                score += 2
 
     return score
 
 
 def detect_county(
     title,
-    summary="",
-    hinted_county="",
+    body,
+    hint="",
 ):
-    text = (
+    combined = (
         clean_text(title)
         + " "
-        + clean_text(summary)
+        + clean_text(body)
     )
 
-    best_county = hinted_county
-    best_score = 0
+    scores = {}
 
     for county in COUNTIES:
-        score = county_match_score(
-            text,
-            county,
+        scores[county] = (
+            county_match_score(
+                combined,
+                county,
+            )
         )
 
-        if score > best_score:
-            best_county = county
-            best_score = score
+    best_county = max(
+        scores,
+        key=scores.get,
+    )
 
-    return best_county
+    if scores[best_county] > 0:
+        return best_county
+
+    if hint in COUNTIES:
+        return hint
+
+    return ""
 
 
 # ============================================================
@@ -1101,331 +1161,433 @@ def story_category(
         + clean_text(body)
     ).lower()
 
-    if any(
-        word in text
-        for word in [
-            "road",
-            "bridge",
-            "water",
-            "hospital",
-            "school",
-            "project",
-            "construction",
-            "development",
-        ]
-    ):
-        return "DEVELOPMENT"
+    politics = [
+        "president",
+        "mp ",
+        "governor",
+        "senator",
+        "deputy president",
+        "politician",
+        "politics",
+        "party",
+        "election",
+        "government",
+        "ruto",
+        "uda",
+        "odm",
+        "parliament",
+        "assembly",
+        "ward",
+        "campaign",
+    ]
+
+    crime = [
+        "police",
+        "arrested",
+        "murder",
+        "killed",
+        "robbery",
+        "crime",
+        "suspect",
+        "court",
+        "charged",
+    ]
+
+    business = [
+        "business",
+        "economy",
+        "market",
+        "company",
+        "investment",
+        "jobs",
+        "employment",
+        "trade",
+        "farmers",
+        "agriculture",
+    ]
+
+    health = [
+        "hospital",
+        "health",
+        "disease",
+        "doctor",
+        "patients",
+        "clinic",
+    ]
 
     if any(
         word in text
-        for word in [
-            "police",
-            "arrest",
-            "court",
-            "crime",
-            "murder",
-            "robbery",
-            "investigation",
-        ]
+        for word in politics
     ):
-        return "SECURITY"
+        return "Politics"
 
     if any(
         word in text
-        for word in [
-            "farmer",
-            "agriculture",
-            "tea",
-            "maize",
-            "livestock",
-            "drought",
-            "rain",
-        ]
+        for word in crime
     ):
-        return "AGRICULTURE"
+        return "Crime & Security"
 
     if any(
         word in text
-        for word in [
-            "mp",
-            "governor",
-            "senator",
-            "president",
-            "politician",
-            "government",
-            "party",
-            "election",
-        ]
+        for word in business
     ):
-        return "POLITICS"
+        return "Business & Economy"
 
     if any(
         word in text
-        for word in [
-            "business",
-            "company",
-            "economy",
-            "market",
-            "investment",
-            "jobs",
-        ]
+        for word in health
     ):
-        return "BUSINESS"
+        return "Health"
 
-    return "COUNTY NEWS"
+    return "Rift Valley News"
 
 
 # ============================================================
 # VERIFY CANDIDATE
 # ============================================================
 
-def verify_candidate(
-    candidate,
-):
+def verify_candidate(candidate):
+    title = clean_text(
+        candidate.get("title", "")
+    )
+
+    original_url = clean_text(
+        candidate.get("url", "")
+    )
+
+    rss_summary = clean_text(
+        candidate.get("summary", "")
+    )
+
+    county_hint = clean_text(
+        candidate.get("county_hint", "")
+    )
+
+    rss_image = clean_text(
+        candidate.get("rss_image", "")
+    )
+
+    print()
     print(
-        "Verifying: "
-        + candidate.get(
-            "title",
-            "",
-        )
+        "--------------------------------------------------"
+    )
+    print(
+        "VERIFYING:",
+        title[:150],
     )
 
-    article = fetch_article(
-        candidate
-    )
-
-    if article is None:
+    if not title:
         print(
-            "Rejected: article could not "
-            "be fetched."
+            "REJECTED: empty title"
         )
-
         return None
 
-    title = article.get(
-        "title",
-        "",
+    article = {}
+
+    try:
+        article = fetch_article(
+            original_url
+        )
+    except Exception as exc:
+        print(
+            "Article fetch failed:",
+            repr(exc),
+        )
+
+    article_title = clean_text(
+        article.get("title", "")
     )
 
-    body = article.get(
-        "body",
-        "",
+    article_body = clean_text(
+        article.get("body", "")
+    )
+
+    article_url = clean_text(
+        article.get("url", "")
+    )
+
+    article_image = clean_text(
+        article.get("image", "")
+    )
+
+    article_source = clean_text(
+        article.get("source", "")
+    )
+
+    article_date = article.get(
+        "published"
+    )
+
+    final_title = (
+        article_title
+        or title
+    )
+
+    final_body = (
+        article_body
+        or rss_summary
+    )
+
+    final_url = (
+        article_url
+        or original_url
     )
 
     county = detect_county(
-        title,
-        body,
-        candidate.get(
-            "county_hint",
-            "",
-        ),
+        final_title,
+        final_body,
+        county_hint,
     )
 
+    # County-specific RSS query is already
+    # evidence of relevance. Do not require
+    # the literal county name in the body.
     if not county:
-        print(
-            "Rejected: county not identified."
-        )
+        county = county_hint
 
+    if county not in COUNTIES:
+        print(
+            "REJECTED: county could not be established"
+        )
         return None
 
-    combined = (
-        title
-        + " "
-        + body
-    ).lower()
-
-    if county.lower() not in combined:
-        aliases = COUNTY_ALIASES.get(
-            county,
-            [],
-        )
-
-        if not any(
-            alias.lower() in combined
-            for alias in aliases
-        ):
-            print(
-                "Rejected: county not verified."
-            )
-
-            return None
-
-    image_url = article.get(
-        "image_url",
-        "",
-    )
-
-    if not image_url:
-        image_url = bing_image_fallback(
-            title,
-            county,
-        )
-
-    if not image_url:
-        print(
-            "Rejected: no valid article "
-            "image or fallback image."
-        )
-
-        return None
-
-    published = candidate.get(
-        "published",
-        "",
-    )
-
-    if published:
-        if not is_recent(
-            published
-        ):
-            print(
-                "Rejected: story is too old."
-            )
-
-            return None
-
-    source_name = article.get(
-        "source_name",
-        "",
-    )
-
-    if not source_name:
-        source_name = (
+    published = (
+        article_date
+        or parse_date(
             candidate.get(
-                "source_name",
+                "published",
                 "",
             )
-            or hostname(
-                article.get(
-                    "url",
-                    "",
+        )
+    )
+
+    # Missing publication date is allowed.
+    if published and not is_recent(
+        published
+    ):
+        print(
+            "REJECTED: story too old:",
+            published.isoformat(),
+        )
+        return None
+
+    # --------------------------------------------------------
+    # IMAGE CHAIN
+    # --------------------------------------------------------
+
+    image = ""
+
+    if article_image:
+        if validate_image_url(
+            article_image
+        ):
+            image = article_image
+            print(
+                "IMAGE: article"
+            )
+
+    if not image and rss_image:
+        if validate_image_url(
+            rss_image
+        ):
+            image = rss_image
+            print(
+                "IMAGE: RSS"
+            )
+
+    if not image and final_url:
+        try:
+            response = get_response(
+                final_url,
+                timeout=ARTICLE_TIMEOUT,
+            )
+
+            if response is not None:
+                image = find_article_image(
+                    response.text,
+                    response.url,
                 )
-            )
+
+                if image:
+                    print(
+                        "IMAGE: page extraction"
+                    )
+
+        except Exception:
+            pass
+
+    if not image:
+        print(
+            "Trying Bing image fallback..."
         )
 
-    verified = {
-        "title": clean_text(title),
+        image = bing_image_fallback(
+            final_title,
+            county,
+        )
+
+        if image:
+            print(
+                "IMAGE: Bing fallback"
+            )
+
+    if not image:
+        print(
+            "REJECTED: no usable image"
+        )
+        return None
+
+    source_name = (
+        article_source
+        or hostname(final_url)
+        or "News Source"
+    )
+
+    # Clean source display
+    source_name = re.sub(
+        r"^www\.",
+        "",
+        source_name,
+        flags=re.I,
+    )
+
+    summary = rss_summary
+
+    if not summary and final_body:
+        summary = truncate_text(
+            final_body,
+            450,
+        )
+
+    if not summary:
+        summary = final_title
+
+    category = story_category(
+        final_title,
+        final_body,
+    )
+
+    story_id = story_hash(
+        final_title,
+        final_url,
+    )
+
+    story = {
+        "title": final_title,
         "county": county,
-        "category": story_category(
-            title,
-            body,
+        "category": category,
+        "published": (
+            published.isoformat()
+            if published
+            else ""
         ),
-        "date": published,
-        "summary": truncate_text(
-            body,
-            360,
+        "summary": summary,
+        "body": truncate_text(
+            final_body,
+            3000,
         ),
-        "body": body,
-        "image": image_url,
-        "image_url": image_url,
-        "source_name": clean_text(
-            source_name
-        ),
-        "source": clean_text(
-            source_name
-        ),
-        "url": article.get(
-            "url",
-            candidate.get(
-                "url",
-                "",
-            ),
-        ),
-        "resolved_url": article.get(
-            "url",
-            candidate.get(
-                "url",
-                "",
-            ),
-        ),
+        "image": image,
+        "image_url": image,
+        "source_name": source_name,
+        "source": source_name,
+        "url": final_url,
+        "resolved_url": final_url,
         "verified": True,
-        "story_id": story_hash(
-            title,
-            article.get(
-                "url",
-                candidate.get(
-                    "url",
-                    "",
-                ),
-            ),
-        ),
+        "story_id": story_id,
     }
 
-    return verified
-
-
-# ============================================================
-# STORY SCORE
-# ============================================================
-
-def score_story(
-    story,
-):
-    title = clean_text(
-        story.get(
-            "title",
-            "",
-        )
+    print(
+        "VERIFIED:",
+        final_title[:150],
     )
+
+    print(
+        "COUNTY:",
+        county,
+    )
+
+    print(
+        "SOURCE:",
+        source_name,
+    )
+
+    print(
+        "IMAGE:",
+        image[:180],
+    )
+
+    return story
+
+
+# ============================================================
+# STORY SCORING
+# ============================================================
+
+def score_story(story):
+    score = 0
+
+    title = clean_text(
+        story.get("title", "")
+    ).lower()
 
     body = clean_text(
-        story.get(
-            "body",
-            "",
-        )
-    )
+        story.get("body", "")
+    ).lower()
 
     county = story.get(
         "county",
         "",
     )
 
-    text = (
-        title
-        + " "
-        + body
-    ).lower()
-
-    score = 0
-
-    score += county_match_score(
-        text,
-        county,
-    )
-
-    if len(body) >= 200:
+    if county:
         score += 20
+
+    if story.get(
+        "verified"
+    ):
+        score += 30
 
     if story.get(
         "image"
     ):
-        score += 20
+        score += 25
 
     if story.get(
-        "source_name"
+        "published"
     ):
         score += 10
 
-    important_terms = [
-        "million",
-        "billion",
-        "project",
-        "road",
-        "hospital",
-        "school",
-        "government",
-        "governor",
-        "mp",
-        "senator",
-        "police",
-        "court",
-        "farmers",
-        "jobs",
+    # Strong current-news signals
+    keywords = [
+        "today",
+        "latest",
+        "new",
+        "announces",
+        "says",
+        "reports",
+        "launches",
+        "approves",
+        "arrested",
+        "killed",
+        "elected",
+        "apologises",
+        "apologizes",
+        "accuses",
+        "orders",
+        "opens",
+        "reveals",
     ]
 
-    for term in important_terms:
-        if term in text:
-            score += 2
+    for keyword in keywords:
+        if keyword in title:
+            score += 4
+
+    # Prefer substantial articles
+    if len(body) >= 300:
+        score += 5
+
+    if len(body) >= 700:
+        score += 5
 
     return score
 
@@ -1435,6 +1597,17 @@ def score_story(
 # ============================================================
 
 def collect_candidates():
+    print()
+    print(
+        "=================================================="
+    )
+    print(
+        "COLLECTING RIFT VALLEY NEWS"
+    )
+    print(
+        "=================================================="
+    )
+
     queries = [
         (
             "Bomet",
@@ -1458,7 +1631,7 @@ def collect_candidates():
         ),
         (
             "Elgeyo-Marakwet",
-            '"Elgeyo-Marakwet Kenya latest news',
+            'Elgeyo-Marakwet Kenya latest news',
         ),
         (
             "West Pokot",
@@ -1472,35 +1645,53 @@ def collect_candidates():
 
     candidates = []
 
-    print("=" * 60)
-    print("COLLECTING RIFT VALLEY CANDIDATES")
-    print("=" * 60)
+    seen = set()
 
     for county, query in queries:
-        feed_url = google_news_rss(
-            query
+
+        print(
+            f"RSS: {county}"
         )
 
-        items = parse_feed(
-            feed_url,
-            county,
-        )
-
-        for item in items:
-            published = item.get(
-                "published",
-                "",
+        try:
+            response = google_news_rss(
+                query
             )
 
-            if published and not is_recent(
-                published
-            ):
-                continue
+            items = parse_feed(
+                response,
+                county,
+            )
 
-            item["county_hint"] = county
+            print(
+                f"  found {len(items)}"
+            )
 
-            candidates.append(
-                item
+            for item in items:
+
+                key = normalize_title(
+                    item.get(
+                        "title",
+                        "",
+                    )
+                )
+
+                if not key:
+                    continue
+
+                if key in seen:
+                    continue
+
+                seen.add(key)
+
+                candidates.append(
+                    item
+                )
+
+        except Exception as exc:
+            print(
+                "RSS error:",
+                repr(exc),
             )
 
         if RSS_DELAY:
@@ -1513,111 +1704,125 @@ def collect_candidates():
     # --------------------------------------------------------
 
     if len(candidates) < 4:
-        print("=" * 60)
-        print("USING BING FALLBACK")
-        print("=" * 60)
 
-        fallback_queries = [
+        print()
+        print(
+            "RSS returned few candidates."
+        )
+
+        bing_queries = [
             "Bomet Kenya latest news",
             "Kericho Kenya latest news",
             "Nakuru Kenya latest news",
             "Uasin Gishu Kenya latest news",
         ]
 
-        for query in fallback_queries:
-            results = bing_search(
+        for query in bing_queries:
+
+            print(
+                "Bing:",
                 query,
-                BING_RESULT_LIMIT,
             )
 
-            for result in results:
-                county = detect_county(
-                    result.get(
-                        "title",
-                        "",
-                    ),
-                    result.get(
-                        "summary",
-                        "",
-                    ),
+            try:
+                results = bing_search(
+                    query
                 )
 
-                if not county:
-                    continue
+                for result in results:
 
-                candidates.append(
-                    {
-                        "title": result.get(
+                    title = clean_text(
+                        result.get(
                             "title",
                             "",
-                        ),
-                        "url": result.get(
+                        )
+                    )
+
+                    url = clean_text(
+                        result.get(
                             "url",
                             "",
-                        ),
-                        "summary": result.get(
+                        )
+                    )
+
+                    if not title or not url:
+                        continue
+
+                    key = normalize_title(
+                        title
+                    )
+
+                    if key in seen:
+                        continue
+
+                    seen.add(key)
+
+                    hint = detect_county(
+                        title,
+                        result.get(
                             "summary",
                             "",
                         ),
-                        "published": "",
-                        "county_hint": county,
-                        "source_name": "",
-                        "image_url": "",
-                    }
+                    )
+
+                    if not hint:
+                        continue
+
+                    candidates.append(
+                        {
+                            "title": title,
+                            "url": url,
+                            "summary": clean_text(
+                                result.get(
+                                    "summary",
+                                    "",
+                                )
+                            ),
+                            "published": "",
+                            "county_hint": hint,
+                            "rss_image": "",
+                        }
+                    )
+
+            except Exception as exc:
+                print(
+                    "Bing error:",
+                    repr(exc),
                 )
 
     # --------------------------------------------------------
-    # DEDUPLICATE
+    # SORT
     # --------------------------------------------------------
 
-    unique = {}
-    for candidate in candidates:
-        key = normalize_title(
-            candidate.get(
-                "title",
+    def sort_key(item):
+        dt = parse_date(
+            item.get(
+                "published",
                 "",
             )
         )
 
-        if not key:
-            continue
+        if dt:
+            return dt.timestamp()
 
-        if key not in unique:
-            unique[key] = candidate
+        return 0
 
-    candidates = list(
-        unique.values()
-    )
-
-    # Newest first where dates exist
     candidates.sort(
-        key=lambda item: (
-            parse_date(
-                item.get(
-                    "published",
-                    "",
-                )
-            )
-            or datetime(
-                1970,
-                1,
-                1,
-                tzinfo=timezone.utc,
-            )
-        ),
+        key=sort_key,
         reverse=True,
     )
 
+    print()
     print(
-        f"Candidates collected: "
-        f"{len(candidates)}"
+        "TOTAL CANDIDATES:",
+        len(candidates),
     )
 
     return candidates
 
 
 # ============================================================
-# STORY SELECTION
+# SELECT STORY
 # ============================================================
 
 def select_story():
@@ -1630,105 +1835,144 @@ def select_story():
 
     verified = []
 
-    print("=" * 60)
-    print("VERIFYING CANDIDATES")
-    print("=" * 60)
+    limit = min(
+        len(candidates),
+        MAX_CANDIDATES_TO_VERIFY,
+    )
 
-    for candidate in candidates[
-        :MAX_CANDIDATES_TO_VERIFY
-    ]:
+    print()
+    print(
+        f"VERIFYING UP TO {limit} CANDIDATES"
+    )
+
+    for index, candidate in enumerate(
+        candidates[:limit],
+        start=1,
+    ):
+
+        print()
+        print(
+            f"[{index}/{limit}] "
+            f"{candidate.get('title', '')[:140]}"
+        )
+
         try:
             story = verify_candidate(
                 candidate
             )
 
             if story:
-                story["score"] = score_story(
-                    story
-                )
 
                 verified.append(
                     story
                 )
 
+                print(
+                    "ACCEPTED"
+                )
+
+            else:
+                print(
+                    "REJECTED"
+                )
+
         except Exception as exc:
+
             print(
-                "Candidate verification "
-                f"failed: {exc}"
+                "Verification exception:",
+                repr(exc),
             )
+
+            traceback.print_exc()
 
     if not verified:
         raise RuntimeError(
             "No recent story passed verification "
-            "after checking candidates."
+            "after checking candidates. "
+            "Candidate collection succeeded, "
+            "but no candidate had sufficient "
+            "article/image evidence."
+        )
+
+    # --------------------------------------------------------
+    # SCORE
+    # --------------------------------------------------------
+
+    for story in verified:
+        story["_score"] = score_story(
+            story
         )
 
     verified.sort(
-        key=lambda x: x.get(
-            "score",
-            0,
+        key=lambda x: (
+            x.get(
+                "_score",
+                0,
+            ),
+            x.get(
+                "published",
+                "",
+            ),
         ),
         reverse=True,
     )
 
-    finalists = verified[
-        :MAX_VERIFIED_TO_COMPARE
-    ]
+    selected = verified[0]
 
-    selected = finalists[0]
+    selected.pop(
+        "_score",
+        None,
+    )
 
-    print("=" * 60)
-    print("SELECTED STORY")
-    print("=" * 60)
+    print()
+    print(
+        "=================================================="
+    )
+    print(
+        "SELECTED STORY"
+    )
+    print(
+        "=================================================="
+    )
 
     print(
-        "Title: "
-        + selected.get(
+        "TITLE:",
+        selected.get(
             "title",
             "",
-        )
+        ),
     )
 
     print(
-        "County: "
-        + selected.get(
+        "COUNTY:",
+        selected.get(
             "county",
             "",
-        )
+        ),
     )
 
     print(
-        "Category: "
-        + selected.get(
+        "CATEGORY:",
+        selected.get(
             "category",
             "",
-        )
+        ),
     )
 
     print(
-        "Source: "
-        + selected.get(
+        "SOURCE:",
+        selected.get(
             "source_name",
             "",
-        )
+        ),
     )
 
     print(
-        "Image: "
-        + selected.get(
+        "IMAGE:",
+        selected.get(
             "image",
             "",
-        )
-    )
-
-    print(
-        "Score: "
-        + str(
-            selected.get(
-                "score",
-                0,
-            )
-        )
+        ),
     )
 
     return selected
@@ -1738,79 +1982,49 @@ def select_story():
 # NARRATION
 # ============================================================
 
-def build_narration(
-    story,
-):
+def build_narration(story):
     title = clean_text(
-        story.get(
-            "title",
-            "",
-        )
+        story.get("title", "")
     )
 
     county = clean_text(
-        story.get(
-            "county",
-            "",
-        )
+        story.get("county", "")
     )
 
     summary = clean_text(
-        story.get(
-            "summary",
-            "",
-        )
+        story.get("summary", "")
+    )
+
+    body = clean_text(
+        story.get("body", "")
     )
 
     source = clean_text(
         story.get(
             "source_name",
-            "",
+            "News Source",
         )
     )
 
-    category = clean_text(
-        story.get(
-            "category",
-            "",
+    if not summary:
+        summary = truncate_text(
+            body,
+            500,
         )
-    )
 
-    parts = []
-
-    parts.append(
+    narration = (
         f"Rift Valley Watch. "
-        f"{county}."
+        f"Here is the latest news from "
+        f"{county}. "
+        f"{title}. "
+        f"{summary}. "
+        f"According to {source}, "
+        f"this is the latest development "
+        f"from the Rift Valley."
     )
 
-    parts.append(
-        title
-    )
-
-    if summary:
-        parts.append(
-            summary
-        )
-
-    if category:
-        parts.append(
-            f"This is a {category.lower()} "
-            f"development."
-        )
-
-    if source:
-        parts.append(
-            f"According to {source}."
-        )
-
-    parts.append(
-        "Rift Valley Watch will continue "
-        "to track developments across "
-        "the region."
-    )
-
-    return " ".join(
-        parts
+    return clean_text(
+        narration
     )
 
 
@@ -1818,86 +2032,86 @@ def build_narration(
 # SCRIPT
 # ============================================================
 
-def build_script(
-    story,
-):
-    narration = build_narration(
-        story
-    )
-
+def build_script(story):
     title = clean_text(
-        story.get(
-            "title",
-            "",
-        )
-    )
-
-    summary = clean_text(
-        story.get(
-            "summary",
-            "",
-        )
+        story.get("title", "")
     )
 
     county = clean_text(
-        story.get(
-            "county",
-            "",
-        )
+        story.get("county", "")
     )
 
     category = clean_text(
         story.get(
             "category",
-            "",
+            "Rift Valley News",
         )
+    )
+
+    summary = clean_text(
+        story.get("summary", "")
+    )
+
+    body = clean_text(
+        story.get("body", "")
     )
 
     source = clean_text(
         story.get(
             "source_name",
-            "",
+            "News Source",
         )
     )
 
-    segments = [
-        {
-            "scene": 1,
-            "type": "opening",
-            "text": (
-                f"RIFT VALLEY WATCH | "
-                f"{county.upper()}"
-            ),
-        },
-        {
-            "scene": 2,
-            "type": "headline",
-            "text": title,
-        },
-        {
-            "scene": 3,
-            "type": "details",
-            "text": summary,
-        },
-        {
-            "scene": 4,
-            "type": "closing",
-            "text": (
-                f"{category} | "
-                f"{source}"
-            ),
-        },
-    ]
+    if not summary:
+        summary = truncate_text(
+            body,
+            500,
+        )
+
+    details = truncate_text(
+        body,
+        650,
+    )
+
+    narration = build_narration(
+        story
+    )
 
     return {
         "title": title,
         "county": county,
         "category": category,
         "source": source,
-        "source_name": source,
-        "summary": summary,
         "narration": narration,
-        "segments": segments,
+        "segments": [
+            {
+                "scene": 1,
+                "type": "opening",
+                "text": (
+                    f"Rift Valley Watch. "
+                    f"Latest from {county}."
+                ),
+            },
+            {
+                "scene": 2,
+                "type": "headline",
+                "text": title,
+            },
+            {
+                "scene": 3,
+                "type": "details",
+                "text": details,
+            },
+            {
+                "scene": 4,
+                "type": "closing",
+                "text": (
+                    f"{source}. "
+                    f"Rift Valley Watch."
+                ),
+            },
+        ],
     }
 
 
@@ -1914,6 +2128,7 @@ def write_json(
         "w",
         encoding="utf-8",
     ) as file:
+
         json.dump(
             data,
             file,
@@ -1927,12 +2142,14 @@ def write_json(
 # ============================================================
 
 def import_video_generator():
+
     try:
         from rift_valley_video_generator import generate_video
 
         return generate_video
 
     except Exception as exc:
+
         print(
             "Could not import "
             "rift_valley_video_generator:"
@@ -1950,168 +2167,199 @@ def import_video_generator():
 # ============================================================
 
 def main():
+
     start_time = time.time()
 
-    print("=" * 60)
-    print("RIFT VALLEY WATCH")
-    print("FAST NEWS-TO-VIDEO PIPELINE")
-    print("=" * 60)
-
+    print()
     print(
-        f"Data directory: {DATA_DIR}"
+        "=================================================="
     )
-
     print(
-        f"Output directory: {OUTPUT_DIR}"
+        "RIFT VALLEY WATCH"
     )
-
-    # --------------------------------------------------------
-    # SELECT ONE VERIFIED STORY
-    # --------------------------------------------------------
-
-    story = select_story()
-
-    # --------------------------------------------------------
-    # BUILD SCRIPT
-    # --------------------------------------------------------
-
-    script = build_script(
-        story
-    )
-
-    # --------------------------------------------------------
-    # SAVE STORY
-    # --------------------------------------------------------
-
-    write_json(
-        STORY_FILE,
-        story,
-    )
-
-    # --------------------------------------------------------
-    # SAVE SCRIPT
-    # --------------------------------------------------------
-
-    write_json(
-        SCRIPT_FILE,
-        script,
-    )
-
-    print("=" * 60)
-    print("DATA FILES CREATED")
-    print("=" * 60)
-
     print(
-        STORY_FILE
+        "AUTOMATED NEWS PIPELINE"
     )
-
     print(
-        SCRIPT_FILE
+        "=================================================="
     )
-
-    # --------------------------------------------------------
-    # GENERATE VIDEO
-    # --------------------------------------------------------
-
-    generate_video = (
-        import_video_generator()
-    )
-
-    print("=" * 60)
-    print("GENERATING VIDEO")
-    print("=" * 60)
-
-    result = generate_video(
-        story,
-        script,
-    )
-
-    if result is None:
-        result = {}
-
-    if not isinstance(
-        result,
-        dict,
-    ):
-        result = {
-            "result": result
-        }
-
-    # --------------------------------------------------------
-    # RESULT DETAILS
-    # --------------------------------------------------------
 
     try:
-        duration = float(
-            result.get(
-                "duration",
-                0,
-            )
+
+        # ----------------------------------------------------
+        # 1. SELECT STORY
+        # ----------------------------------------------------
+
+        story = select_story()
+
+        # ----------------------------------------------------
+        # 2. BUILD SCRIPT
+        # ----------------------------------------------------
+
+        script = build_script(
+            story
         )
 
-    except Exception:
-        duration = 0.0
+        # ----------------------------------------------------
+        # 3. SAVE DATA
+        # ----------------------------------------------------
 
-    output_path = result.get(
-        "output_path",
-        os.path.join(
+        write_json(
+            STORY_FILE,
+            story,
+        )
+
+        write_json(
+            SCRIPT_FILE,
+            script,
+        )
+
+        print()
+        print(
+            "Saved:",
+            STORY_FILE,
+        )
+
+        print(
+            "Saved:",
+            SCRIPT_FILE,
+        )
+
+        # ----------------------------------------------------
+        # 4. GENERATE VIDEO
+        # ----------------------------------------------------
+
+        print()
+        print(
+            "Starting video generator..."
+        )
+
+        generate_video = (
+            import_video_generator()
+        )
+
+        result = generate_video(
+            story,
+            script,
+        )
+
+        # ----------------------------------------------------
+        # 5. CHECK OUTPUT
+        # ----------------------------------------------------
+
+        output_file = os.path.join(
             OUTPUT_DIR,
             "rift_valley_watch_reel.mp4",
-        ),
-    )
-
-    elapsed = (
-        time.time()
-        - start_time
-    )
-
-    print("=" * 60)
-    print("PIPELINE COMPLETE")
-    print("=" * 60)
-
-    print(
-        f"Output: {output_path}"
-    )
-
-    print(
-        f"Duration: {duration:.2f}s"
-    )
-
-    print(
-        f"Runtime: {elapsed:.2f}s"
-    )
-
-    # --------------------------------------------------------
-    # FINAL FILE CHECK
-    # --------------------------------------------------------
-
-    if not os.path.exists(
-        output_path
-    ):
-        raise RuntimeError(
-            "Video generator reported "
-            "completion but the MP4 file "
-            "does not exist: "
-            + output_path
         )
 
-    file_size = os.path.getsize(
-        output_path
-    )
+        if isinstance(
+            result,
+            str,
+        ) and os.path.exists(result):
 
-    if file_size <= 0:
-        raise RuntimeError(
-            "Generated MP4 is empty."
+            output_file = result
+
+        if not os.path.exists(
+            output_file
+        ):
+            raise RuntimeError(
+                "Video generator completed "
+                "but the final MP4 was not found: "
+                + output_file
+            )
+
+        file_size = os.path.getsize(
+            output_file
         )
 
-    print(
-        f"File size: "
-        f"{file_size / 1024 / 1024:.2f} MB"
-    )
+        if file_size <= 0:
+            raise RuntimeError(
+                "Final MP4 exists but is empty."
+            )
 
-    print("=" * 60)
-    print("RIFT VALLEY WATCH REEL READY")
-    print("=" * 60)
+        # ----------------------------------------------------
+        # 6. FINAL REPORT
+        # ----------------------------------------------------
+
+        elapsed = (
+            time.time()
+            - start_time
+        )
+
+        print()
+        print(
+            "=================================================="
+        )
+        print(
+            "RIFT VALLEY WATCH COMPLETE"
+        )
+        print(
+            "=================================================="
+        )
+
+        print(
+            "Story:",
+            story.get(
+                "title",
+                "",
+            ),
+        )
+
+        print(
+            "County:",
+            story.get(
+                "county",
+                "",
+            ),
+        )
+
+        print(
+            "Source:",
+            story.get(
+                "source_name",
+                "",
+            ),
+        )
+
+        print(
+            "Output:",
+            output_file,
+        )
+
+        print(
+            "Size:",
+            f"{file_size / 1024 / 1024:.2f} MB",
+        )
+
+        print(
+            "Runtime:",
+            f"{elapsed:.1f} seconds",
+        )
+
+        print(
+            "=================================================="
+        )
+
+    except Exception as exc:
+
+        print()
+        print(
+            "=================================================="
+        )
+        print(
+            "PIPELINE FAILED"
+        )
+        print(
+            "=================================================="
+        )
+
+        print(
+            repr(exc)
+        )
+
+        traceback.print_exc()
+
+        raise
 
 
 # ============================================================
@@ -2119,18 +2367,4 @@ def main():
 # ============================================================
 
 if __name__ == "__main__":
-    try:
-        main()
-
-    except Exception as exc:
-        print("=" * 60)
-        print("PIPELINE FAILED")
-        print("=" * 60)
-
-        print(
-            str(exc)
-        )
-
-        traceback.print_exc()
-
-        raise
+    main()
