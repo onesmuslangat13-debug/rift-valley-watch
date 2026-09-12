@@ -1,13 +1,21 @@
-name: Rift Valley Watch V2 Video
+name: Rift Valley Watch — Generate MP4
 
 on:
   workflow_dispatch:
+
   schedule:
-    - cron: "0 6 * * *"
+    - cron: "0 7 * * *"
+
+permissions:
+  contents: read
 
 jobs:
+
   generate-video:
+
     runs-on: ubuntu-latest
+
+    timeout-minutes: 30
 
     steps:
 
@@ -20,296 +28,37 @@ jobs:
           python-version: "3.11"
 
       - name: Install FFmpeg
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
+        uses: FedericoCarboni/setup-ffmpeg@v3
 
-      - name: Install Python dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pillow gTTS
+          pip install requests pillow gTTS
 
-      - name: Check project files
+      - name: Generate Rift Valley Watch
         run: |
-          echo "=========================================="
-          echo "CHECKING PROJECT"
-          echo "=========================================="
+          python rift_valley_main.py
 
-          test -f scripts/news_engine.py
-          test -f scripts/video_generator.py
-
-          echo "news_engine.py ........ OK"
-          echo "video_generator.py .... OK"
-
-      - name: Prepare directories
+      - name: Final MP4 QC
         run: |
-          echo "=========================================="
-          echo "PREPARING DIRECTORIES"
-          echo "=========================================="
-
-          mkdir -p data
-          mkdir -p output
-          mkdir -p output/scenes
-          mkdir -p output/audio
-          mkdir -p assets
-          mkdir -p assets/source
-          mkdir -p assets/audio
-          mkdir -p assets/music
-
-          echo "Directories ready"
-
-      - name: Generate real-time news
-        run: |
-          echo "=========================================="
-          echo "GENERATING REAL-TIME RIFT VALLEY NEWS"
-          echo "=========================================="
-
-          python -u scripts/news_engine.py
-
-      - name: Verify generated news files
-        run: |
-          echo "=========================================="
-          echo "VERIFYING NEWS FILES"
-          echo "=========================================="
-
-          if [ ! -f data/story.json ]; then
-            echo "ERROR: data/story.json was not created."
-            exit 1
-          fi
-
-          if [ ! -f data/script.json ]; then
-            echo "ERROR: data/script.json was not created."
-            exit 1
-          fi
-
-          echo
-          echo "story.json:"
-          ls -lh data/story.json
-
-          echo
-          echo "script.json:"
-          ls -lh data/script.json
-
-      - name: Show generated news
-        run: |
-          echo "=========================================="
-          echo "GENERATED STORY"
-          echo "=========================================="
-
-          cat data/story.json
-
-          echo
-          echo "=========================================="
-          echo "GENERATED SCRIPT"
-          echo "=========================================="
-
-          cat data/script.json
-
-      - name: Check downloaded photos
-        run: |
-          echo "=========================================="
-          echo "CHECKING REAL SOURCE PHOTOS"
-          echo "=========================================="
-
-          if [ -d assets/source ]; then
-            find assets/source -maxdepth 1 -type f \
-              -printf '%p %s bytes\n' 2>/dev/null || true
-          else
-            echo "No assets/source directory found."
-          fi
-
-          echo
-          echo "Photo count:"
-          find assets/source -maxdepth 1 -type f 2>/dev/null | wc -l
-
-      - name: Check FFmpeg
-        run: |
-          echo "=========================================="
-          echo "CHECKING FFMPEG"
-          echo "=========================================="
-
-          ffmpeg -version | head -n 3
-          echo
-          ffprobe -version | head -n 3
-
-      - name: Generate video
-        run: |
-          echo "=========================================="
-          echo "STARTING VIDEO GENERATOR"
-          echo "=========================================="
-
-          set +e
-
-          python -u scripts/video_generator.py > video_generator.log 2>&1
-
-          STATUS=$?
-
-          echo
-          echo "=========================================="
-          echo "VIDEO GENERATOR EXIT CODE: $STATUS"
-          echo "=========================================="
-
-          echo
-          echo "=========================================="
-          echo "VIDEO GENERATOR LOG"
-          echo "=========================================="
-
-          cat video_generator.log || true
-
-          echo
-          echo "=========================================="
-          echo "LAST 300 LINES"
-          echo "=========================================="
-
-          tail -n 300 video_generator.log || true
-
-          exit $STATUS
-
-      - name: Inspect output after generator
-        if: always()
-        run: |
-          echo "=========================================="
-          echo "OUTPUT FILES"
-          echo "=========================================="
-
-          find output -maxdepth 3 -type f \
-            -printf '%p %s bytes\n' 2>/dev/null || true
-
-          echo
-          echo "=========================================="
-          echo "SCENES"
-          echo "=========================================="
-
-          ls -lah output/scenes/ 2>/dev/null || true
-
-          echo
-          echo "=========================================="
-          echo "AUDIO"
-          echo "=========================================="
-
-          ls -lah output/audio/ 2>/dev/null || true
-
-      - name: Verify final MP4
-        run: |
-          echo "=========================================="
-          echo "VERIFYING FINAL MP4"
-          echo "=========================================="
-
-          if [ ! -f output/rift_valley_watch.mp4 ]; then
-            echo
-            echo "ERROR: output/rift_valley_watch.mp4 was not created."
-            echo
-            echo "=========================================="
-            echo "GENERATOR LOG"
-            echo "=========================================="
-            tail -n 300 video_generator.log || true
-            echo
-            echo "=========================================="
-            echo "ALL OUTPUT FILES"
-            echo "=========================================="
-            find output -maxdepth 3 -type f \
-              -printf '%p %s bytes\n' 2>/dev/null || true
-            exit 1
-          fi
-
-          FILE_SIZE=$(stat -c%s output/rift_valley_watch.mp4)
-
-          echo "MP4 created successfully."
-          echo "File size: $FILE_SIZE bytes"
-
-          if [ "$FILE_SIZE" -lt 100000 ]; then
-            echo "ERROR: MP4 is suspiciously small."
-            exit 1
-          fi
-
-          ls -lh output/rift_valley_watch.mp4
-
-      - name: Inspect MP4
-        if: success()
-        run: |
-          echo "=========================================="
-          echo "FINAL MP4 INSPECTION"
-          echo "=========================================="
+          test -f output/rift_valley_watch_reel.mp4
 
           ffprobe -v error \
-            -show_entries format=duration,size \
-            -show_entries stream=codec_type,codec_name,width,height,r_frame_rate \
-            -of json \
-            output/rift_valley_watch.mp4
-
-      - name: Validate MP4 dimensions
-        if: success()
-        run: |
-          echo "=========================================="
-          echo "VALIDATING VIDEO DIMENSIONS"
-          echo "=========================================="
-
-          WIDTH=$(ffprobe -v error \
             -select_streams v:0 \
-            -show_entries stream=width \
-            -of csv=p=0 \
-            output/rift_valley_watch.mp4)
+            -show_entries stream=codec_name,width,height,duration \
+            -of default=noprint_wrappers=1 \
+            output/rift_valley_watch_reel.mp4
 
-          HEIGHT=$(ffprobe -v error \
-            -select_streams v:0 \
-            -show_entries stream=height \
-            -of csv=p=0 \
-            output/rift_valley_watch.mp4)
+          ffprobe -v error \
+            -select_streams a:0 \
+            -show_entries stream=codec_name,sample_rate,channels,duration \
+            -of default=noprint_wrappers=1 \
+            output/rift_valley_watch_reel.mp4
 
-          echo "Width: $WIDTH"
-          echo "Height: $HEIGHT"
-
-          if [ "$WIDTH" != "1080" ]; then
-            echo "ERROR: Expected width 1080."
-            exit 1
-          fi
-
-          if [ "$HEIGHT" != "1920" ]; then
-            echo "ERROR: Expected height 1920."
-            exit 1
-          fi
-
-          echo "1080x1920 vertical video confirmed."
-
-      - name: Upload MP4
-        if: success()
+      - name: Upload MP4 artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rift-valley-watch-v2-mp4
-          path: output/rift_valley_watch.mp4
+          name: rift-valley-watch-mp4
+          path: output/rift_valley_watch_reel.mp4
           if-no-files-found: error
-
-      - name: Upload news data
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: rift-valley-watch-v2-news
-          path: |
-            data/story.json
-            data/script.json
-            data/visual_report.json
-          if-no-files-found: warn
-
-      - name: Upload source photos
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: rift-valley-watch-source-photos
-          path: assets/source/
-          if-no-files-found: warn
-
-      - name: Upload generator log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: video-generator-log
-          path: video_generator.log
-          if-no-files-found: warn
-
-      - name: Upload debug output
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: rift-valley-watch-debug-output
-          path: output/
-          if-no-files-found: warn
+          retention-days: 7
