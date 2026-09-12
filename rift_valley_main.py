@@ -86,7 +86,7 @@ HEADERS = {
         "AppleWebKit/537.36 "
         "(KHTML, like Gecko) "
         "Chrome/120.0 Safari/537.36 "
-        "RiftValleyWatch/7.0"
+        "RiftValleyWatch/8.0"
     ),
     "Accept": (
         "text/html,application/xhtml+xml,"
@@ -299,12 +299,16 @@ def fetch_rss(query):
 
 
 # ============================================================
-# RSS IMAGE
+# RSS IMAGE EXTRACTION
 # ============================================================
 
 def get_rss_media_image(item):
 
-    image_url = ""
+    image_candidates = []
+
+    # --------------------------------------------------------
+    # MEDIA CONTENT / THUMBNAIL
+    # --------------------------------------------------------
 
     for child in item.iter():
 
@@ -312,8 +316,9 @@ def get_rss_media_image(item):
             child.tag
         ).lower()
 
-        if tag.endswith(
-            "content"
+        if (
+            tag.endswith("content")
+            or tag.endswith("thumbnail")
         ):
 
             url = child.attrib.get(
@@ -323,34 +328,74 @@ def get_rss_media_image(item):
 
             if url:
 
-                image_url = url
-
-                break
-
-    if not image_url:
-
-        for child in item.iter():
-
-            tag = str(
-                child.tag
-            ).lower()
-
-            if tag.endswith(
-                "thumbnail"
-            ):
-
-                url = child.attrib.get(
-                    "url",
-                    "",
+                image_candidates.append(
+                    url.strip()
                 )
 
-                if url:
+    # --------------------------------------------------------
+    # RAW RSS DESCRIPTION HTML
+    # --------------------------------------------------------
 
-                    image_url = url
+    raw_description = (
+        item.findtext(
+            "description",
+            "",
+        )
+        or ""
+    )
 
-                    break
+    patterns = [
+        r'<img[^>]+src=["\']([^"\']+)["\']',
+        r'<img[^>]+data-src=["\']([^"\']+)["\']',
+        r'<img[^>]+data-original=["\']([^"\']+)["\']',
+        r'<img[^>]+data-lazy-src=["\']([^"\']+)["\']',
+    ]
 
-    return image_url.strip()
+    for pattern in patterns:
+
+        matches = re.findall(
+            pattern,
+            raw_description,
+            flags=re.I | re.S,
+        )
+
+        for match in matches:
+
+            if match:
+
+                image_candidates.append(
+                    html.unescape(
+                        match.strip()
+                    )
+                )
+
+    # --------------------------------------------------------
+    # FIRST USABLE UNIQUE IMAGE
+    # --------------------------------------------------------
+
+    seen = set()
+
+    for candidate in image_candidates:
+
+        candidate = candidate.strip()
+
+        if not candidate:
+            continue
+
+        if candidate in seen:
+            continue
+
+        seen.add(
+            candidate
+        )
+
+        if not is_bad_image_url(
+            candidate
+        ):
+
+            return candidate
+
+    return ""
 
 
 # ============================================================
@@ -389,11 +434,18 @@ def parse_feed(root):
             )
         )
 
-        description = clean_text(
+        # IMPORTANT:
+        # Preserve the original HTML.
+        raw_description = (
             item.findtext(
                 "description",
                 "",
             )
+            or ""
+        )
+
+        description = clean_text(
+            raw_description
         )
 
         pub_date = clean_text(
@@ -435,7 +487,10 @@ def parse_feed(root):
                 "title": title,
                 "url": link,
                 "summary": description,
-                "raw_description": description,
+
+                # REAL RAW HTML
+                "raw_description": raw_description,
+
                 "published": pub_date,
                 "source": source,
                 "source_url": source_url,
@@ -447,7 +502,7 @@ def parse_feed(root):
 
 
 # ============================================================
-# IMAGE VALIDATION
+# IMAGE URL VALIDATION
 # ============================================================
 
 def is_bad_image_url(url):
@@ -465,6 +520,10 @@ def is_bad_image_url(url):
     return False
 
 
+# ============================================================
+# IMAGE VALIDATION
+# ============================================================
+
 def verify_image(image_url):
 
     if not image_url:
@@ -479,7 +538,17 @@ def verify_image(image_url):
 
         response = requests.get(
             image_url,
-            headers=HEADERS,
+            headers={
+                **HEADERS,
+                "Accept": (
+                    "image/avif,"
+                    "image/webp,"
+                    "image/apng,"
+                    "image/svg+xml,"
+                    "image/*,"
+                    "*/*;q=0.8"
+                ),
+            },
             timeout=20,
             stream=True,
             allow_redirects=True,
@@ -493,35 +562,94 @@ def verify_image(image_url):
                 "",
             )
             .lower()
+            .split(";")[0]
+            .strip()
         )
 
-        if not content_type.startswith(
+        # ----------------------------------------------------
+        # NORMAL IMAGE RESPONSE
+        # ----------------------------------------------------
+
+        if content_type.startswith(
             "image/"
         ):
-            return False
 
-        content_length = (
-            response.headers.get(
-                "Content-Length"
+            content_length = (
+                response.headers.get(
+                    "Content-Length"
+                )
             )
+
+            if content_length:
+
+                try:
+
+                    if int(
+                        content_length
+                    ) < 3000:
+
+                        return False
+
+                except Exception:
+                    pass
+
+            return True
+
+        # ----------------------------------------------------
+        # SERVERS SOMETIMES RETURN WRONG CONTENT-TYPE
+        # ----------------------------------------------------
+
+        first_chunk = next(
+            response.iter_content(
+                chunk_size=16384
+            ),
+            b"",
         )
 
-        if content_length:
+        if not first_chunk:
+            return False
 
-            try:
+        # JPEG
+        if first_chunk.startswith(
+            b"\xff\xd8\xff"
+        ):
+            return True
 
-                if int(
-                    content_length
-                ) < 5000:
+        # PNG
+        if first_chunk.startswith(
+            b"\x89PNG"
+        ):
+            return True
 
-                    return False
+        # GIF
+        if (
+            first_chunk.startswith(
+                b"GIF87a"
+            )
+            or first_chunk.startswith(
+                b"GIF89a"
+            )
+        ):
+            return True
 
-            except Exception:
-                pass
+        # WEBP
+        if (
+            first_chunk.startswith(
+                b"RIFF"
+            )
+            and b"WEBP"
+            in first_chunk[:32]
+        ):
+            return True
 
-        return True
+        return False
 
-    except Exception:
+    except Exception as exc:
+
+        print(
+            f"Image validation failed: "
+            f"{image_url} | {exc}"
+        )
 
         return False
 
@@ -612,7 +740,7 @@ def extract_meta(
 
 
 # ============================================================
-# JSON-LD DESCRIPTION
+# JSON-LD
 # ============================================================
 
 def extract_jsonld_objects(page):
@@ -704,7 +832,7 @@ def extract_jsonld_description(page):
 
 
 # ============================================================
-# IMAGE EXTRACTION
+# IMAGE EXTRACTION FROM HTML
 # ============================================================
 
 def extract_image_from_html(
@@ -875,6 +1003,10 @@ def extract_image_from_html(
                     )
                 )
 
+    # --------------------------------------------------------
+    # NORMALIZE
+    # --------------------------------------------------------
+
     final_candidates = []
 
     for candidate in candidates:
@@ -1023,7 +1155,6 @@ def title_has_reasonable_match(
         candidate_title,
     )
 
-    # Much more tolerant than the previous version.
     minimum_overlap = 2
 
     if len(
@@ -1088,7 +1219,7 @@ def publisher_domains_match(
 
 
 # ============================================================
-# DIRECT GOOGLE RESOLUTION
+# DIRECT GOOGLE NEWS RESOLUTION
 # ============================================================
 
 def try_direct_google_resolution(
@@ -1303,8 +1434,6 @@ def verify_article_candidate(
         candidate_url
     )
 
-    # Do not reject before trying the page
-    # if publisher domain is unknown.
     if (
         publisher_domain
         and candidate_domain
@@ -1411,11 +1540,9 @@ def verify_article_candidate(
 
         return None
 
-    if (
-        not title_has_reasonable_match(
-            original_title,
-            candidate_title,
-        )
+    if not title_has_reasonable_match(
+        original_title,
+        candidate_title,
     ):
 
         print(
@@ -1497,7 +1624,7 @@ def resolve_google_news_article(
     )
 
     # --------------------------------------------------------
-    # METHOD 1
+    # METHOD 1 — DIRECT
     # --------------------------------------------------------
 
     direct_url = (
@@ -1522,7 +1649,7 @@ def resolve_google_news_article(
     )
 
     # --------------------------------------------------------
-    # METHOD 2
+    # PUBLISHER DOMAIN
     # --------------------------------------------------------
 
     publisher_domain = (
@@ -1538,8 +1665,14 @@ def resolve_google_news_article(
             f"Publisher domain: {publisher_domain}"
         )
 
+    else:
+
+        print(
+            "Publisher domain unavailable."
+        )
+
     # --------------------------------------------------------
-    # METHOD 3 — BING WITH PUBLISHER
+    # METHOD 2 — BING + PUBLISHER
     # --------------------------------------------------------
 
     candidates = search_bing_for_article(
@@ -1580,7 +1713,7 @@ def resolve_google_news_article(
             }
 
     # --------------------------------------------------------
-    # METHOD 4 — BROAD BING
+    # METHOD 3 — BROAD BING
     # --------------------------------------------------------
 
     print(
@@ -1590,6 +1723,11 @@ def resolve_google_news_article(
     candidates = search_bing_for_article(
         original_title,
         "",
+    )
+
+    print(
+        f"Broad Bing returned "
+        f"{len(candidates)} candidates."
     )
 
     for index, candidate in enumerate(
@@ -1741,6 +1879,10 @@ def extract_article_data(
 
     if not title:
 
+        print(
+            "Article rejected: no title."
+        )
+
         return None
 
     # --------------------------------------------------------
@@ -1817,6 +1959,12 @@ def extract_article_data(
 
             break
 
+    if not summary:
+
+        print(
+            "Article rejected: no usable summary."
+        )
+
     # --------------------------------------------------------
     # IMAGE
     # --------------------------------------------------------
@@ -1852,7 +2000,6 @@ def extract_article_data(
         )
 
         if not candidate:
-
             continue
 
         candidate = urljoin(
@@ -1861,7 +2008,6 @@ def extract_article_data(
         )
 
         if candidate in checked:
-
             continue
 
         checked.add(
@@ -1871,7 +2017,6 @@ def extract_article_data(
         if is_bad_image_url(
             candidate
         ):
-
             continue
 
         print(
@@ -1885,16 +2030,25 @@ def extract_article_data(
             image_url = candidate
 
             print(
-                f"VALID ARTICLE IMAGE: {candidate}"
+                f"VALID ARTICLE IMAGE: "
+                f"{candidate}"
             )
 
             break
+
+        print(
+            "Image rejected."
+        )
 
     if not summary:
 
         return None
 
     if not image_url:
+
+        print(
+            "Article rejected: no valid image."
+        )
 
         return None
 
@@ -1948,11 +2102,12 @@ def build_rss_verified_story(
         )
     )
 
-    image_url = clean_text(
+    raw_description = (
         story.get(
-            "rss_image",
+            "raw_description",
             "",
         )
+        or ""
     )
 
     if not title:
@@ -1981,32 +2136,133 @@ def build_rss_verified_story(
 
         return None
 
-    if not image_url:
+    # --------------------------------------------------------
+    # COLLECT POSSIBLE IMAGES
+    # --------------------------------------------------------
 
-        print(
-            "RSS fallback rejected: no RSS image."
+    image_candidates = []
+
+    rss_image = clean_text(
+        story.get(
+            "rss_image",
+            "",
+        )
+    )
+
+    if rss_image:
+
+        image_candidates.append(
+            rss_image
         )
 
-        return None
+    # --------------------------------------------------------
+    # EXTRACT IMAGES FROM RAW RSS HTML
+    # --------------------------------------------------------
 
-    image_url = urljoin(
-        story.get(
-            "url",
-            "",
-        ),
-        image_url,
-    )
+    patterns = [
+        r'<img[^>]+src=["\']([^"\']+)["\']',
+        r'<img[^>]+data-src=["\']([^"\']+)["\']',
+        r'<img[^>]+data-original=["\']([^"\']+)["\']',
+        r'<img[^>]+data-lazy-src=["\']([^"\']+)["\']',
+    ]
+
+    for pattern in patterns:
+
+        matches = re.findall(
+            pattern,
+            raw_description,
+            flags=re.I | re.S,
+        )
+
+        for match in matches:
+
+            if match:
+
+                image_candidates.append(
+                    html.unescape(
+                        match.strip()
+                    )
+                )
+
+    # --------------------------------------------------------
+    # NORMALIZE + DEDUPLICATE
+    # --------------------------------------------------------
+
+    unique_images = []
+
+    seen = set()
+
+    for image in image_candidates:
+
+        image = image.strip()
+
+        if not image:
+            continue
+
+        image = urljoin(
+            story.get(
+                "url",
+                "",
+            ),
+            image,
+        )
+
+        if image in seen:
+            continue
+
+        seen.add(
+            image
+        )
+
+        unique_images.append(
+            image
+        )
 
     print(
-        f"Checking RSS image: {image_url}"
+        f"RSS image candidates: "
+        f"{len(unique_images)}"
     )
 
-    if not verify_image(
-        image_url
-    ):
+    # --------------------------------------------------------
+    # VERIFY IMAGES
+    # --------------------------------------------------------
+
+    valid_image = ""
+
+    for image_url in unique_images:
+
+        if is_bad_image_url(
+            image_url
+        ):
+            continue
 
         print(
-            "RSS fallback rejected: RSS image failed validation."
+            f"Checking RSS image: "
+            f"{image_url}"
+        )
+
+        if verify_image(
+            image_url
+        ):
+
+            valid_image = image_url
+
+            print(
+                f"VALID RSS IMAGE: "
+                f"{image_url}"
+            )
+
+            break
+
+        print(
+            "RSS image rejected."
+        )
+
+    if not valid_image:
+
+        print(
+            "RSS fallback rejected: "
+            "no valid RSS/article image found."
         )
 
         return None
@@ -2020,22 +2276,28 @@ def build_rss_verified_story(
     )
 
     print(
-        f"Image: {image_url}"
+        f"Image: {valid_image}"
     )
 
     return {
         "title": title,
         "summary": summary,
         "source": source,
+
+        # Google News URL retained because
+        # this is RSS verification.
         "url": story.get(
             "url",
             "",
         ),
+
         "resolved_url": story.get(
             "url",
             "",
         ),
-        "image_url": image_url,
+
+        "image_url": valid_image,
+
         "verification": "google_news_rss",
     }
 
@@ -2070,7 +2332,7 @@ def enrich_story(story):
         return None
 
     # ========================================================
-    # GOOGLE NEWS STORY
+    # GOOGLE NEWS
     # ========================================================
 
     if is_google_news_url(
@@ -2095,7 +2357,8 @@ def enrich_story(story):
             )
 
             print(
-                f"Resolved publisher article: {article_url}"
+                f"Resolved publisher article: "
+                f"{article_url}"
             )
 
             try:
@@ -2110,13 +2373,13 @@ def enrich_story(story):
                 response.raise_for_status()
 
                 resolved_url = response.url
-
                 page = response.text
 
             except Exception as exc:
 
                 print(
-                    f"Publisher fetch failed: {exc}"
+                    f"Publisher fetch failed: "
+                    f"{exc}"
                 )
 
                 page = ""
@@ -2163,7 +2426,8 @@ def enrich_story(story):
                     return story
 
                 print(
-                    "Publisher page did not provide complete article data."
+                    "Publisher page did not provide "
+                    "complete article data."
                 )
 
         # ----------------------------------------------------
@@ -2185,7 +2449,8 @@ def enrich_story(story):
             return story
 
         print(
-            "Google News story failed all verification methods."
+            "Google News story failed all "
+            "verification methods."
         )
 
         return None
@@ -2208,7 +2473,8 @@ def enrich_story(story):
     except Exception as exc:
 
         print(
-            f"Rejected: article fetch failed: {exc}"
+            f"Rejected: article fetch failed: "
+            f"{exc}"
         )
 
         return None
@@ -2216,6 +2482,10 @@ def enrich_story(story):
     resolved_url = response.url
 
     if not resolved_url:
+
+        print(
+            "Rejected: no resolved URL."
+        )
 
         return None
 
@@ -2230,6 +2500,11 @@ def enrich_story(story):
             resolved_url
         )
     ):
+
+        print(
+            "Rejected: resolved URL is not a "
+            "publisher article."
+        )
 
         return None
 
@@ -2729,6 +3004,11 @@ def select_story():
         )
 
         print(
+            f"Image  : "
+            f"{candidate.get('rss_image', '')}"
+        )
+
+        print(
             "=" * 70
         )
 
@@ -2739,7 +3019,8 @@ def select_story():
         if not story:
 
             print(
-                "Rejected: article did not pass verification."
+                "Rejected: article did not "
+                "pass verification."
             )
 
             continue
@@ -2772,23 +3053,28 @@ def select_story():
         )
 
         print(
-            f"County       : {story.get('county', '')}"
+            f"County       : "
+            f"{story.get('county', '')}"
         )
 
         print(
-            f"Title        : {story.get('title', '')}"
+            f"Title        : "
+            f"{story.get('title', '')}"
         )
 
         print(
-            f"Source       : {story.get('source', '')}"
+            f"Source       : "
+            f"{story.get('source', '')}"
         )
 
         print(
-            f"Verification : {story.get('verification', '')}"
+            f"Verification : "
+            f"{story.get('verification', '')}"
         )
 
         print(
-            f"Image        : {story.get('image_url', '')}"
+            f"Image        : "
+            f"{story.get('image_url', '')}"
         )
 
         print(
@@ -2798,7 +3084,8 @@ def select_story():
         return story
 
     raise RuntimeError(
-        "No recent story passed verification after checking all available candidates."
+        "No recent story passed verification "
+        "after checking all available candidates."
     )
 
 
@@ -2847,7 +3134,7 @@ def main():
     )
 
     print(
-        "RIFT VALLEY WATCH — NEWS ENGINE V7"
+        "RIFT VALLEY WATCH — NEWS ENGINE V8"
     )
 
     print(
