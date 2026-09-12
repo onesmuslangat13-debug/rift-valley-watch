@@ -12,7 +12,7 @@ from rift_valley_video_generator import generate_video
 
 
 # ============================================================
-# RIFT VALLEY WATCH NEWS ENGINE V3
+# RIFT VALLEY WATCH NEWS ENGINE V4
 # ============================================================
 
 COUNTIES = [
@@ -62,8 +62,14 @@ HEADERS = {
         "(X11; Linux x86_64) "
         "AppleWebKit/537.36 "
         "Chrome/120.0 Safari/537.36 "
-        "RiftValleyWatch/3.0"
-    )
+        "RiftValleyWatch/4.0"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,"
+        "application/xml;q=0.9,image/avif,image/webp,"
+        "*/*;q=0.8"
+    ),
+    "Accept-Language": "en-KE,en;q=0.9",
 }
 
 BLOCKED_DOMAINS = {
@@ -85,6 +91,10 @@ BLOCKED_IMAGE_TERMS = [
     "default_image",
     "avatar",
     "profile",
+    "sprite",
+    "loading",
+    "blank",
+    "transparent",
 ]
 
 
@@ -130,14 +140,8 @@ def clean_text(value):
 
 def get_domain(url):
     try:
-        domain = urlparse(
-            url
-        ).netloc.lower()
-
-        return domain.replace(
-            "www.",
-            "",
-        )
+        domain = urlparse(url).netloc.lower()
+        return domain.replace("www.", "")
     except Exception:
         return ""
 
@@ -178,8 +182,119 @@ def fetch_rss(query):
     response.raise_for_status()
 
     return ET.fromstring(
-        response.text
+        response.content
     )
+
+
+# ============================================================
+# RSS IMAGE EXTRACTION
+# ============================================================
+
+def get_rss_media_image(item):
+    """
+    Look for images in common RSS media formats.
+
+    Supports:
+    - media:content
+    - media:thumbnail
+    - enclosure
+    - image
+    """
+
+    # --------------------------------------------------------
+    # Media namespace
+    # --------------------------------------------------------
+
+    media_namespaces = [
+        "http://search.yahoo.com/mrss/",
+        "http://search.yahoo.com/mrss",
+    ]
+
+    for namespace in media_namespaces:
+
+        for tag_name in [
+            "content",
+            "thumbnail",
+        ]:
+
+            element = item.find(
+                f"{{{namespace}}}{tag_name}"
+            )
+
+            if element is not None:
+
+                image_url = (
+                    element.attrib.get("url")
+                    or element.attrib.get("href")
+                )
+
+                if image_url:
+                    image_url = html.unescape(
+                        image_url
+                    ).strip()
+
+                    if not is_bad_image_url(
+                        image_url
+                    ):
+                        return image_url
+
+    # --------------------------------------------------------
+    # Enclosure
+    # --------------------------------------------------------
+
+    enclosure = item.find("enclosure")
+
+    if enclosure is not None:
+
+        enclosure_url = (
+            enclosure.attrib.get("url")
+            or ""
+        ).strip()
+
+        enclosure_type = (
+            enclosure.attrib.get("type")
+            or ""
+        ).lower()
+
+        if (
+            enclosure_url
+            and (
+                "image/" in enclosure_type
+                or re.search(
+                    r"\.(jpg|jpeg|png|webp)(?:\?|$)",
+                    enclosure_url,
+                    re.I,
+                )
+            )
+        ):
+
+            if not is_bad_image_url(
+                enclosure_url
+            ):
+                return enclosure_url
+
+    # --------------------------------------------------------
+    # RSS <image>
+    # --------------------------------------------------------
+
+    image_element = item.find("image")
+
+    if image_element is not None:
+
+        image_url = (
+            image_element.text
+            or ""
+        ).strip()
+
+        if (
+            image_url
+            and not is_bad_image_url(
+                image_url
+            )
+        ):
+            return image_url
+
+    return None
 
 
 # ============================================================
@@ -214,19 +329,53 @@ def parse_feed(root):
             or ""
         ).strip()
 
-        source = clean_text(
-            item.findtext("source")
+        source_element = item.find("source")
+
+        source = ""
+
+        if source_element is not None:
+            source = clean_text(
+                source_element.text
+                or ""
+            )
+
+        source_url = ""
+
+        if source_element is not None:
+            source_url = (
+                source_element.attrib.get(
+                    "url",
+                    "",
+                )
+                or ""
+            ).strip()
+
+        # ----------------------------------------------------
+        # Image from RSS media
+        # ----------------------------------------------------
+
+        rss_media_image = (
+            get_rss_media_image(item)
+        )
+
+        # ----------------------------------------------------
+        # Image from RSS description
+        # ----------------------------------------------------
+
+        rss_description_image = (
+            extract_image_from_html(
+                raw_description,
+                link,
+            )
+        )
+
+        rss_image = (
+            rss_media_image
+            or rss_description_image
         )
 
         if not title or not link:
             continue
-
-        # Try to extract an image directly
-        # from the RSS description.
-        rss_image = extract_image_from_html(
-            raw_description,
-            link,
-        )
 
         stories.append(
             {
@@ -236,6 +385,7 @@ def parse_feed(root):
                 "raw_description": raw_description,
                 "published": published,
                 "source": source,
+                "source_url": source_url,
                 "rss_image": rss_image,
             }
         )
@@ -254,16 +404,26 @@ def extract_image_from_html(
     if not page:
         return None
 
-    # og:image
+    # --------------------------------------------------------
+    # OpenGraph / Twitter
+    # --------------------------------------------------------
+
     patterns = [
         r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)',
         r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
+
         r'<meta[^>]+property=["\']og:image:url["\'][^>]+content=["\']([^"\']+)',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image:url["\']',
+
         r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)',
         r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:image["\']',
+
+        r'<meta[^>]+name=["\']twitter:image:src["\'][^>]+content=["\']([^"\']+)',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:image:src["\']',
     ]
 
     for pattern in patterns:
+
         match = re.search(
             pattern,
             page,
@@ -271,37 +431,107 @@ def extract_image_from_html(
         )
 
         if match:
+
             image_url = html.unescape(
                 match.group(1)
             ).strip()
 
-            return urljoin(
+            image_url = urljoin(
                 base_url,
                 image_url,
             )
 
-    # Ordinary image tag
-    image_matches = re.findall(
-        r'<img[^>]+src=["\']([^"\']+)',
+            if not is_bad_image_url(
+                image_url
+            ):
+                return image_url
+
+    # --------------------------------------------------------
+    # JSON-LD image
+    # --------------------------------------------------------
+
+    json_ld_images = re.findall(
+        r'"image"\s*:\s*"([^"]+)"',
         page,
         re.I,
     )
 
-    for image_url in image_matches:
+    for image_url in json_ld_images:
 
         image_url = html.unescape(
             image_url
         ).strip()
 
-        full_url = urljoin(
+        image_url = urljoin(
             base_url,
             image_url,
         )
 
         if not is_bad_image_url(
-            full_url
+            image_url
         ):
-            return full_url
+            return image_url
+
+    # --------------------------------------------------------
+    # JSON-LD image array
+    # --------------------------------------------------------
+
+    json_ld_array_images = re.findall(
+        r'"image"\s*:\s*\[\s*"([^"]+)"',
+        page,
+        re.I,
+    )
+
+    for image_url in json_ld_array_images:
+
+        image_url = html.unescape(
+            image_url
+        ).strip()
+
+        image_url = urljoin(
+            base_url,
+            image_url,
+        )
+
+        if not is_bad_image_url(
+            image_url
+        ):
+            return image_url
+
+    # --------------------------------------------------------
+    # <img> tags
+    # --------------------------------------------------------
+
+    image_patterns = [
+        r'<img[^>]+src=["\']([^"\']+)',
+        r'<img[^>]+data-src=["\']([^"\']+)',
+        r'<img[^>]+data-lazy-src=["\']([^"\']+)',
+        r'<img[^>]+data-original=["\']([^"\']+)',
+    ]
+
+    for pattern in image_patterns:
+
+        image_matches = re.findall(
+            pattern,
+            page,
+            re.I,
+        )
+
+        for image_url in image_matches:
+
+            image_url = html.unescape(
+                image_url
+            ).strip()
+
+            full_url = urljoin(
+                base_url,
+                image_url,
+            )
+
+            if not is_bad_image_url(
+                full_url
+            ):
+                return full_url
 
     return None
 
@@ -311,6 +541,7 @@ def extract_image_from_html(
 # ============================================================
 
 def is_bad_image_url(url):
+
     if not url:
         return True
 
@@ -322,15 +553,26 @@ def is_bad_image_url(url):
         "gstatic.com",
         "googleapis.com",
         "news.google.com",
+        "facebook.com",
+        "fbcdn.net",
+        "instagram.com",
+        "cdninstagram.com",
+        "tiktok.com",
     ]
 
     for domain in blocked_domains:
+
         if domain in lower:
             return True
 
     for term in BLOCKED_IMAGE_TERMS:
+
         if term in lower:
             return True
+
+    # Very small tracking pixels / SVG placeholders
+    if lower.endswith(".svg"):
+        return True
 
     return False
 
@@ -340,6 +582,7 @@ def is_bad_image_url(url):
 # ============================================================
 
 def verify_image(image_url):
+
     if not image_url:
         return False
 
@@ -349,14 +592,23 @@ def verify_image(image_url):
         return False
 
     try:
+
         response = requests.get(
             image_url,
             headers=HEADERS,
-            timeout=15,
+            timeout=20,
             stream=True,
+            allow_redirects=True,
         )
 
         if response.status_code != 200:
+            return False
+
+        final_url = response.url
+
+        if is_bad_image_url(
+            final_url
+        ):
             return False
 
         content_type = (
@@ -366,23 +618,44 @@ def verify_image(image_url):
             ).lower()
         )
 
-        if (
-            "image/" not in content_type
-            and not any(
-                ext in image_url.lower()
-                for ext in [
-                    ".jpg",
-                    ".jpeg",
-                    ".png",
-                    ".webp",
-                ]
-            )
-        ):
-            return False
+        # ----------------------------------------------------
+        # Accept genuine image content types
+        # ----------------------------------------------------
 
-        return True
+        if content_type.startswith(
+            "image/"
+        ):
+            return True
+
+        # ----------------------------------------------------
+        # Some publishers mislabel images.
+        # Check URL extension as fallback.
+        # ----------------------------------------------------
+
+        image_extensions = [
+            ".jpg",
+            ".jpeg",
+            ".png",
+            ".webp",
+            ".avif",
+        ]
+
+        if any(
+            ext in final_url.lower()
+            for ext in image_extensions
+        ):
+            return True
+
+        if any(
+            ext in image_url.lower()
+            for ext in image_extensions
+        ):
+            return True
+
+        return False
 
     except Exception:
+
         return False
 
 
@@ -395,6 +668,7 @@ def extract_meta(
     property_name=None,
     name=None,
 ):
+
     if property_name:
 
         patterns = [
@@ -412,6 +686,7 @@ def extract_meta(
         ]
 
         for pattern in patterns:
+
             match = re.search(
                 pattern,
                 page,
@@ -419,6 +694,7 @@ def extract_meta(
             )
 
             if match:
+
                 return html.unescape(
                     match.group(1)
                 ).strip()
@@ -440,6 +716,7 @@ def extract_meta(
         ]
 
         for pattern in patterns:
+
             match = re.search(
                 pattern,
                 page,
@@ -447,9 +724,46 @@ def extract_meta(
             )
 
             if match:
+
                 return html.unescape(
                     match.group(1)
                 ).strip()
+
+    return None
+
+
+# ============================================================
+# JSON-LD TEXT EXTRACTION
+# ============================================================
+
+def extract_jsonld_description(page):
+
+    patterns = [
+        r'"description"\s*:\s*"([^"]+)"',
+        r'"articleBody"\s*:\s*"([^"]+)"',
+    ]
+
+    for pattern in patterns:
+
+        matches = re.findall(
+            pattern,
+            page,
+            re.I,
+        )
+
+        for value in matches:
+
+            value = html.unescape(
+                value
+            )
+
+            value = clean_text(
+                value
+            )
+
+            if len(value) >= 40:
+
+                return value
 
     return None
 
@@ -459,6 +773,7 @@ def extract_meta(
 # ============================================================
 
 def is_google_generic_text(text):
+
     if not text:
         return True
 
@@ -478,43 +793,93 @@ def is_google_generic_text(text):
 
 
 # ============================================================
+# SUMMARY VALIDATION
+# ============================================================
+
+def usable_summary(text):
+
+    text = clean_text(
+        text
+    )
+
+    if not text:
+        return False
+
+    if is_google_generic_text(
+        text
+    ):
+        return False
+
+    if len(text) < 30:
+        return False
+
+    return True
+
+
+# ============================================================
 # ARTICLE ENRICHMENT
 # ============================================================
 
 def enrich_story(story):
 
-    original_url = story["url"]
+    original_url = (
+        story.get("url", "")
+    )
 
     # --------------------------------------------------------
-    # Reject obvious social media results immediately
+    # Reject obvious social media results
     # --------------------------------------------------------
 
     if is_blocked_domain(
         original_url
     ):
+
+        print(
+            "Rejected: blocked original URL."
+        )
+
         return None
 
     try:
 
+        # ----------------------------------------------------
+        # Open the Google News article link.
+        # Follow redirects to publisher.
+        # ----------------------------------------------------
+
         response = requests.get(
             original_url,
             headers=HEADERS,
-            timeout=20,
+            timeout=25,
             allow_redirects=True,
         )
 
         if response.status_code >= 400:
+
+            print(
+                f"Rejected: article returned "
+                f"HTTP {response.status_code}."
+            )
+
             return None
 
-        resolved_url = response.url
+        resolved_url = (
+            response.url
+        )
 
         # ----------------------------------------------------
-        # Reject Facebook/Google final URLs
+        # Reject Google/Facebook/etc after redirect
         # ----------------------------------------------------
 
         if is_blocked_domain(
             resolved_url
         ):
+
+            print(
+                "Rejected: final URL is "
+                "Google/social media."
+            )
+
             return None
 
         story["resolved_url"] = (
@@ -522,7 +887,7 @@ def enrich_story(story):
         )
 
         page = response.text[
-            :4_000_000
+            :6_000_000
         ]
 
         # ----------------------------------------------------
@@ -535,16 +900,53 @@ def enrich_story(story):
         )
 
         if site_name:
+
             story["source"] = clean_text(
                 site_name
             )
 
-        # If publisher wasn't found in metadata,
-        # retain RSS publisher.
-        if not story.get("source"):
+        # ----------------------------------------------------
+        # RSS source fallback
+        # ----------------------------------------------------
+
+        if not story.get(
+            "source"
+        ):
+
+            rss_source = clean_text(
+                story.get(
+                    "source",
+                    "",
+                )
+            )
+
+            if rss_source:
+
+                story["source"] = (
+                    rss_source
+                )
+
+        # ----------------------------------------------------
+        # Domain fallback
+        # ----------------------------------------------------
+
+        if not story.get(
+            "source"
+        ):
+
             story["source"] = get_domain(
                 resolved_url
             )
+
+        if not story.get(
+            "source"
+        ):
+
+            print(
+                "Rejected: no publisher source."
+            )
+
+            return None
 
         # ----------------------------------------------------
         # Real title
@@ -556,12 +958,18 @@ def enrich_story(story):
         )
 
         if real_title:
+
             story["title"] = clean_text(
                 real_title
             )
 
         # ----------------------------------------------------
-        # Real summary
+        # Summary priority:
+        #
+        # 1. og:description
+        # 2. meta description
+        # 3. JSON-LD description
+        # 4. RSS description
         # ----------------------------------------------------
 
         description = extract_meta(
@@ -569,35 +977,46 @@ def enrich_story(story):
             property_name="og:description",
         )
 
-        if not description:
+        if not usable_summary(
+            description
+        ):
 
             description = extract_meta(
                 page,
                 name="description",
             )
 
-        description = clean_text(
-            description or ""
-        )
-
-        if (
+        if not usable_summary(
             description
-            and not is_google_generic_text(
-                description
-            )
-            and len(description) >= 40
         ):
-            story["summary"] = (
-                description
+
+            description = (
+                extract_jsonld_description(
+                    page
+                )
             )
 
-        # Otherwise use the RSS description.
-        if (
-            not story.get("summary")
-            or is_google_generic_text(
-                story["summary"]
+        if usable_summary(
+            description
+        ):
+
+            story["summary"] = (
+                clean_text(
+                    description
+                )
+            )
+
+        # ----------------------------------------------------
+        # RSS fallback
+        # ----------------------------------------------------
+
+        if not usable_summary(
+            story.get(
+                "summary",
+                "",
             )
         ):
+
             rss_summary = clean_text(
                 story.get(
                     "summary",
@@ -605,18 +1024,22 @@ def enrich_story(story):
                 )
             )
 
-            if (
+            if usable_summary(
                 rss_summary
-                and not is_google_generic_text(
-                    rss_summary
-                )
             ):
+
                 story["summary"] = (
                     rss_summary
                 )
 
         # ----------------------------------------------------
-        # Image
+        # Image priority:
+        #
+        # 1. article OpenGraph
+        # 2. article Twitter image
+        # 3. JSON-LD
+        # 4. article <img>
+        # 5. RSS media image
         # ----------------------------------------------------
 
         image_url = extract_image_from_html(
@@ -624,14 +1047,19 @@ def enrich_story(story):
             resolved_url,
         )
 
-        # If article page did not expose image,
-        # use RSS image.
         if not image_url:
+
             image_url = story.get(
                 "rss_image"
             )
 
         if not image_url:
+
+            print(
+                "Rejected: no article image "
+                "could be discovered."
+            )
+
             return None
 
         image_url = urljoin(
@@ -639,13 +1067,19 @@ def enrich_story(story):
             image_url,
         )
 
+        print(
+            f"Image candidate: {image_url}"
+        )
+
         if not verify_image(
             image_url
         ):
+
             print(
-                "Rejected: image could not "
-                "be verified."
+                "Rejected: discovered image "
+                "could not be verified."
             )
+
             return None
 
         story["image_url"] = (
@@ -663,22 +1097,73 @@ def enrich_story(story):
             )
         )
 
-        if (
-            not summary
-            or len(summary) < 30
-            or is_google_generic_text(
-                summary
-            )
+        if not usable_summary(
+            summary
         ):
+
             print(
                 "Rejected: article summary "
                 "is not usable."
             )
+
             return None
 
         story["summary"] = summary
 
+        # ----------------------------------------------------
+        # Require title
+        # ----------------------------------------------------
+
+        if not story.get(
+            "title"
+        ):
+
+            print(
+                "Rejected: article title "
+                "is missing."
+            )
+
+            return None
+
+        # ----------------------------------------------------
+        # Verification passed
+        # ----------------------------------------------------
+
+        print(
+            "Verified article:"
+        )
+
+        print(
+            f"  Source: {story.get('source')}"
+        )
+
+        print(
+            f"  Image: {story.get('image_url')}"
+        )
+
+        print(
+            f"  Summary length: "
+            f"{len(story.get('summary', ''))}"
+        )
+
         return story
+
+    except requests.exceptions.Timeout:
+
+        print(
+            "Rejected: article request timed out."
+        )
+
+        return None
+
+    except requests.exceptions.RequestException as error:
+
+        print(
+            f"Rejected: article request failed: "
+            f"{error}"
+        )
+
+        return None
 
     except Exception as error:
 
@@ -746,7 +1231,6 @@ def create_short_headline(title):
         title
     )
 
-    # Remove publisher suffixes.
     title = re.sub(
         r"\s*[-|]\s*"
         r"(Citizen Digital|"
@@ -795,6 +1279,7 @@ def build_narration(story):
     )
 
     if len(summary) > 500:
+
         summary = (
             summary[:500]
             .rsplit(" ", 1)[0]
@@ -863,7 +1348,9 @@ def collect_candidates():
                 )
 
                 story["score"] = (
-                    score_story(story)
+                    score_story(
+                        story
+                    )
                 )
 
                 candidates.append(
@@ -906,16 +1393,30 @@ def select_story():
         f"Found {len(candidates)} candidates."
     )
 
+    # --------------------------------------------------------
+    # Check more than the old 40.
+    #
+    # Some high-ranking stories may have poor metadata.
+    # --------------------------------------------------------
+
+    maximum_checks = min(
+        len(candidates),
+        80,
+    )
+
     checked = 0
 
-    for candidate in candidates[:40]:
+    for candidate in candidates[
+        :maximum_checks
+    ]:
 
         checked += 1
 
         print("")
         print(
             f"Checking story {checked}: "
-            f"{candidate['title']}"
+            f"{candidate['title']} - "
+            f"{candidate.get('source', '')}"
         )
 
         story = enrich_story(
@@ -925,8 +1426,8 @@ def select_story():
         if not story:
 
             print(
-                "Rejected: no verified "
-                "article image/source/summary."
+                "Rejected: article did not "
+                "pass verification."
             )
 
             continue
@@ -951,34 +1452,49 @@ def select_story():
         print("=" * 60)
         print("SELECTED STORY")
         print("=" * 60)
+
         print(
             f"Title: {story['title']}"
         )
+
         print(
-            f"County: {story.get('county')}"
+            f"County: "
+            f"{story.get('county')}"
         )
+
         print(
-            f"Source: {story.get('source')}"
+            f"Source: "
+            f"{story.get('source')}"
         )
+
         print(
             f"Published: "
             f"{story.get('published')}"
         )
+
         print(
             f"Image: "
             f"{story.get('image_url')}"
         )
+
         print(
             f"URL: "
             f"{story.get('resolved_url')}"
         )
+
+        print(
+            f"Summary: "
+            f"{story.get('summary', '')[:300]}"
+        )
+
         print("=" * 60)
 
         return story
 
     raise RuntimeError(
         "No recent story passed the "
-        "image and article verification checks."
+        "article image, source and summary "
+        "verification checks."
     )
 
 
@@ -1019,7 +1535,7 @@ def main():
 
     print("")
     print("=" * 60)
-    print("RIFT VALLEY WATCH NEWS ENGINE")
+    print("RIFT VALLEY WATCH NEWS ENGINE V4")
     print("=" * 60)
 
     story = select_story()
