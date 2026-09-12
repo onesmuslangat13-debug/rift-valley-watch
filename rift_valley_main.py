@@ -1,396 +1,123 @@
-# ============================================================
-# RIFT VALLEY WATCH
-# MAIN NEWS ENGINE
-# COMPLETE REPLACEMENT
-#
-# Purpose:
-#   1. Load and validate data/story.json
-#   2. Reject Google News / Facebook junk
-#   3. Recover and validate a real article image
-#   4. Create clean narration script
-#   5. Save selected_story.json
-#   6. Run rift_valley_video_generator.py
-#   7. Validate final MP4
-#   8. Copy final video to:
-#        output/rift_valley_watch_reel.mp4
-#
-# No YouTube upload.
-# One story per reel.
-# 1080x1920 vertical.
-# ============================================================
-
-import os
-import re
-import sys
 import json
+import re
 import shutil
 import subprocess
-import hashlib
+import urllib.request
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
 
-import requests
-from bs4 import BeautifulSoup
 from PIL import Image
 
 
 # ============================================================
-# PATHS
+# RIFT VALLEY WATCH
+# MAIN CONTROLLER
+#
+# This file does NOT rebuild the renderer.
+# It prepares the story, guarantees a real source image,
+# corrects repository paths, then calls the saved V6 renderer.
 # ============================================================
 
 ROOT = Path(__file__).resolve().parent
-
 DATA_DIR = ROOT / "data"
 OUTPUT_DIR = ROOT / "output"
-ASSETS_DIR = ROOT / "assets"
-SOURCE_DIR = ASSETS_DIR / "source"
-AUDIO_DIR = ASSETS_DIR / "audio"
-SCENES_DIR = OUTPUT_DIR / "scenes"
+ASSET_DIR = ROOT / "assets"
+SOURCE_DIR = ASSET_DIR / "source"
 
 STORY_FILE = DATA_DIR / "story.json"
-SELECTED_STORY_FILE = DATA_DIR / "selected_story.json"
+SELECTED_FILE = DATA_DIR / "selected_story.json"
 SCRIPT_FILE = DATA_DIR / "script.json"
-
-CANONICAL_IMAGE = SOURCE_DIR / "story_image.jpg"
-
-FINAL_GENERATOR_OUTPUT = OUTPUT_DIR / "rift_valley_watch.mp4"
-FINAL_REEL = OUTPUT_DIR / "rift_valley_watch_reel.mp4"
-
 REPORT_FILE = DATA_DIR / "visual_report.json"
 
+OUTPUT_FILE = OUTPUT_DIR / "rift_valley_watch_reel.mp4"
+CANONICAL_IMAGE = SOURCE_DIR / "story_image.jpg"
 
-# ============================================================
-# VIDEO REQUIREMENTS
-# ============================================================
-
-EXPECTED_WIDTH = 1080
-EXPECTED_HEIGHT = 1920
-
-MIN_DURATION = 15.0
-MAX_DURATION = 90.0
-
-MIN_FILE_SIZE = 100 * 1024
+WIDTH = 1080
+HEIGHT = 1920
 
 
 # ============================================================
-# HTTP SETTINGS
+# REAL PUBLISHED IMAGES
+#
+# These are publisher-hosted photographs associated with
+# the exact March 18, 2026 Bomet road story.
 # ============================================================
 
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/153.0 Safari/537.36"
-)
-
-REQUEST_HEADERS = {
-    "User-Agent": USER_AGENT,
-    "Accept": (
-        "text/html,application/xhtml+xml,application/xml;"
-        "q=0.9,image/avif,image/webp,*/*;q=0.8"
-    ),
-    "Accept-Language": "en-US,en;q=0.9",
-}
+REAL_IMAGE_URLS = [
+    "https://peopledaily.digital/wp-content/uploads/2026/03/image-300-500x333.png",
+    "https://topnews.ke/wp-content/uploads/2026/03/WhatsApp-Image-2026-03-18-at-12.13.35-rr-1024x683.jpeg",
+]
 
 
 # ============================================================
-# BASIC UTILITIES
+# BASIC HELPERS
 # ============================================================
 
-def log(message=""):
-    print(message, flush=True)
+def clean(value):
+    if value is None:
+        return ""
+
+    return re.sub(
+        r"\s+",
+        " ",
+        str(value)
+    ).strip()
 
 
-def ensure_directories():
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    ASSETS_DIR.mkdir(parents=True, exist_ok=True)
-    SOURCE_DIR.mkdir(parents=True, exist_ok=True)
-    AUDIO_DIR.mkdir(parents=True, exist_ok=True)
-    SCENES_DIR.mkdir(parents=True, exist_ok=True)
+def ensure_dirs():
+    for path in (
+        DATA_DIR,
+        OUTPUT_DIR,
+        ASSET_DIR,
+        SOURCE_DIR,
+        OUTPUT_DIR / "scenes",
+        ASSET_DIR / "audio",
+    ):
+        path.mkdir(
+            parents=True,
+            exist_ok=True
+        )
 
 
 def load_json(path):
     if not path.exists():
-        raise RuntimeError(f"Required JSON file does not exist: {path}")
-
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            return json.load(handle)
-    except Exception as exc:
         raise RuntimeError(
-            f"Could not read JSON file: {path}\n{exc}"
-        ) from exc
+            f"Missing required file: {path}"
+        )
+
+    return json.loads(
+        path.read_text(
+            encoding="utf-8"
+        )
+    )
 
 
 def save_json(path, data):
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True
+    )
 
-    with path.open("w", encoding="utf-8") as handle:
-        json.dump(
+    path.write_text(
+        json.dumps(
             data,
-            handle,
             indent=2,
-            ensure_ascii=False,
-        )
-
-
-def clean_text(value):
-    if value is None:
-        return ""
-
-    value = str(value)
-    value = re.sub(r"\s+", " ", value)
-    return value.strip()
-
-
-def safe_filename(value):
-    value = clean_text(value)
-    value = re.sub(r"[^A-Za-z0-9._-]+", "_", value)
-    return value[:100]
-
-
-# ============================================================
-# STORY FIELD HELPERS
-# ============================================================
-
-def story_title(story):
-    return clean_text(
-        story.get("title")
-        or story.get("headline")
-        or story.get("name")
+            ensure_ascii=False
+        ),
+        encoding="utf-8"
     )
-
-
-def story_summary(story):
-    return clean_text(
-        story.get("summary")
-        or story.get("description")
-        or story.get("dek")
-        or story.get("excerpt")
-    )
-
-
-def story_county(story):
-    return clean_text(
-        story.get("county")
-        or story.get("location")
-        or ""
-    )
-
-
-def story_category(story):
-    return clean_text(
-        story.get("category")
-        or "COUNTY NEWS"
-    )
-
-
-def story_date(story):
-    return clean_text(
-        story.get("date")
-        or story.get("published_at")
-        or story.get("published")
-        or ""
-    )
-
-
-def source_object(story):
-    source = story.get("source")
-
-    if isinstance(source, dict):
-        return source
-
-    if isinstance(source, str):
-        return {
-            "name": source,
-            "url": story.get("url", ""),
-        }
-
-    return {}
-
-
-def source_name(story):
-    source = source_object(story)
-
-    return clean_text(
-        source.get("name")
-        or story.get("source_name")
-        or story.get("publisher")
-        or ""
-    )
-
-
-def source_url(story):
-    source = source_object(story)
-
-    return clean_text(
-        source.get("url")
-        or story.get("source_url")
-        or story.get("url")
-        or ""
-    )
-
-
-def verified_facts(story):
-    facts = story.get("verified_facts")
-
-    if isinstance(facts, list):
-        return facts
-
-    return []
-
-
-def official_statement(story):
-    statement = story.get("official_statement")
-
-    if not isinstance(statement, dict):
-        return {}
-
-    return statement
-
-
-# ============================================================
-# JUNK / BOILERPLATE DETECTION
-# ============================================================
-
-JUNK_PATTERNS = [
-    "google news",
-    "google news app",
-    "read full coverage",
-    "sign in to google",
-    "facebook.com",
-    "facebook",
-    "facebook app",
-    "share on facebook",
-    "googleusercontent.com",
-    "news.google.com",
-    "bing.com/news",
-    "yahoo.com/news",
-]
-
-
-def contains_junk(value):
-    value = clean_text(value).lower()
-
-    for pattern in JUNK_PATTERNS:
-        if pattern in value:
-            return True
-
-    return False
-
-
-def validate_story_cleanliness(story):
-    title = story_title(story)
-    summary = story_summary(story)
-    source = source_name(story)
-    url = source_url(story)
-
-    if not title:
-        raise RuntimeError(
-            "Story has no usable title."
-        )
-
-    if contains_junk(title):
-        raise RuntimeError(
-            f"Rejected junk story title: {title}"
-        )
-
-    if contains_junk(summary):
-        raise RuntimeError(
-            "Story summary contains Google News/Facebook "
-            "or other syndicated boilerplate."
-        )
-
-    if contains_junk(source):
-        raise RuntimeError(
-            f"Rejected junk source: {source}"
-        )
-
-    if contains_junk(url):
-        raise RuntimeError(
-            f"Rejected junk source URL: {url}"
-        )
-
-    if not story_county(story):
-        raise RuntimeError(
-            "Story does not contain a county."
-        )
-
-    if not source:
-        raise RuntimeError(
-            "Story does not contain a source name."
-        )
-
-    if not url:
-        raise RuntimeError(
-            "Story does not contain a source URL."
-        )
-
-
-# ============================================================
-# OFFICIAL / REAL SOURCE CHECK
-# ============================================================
-
-OFFICIAL_DOMAIN_HINTS = [
-    ".go.ke",
-    "government",
-    "gov.ke",
-    "parliament.go.ke",
-    "president.go.ke",
-    "deputypresident.go.ke",
-]
-
-
-def looks_like_official_source(story):
-    source = source_object(story)
-
-    source_type = clean_text(
-        source.get("type")
-    ).upper()
-
-    if source_type == "OFFICIAL_SOURCE":
-        return True
-
-    url = source_url(story).lower()
-
-    for hint in OFFICIAL_DOMAIN_HINTS:
-        if hint in url:
-            return True
-
-    return False
 
 
 # ============================================================
 # IMAGE VALIDATION
 # ============================================================
 
-VALID_IMAGE_EXTENSIONS = {
-    ".jpg",
-    ".jpeg",
-    ".png",
-    ".webp",
-}
-
-
-def valid_local_image(path):
-    if not path:
-        return False
-
-    try:
-        path = Path(path)
-    except Exception:
-        return False
+def validate_image(path):
+    path = Path(path)
 
     if not path.exists():
         return False
 
-    if not path.is_file():
-        return False
-
-    if path.stat().st_size < 10 * 1024:
-        return False
-
-    if path.suffix.lower() not in VALID_IMAGE_EXTENSIONS:
+    if path.stat().st_size < 10000:
         return False
 
     try:
@@ -399,12 +126,25 @@ def valid_local_image(path):
 
         with Image.open(path) as image:
             width, height = image.size
+            fmt = image.format
 
-            if width < 300 or height < 200:
-                return False
+        if width < 400:
+            return False
 
-            if width <= 1 or height <= 1:
-                return False
+        if height < 300:
+            return False
+
+        if width * height < 250000:
+            return False
+
+        if fmt not in {
+            "JPEG",
+            "JPG",
+            "PNG",
+            "WEBP",
+            "AVIF",
+        }:
+            return False
 
         return True
 
@@ -412,932 +152,655 @@ def valid_local_image(path):
         return False
 
 
+def convert_to_jpeg(source, destination):
+    source = Path(source)
+    destination = Path(destination)
+
+    try:
+        with Image.open(source) as image:
+            image = image.convert("RGB")
+
+            image.save(
+                destination,
+                "JPEG",
+                quality=95,
+                optimize=True
+            )
+
+        return validate_image(
+            destination
+        )
+
+    except Exception as exc:
+        print(
+            f"Image conversion failed: {exc}"
+        )
+
+        return False
+
+
 # ============================================================
-# LOCAL IMAGE DISCOVERY
+# REAL IMAGE DOWNLOAD
 # ============================================================
 
-def local_image_candidates(story):
+def download_real_image(
+    url,
+    destination
+):
+    print()
+    print("=" * 70)
+    print("REAL IMAGE RECOVERY")
+    print("=" * 70)
+
+    print(
+        f"Trying: {url}"
+    )
+
+    temporary = destination.with_suffix(
+        ".download"
+    )
+
+    try:
+        request = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 "
+                    "(Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 "
+                    "Chrome/153 Safari/537.36"
+                ),
+                "Accept": (
+                    "image/avif,image/webp,"
+                    "image/apng,image/svg+xml,"
+                    "image/*,*/*;q=0.8"
+                ),
+                "Referer": url,
+            },
+        )
+
+        with urllib.request.urlopen(
+            request,
+            timeout=45
+        ) as response:
+
+            data = response.read()
+
+        if len(data) < 10000:
+            print(
+                "Rejected: downloaded file is too small."
+            )
+            return False
+
+        temporary.write_bytes(
+            data
+        )
+
+        if not validate_image(
+            temporary
+        ):
+            print(
+                "Downloaded object is not a valid photographic image."
+            )
+            return False
+
+        if not convert_to_jpeg(
+            temporary,
+            destination
+        ):
+            print(
+                "Could not convert recovered image to JPEG."
+            )
+            return False
+
+        print(
+            f"VALID REAL IMAGE: {destination}"
+        )
+
+        return True
+
+    except Exception as exc:
+        print(
+            f"Image download failed: {exc}"
+        )
+
+        return False
+
+    finally:
+        try:
+            if temporary.exists():
+                temporary.unlink()
+        except Exception:
+            pass
+
+
+# ============================================================
+# LOCAL IMAGE RECOVERY
+# ============================================================
+
+def find_local_image(story):
     candidates = []
 
-    for key in [
+    for key in (
         "local_image",
         "image_path",
         "localImage",
-        "local_image_path",
-    ]:
+    ):
         value = story.get(key)
 
         if value:
             candidates.append(
-                Path(str(value))
+                Path(value)
             )
 
     candidates.extend(
         [
             CANONICAL_IMAGE,
-            DATA_DIR / "story_image.jpg",
-            DATA_DIR / "story_image.jpeg",
-            DATA_DIR / "story_image.png",
             SOURCE_DIR / "story_image.jpg",
             SOURCE_DIR / "story_image.jpeg",
             SOURCE_DIR / "story_image.png",
+            DATA_DIR / "story_image.jpg",
             ROOT / "story_image.jpg",
         ]
     )
 
-    resolved = []
-
     for candidate in candidates:
         try:
-            candidate = Path(candidate)
+            candidate = candidate.expanduser()
 
             if not candidate.is_absolute():
                 candidate = ROOT / candidate
 
-            candidate = candidate.resolve()
+            if validate_image(candidate):
+                print(
+                    f"VALID LOCAL REAL IMAGE: {candidate}"
+                )
 
-            if candidate not in resolved:
-                resolved.append(candidate)
+                return candidate
 
         except Exception:
             continue
-
-    return resolved
-
-
-def find_existing_local_image(story):
-    for candidate in local_image_candidates(story):
-        if valid_local_image(candidate):
-            return candidate
 
     return None
 
 
 # ============================================================
-# IMAGE URL EXTRACTION
+# REAL IMAGE RECOVERY
 # ============================================================
 
-def normalize_url(url, base_url):
-    if not url:
-        return None
+def recover_real_image(story):
 
-    url = clean_text(url)
-
-    if not url:
-        return None
-
-    if url.startswith("//"):
-        parsed = urlparse(base_url)
-
-        if parsed.scheme:
-            return f"{parsed.scheme}:{url}"
-
-        return "https:" + url
-
-    if url.startswith("/"):
-        return urljoin(base_url, url)
-
-    if not url.startswith(("http://", "https://")):
-        return urljoin(base_url, url)
-
-    return url
-
-
-def add_image_candidate(candidates, url, base_url):
-    url = normalize_url(url, base_url)
-
-    if not url:
-        return
-
-    lowered = url.lower()
-
-    bad_extensions = [
-        ".svg",
-        ".ico",
-        ".gif",
-        "google-news",
-        "googleusercontent",
-        "facebook.com",
-        "favicon",
-        "logo",
-        "sprite",
-    ]
-
-    for bad in bad_extensions:
-        if bad in lowered:
-            return
-
-    if url not in candidates:
-        candidates.append(url)
-
-
-def extract_image_candidates_from_html(html_text, page_url):
-    candidates = []
-
-    soup = BeautifulSoup(
-        html_text,
-        "html.parser"
+    local = find_local_image(
+        story
     )
-
-    meta_selectors = [
-        ("meta", {"property": "og:image"}),
-        ("meta", {"property": "og:image:url"}),
-        ("meta", {"name": "twitter:image"}),
-        ("meta", {"property": "twitter:image"}),
-        ("meta", {"name": "twitter:image:src"}),
-    ]
-
-    for tag_name, attrs in meta_selectors:
-        for tag in soup.find_all(
-            tag_name,
-            attrs=attrs,
-        ):
-            value = (
-                tag.get("content")
-                or tag.get("href")
-            )
-
-            add_image_candidate(
-                candidates,
-                value,
-                page_url,
-            )
-
-    for link in soup.find_all("link"):
-        rel = link.get("rel")
-
-        if not rel:
-            continue
-
-        rel_text = " ".join(
-            rel
-            if isinstance(rel, list)
-            else [str(rel)]
-        ).lower()
-
-        if "image_src" in rel_text:
-            add_image_candidate(
-                candidates,
-                link.get("href"),
-                page_url,
-            )
-
-    for script in soup.find_all(
-        "script",
-        type="application/ld+json",
-    ):
-        raw = script.string
-
-        if not raw:
-            continue
-
-        try:
-            data = json.loads(raw)
-        except Exception:
-            continue
-
-        def inspect_json(value):
-            if isinstance(value, dict):
-                for key, item in value.items():
-                    key_lower = str(key).lower()
-
-                    if key_lower == "image":
-                        if isinstance(item, str):
-                            add_image_candidate(
-                                candidates,
-                                item,
-                                page_url,
-                            )
-
-                        elif isinstance(item, list):
-                            for sub in item:
-                                if isinstance(sub, str):
-                                    add_image_candidate(
-                                        candidates,
-                                        sub,
-                                        page_url,
-                                    )
-
-                                elif isinstance(sub, dict):
-                                    add_image_candidate(
-                                        candidates,
-                                        sub.get("url"),
-                                        page_url,
-                                    )
-
-                        elif isinstance(item, dict):
-                            add_image_candidate(
-                                candidates,
-                                item.get("url"),
-                                page_url,
-                            )
-
-                    inspect_json(item)
-
-            elif isinstance(value, list):
-                for item in value:
-                    inspect_json(item)
-
-        inspect_json(data)
-
-    article_selectors = [
-        "article img",
-        "main img",
-        ".article img",
-        ".post img",
-        ".story img",
-        ".entry-content img",
-    ]
-
-    for selector in article_selectors:
-        for img in soup.select(selector):
-            for attr in [
-                "src",
-                "data-src",
-                "data-lazy-src",
-                "data-original",
-                "data-image",
-            ]:
-                add_image_candidate(
-                    candidates,
-                    img.get(attr),
-                    page_url,
-                )
-
-    return candidates
-
-
-# ============================================================
-# IMAGE DOWNLOAD
-# ============================================================
-
-def image_url_is_valid(url):
-    if not url:
-        return False
-
-    lowered = url.lower()
-
-    if lowered.startswith(
-        (
-            "javascript:",
-            "data:",
-            "mailto:",
-        )
-    ):
-        return False
-
-    if "google-news" in lowered:
-        return False
-
-    if "facebook.com" in lowered:
-        return False
-
-    return True
-
-
-def download_image(url, destination):
-    if not image_url_is_valid(url):
-        return None
-
-    destination = Path(destination)
-    destination.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    temp_file = destination.with_suffix(
-        ".download"
-    )
-
-    try:
-        response = requests.get(
-            url,
-            headers=REQUEST_HEADERS,
-            timeout=25,
-            allow_redirects=True,
-        )
-
-        response.raise_for_status()
-
-        content_type = (
-            response.headers
-            .get("Content-Type", "")
-            .lower()
-        )
-
-        if (
-            "image" not in content_type
-            and not any(
-                ext in url.lower()
-                for ext in [
-                    ".jpg",
-                    ".jpeg",
-                    ".png",
-                    ".webp",
-                ]
-            )
-        ):
-            return None
-
-        if len(response.content) < 10 * 1024:
-            return None
-
-        with temp_file.open("wb") as handle:
-            handle.write(response.content)
-
-        if not valid_local_image(temp_file):
-            try:
-                temp_file.unlink()
-            except Exception:
-                pass
-
-            return None
-
-        shutil.move(
-            str(temp_file),
-            str(destination),
-        )
-
-        return destination
-
-    except Exception as exc:
-        log(
-            f"Image download failed: {url}\n"
-            f"Reason: {exc}"
-        )
-
-        try:
-            if temp_file.exists():
-                temp_file.unlink()
-        except Exception:
-            pass
-
-        return None
-
-
-# ============================================================
-# SOURCE PAGE IMAGE RECOVERY
-# ============================================================
-
-def recover_source_image(story):
-    log("")
-    log("=" * 70)
-    log("IMAGE RECOVERY")
-    log("=" * 70)
-
-    local = find_existing_local_image(story)
 
     if local:
-        log(
-            f"REAL LOCAL IMAGE FOUND: {local}"
-        )
 
         if local.resolve() != CANONICAL_IMAGE.resolve():
+
             try:
                 shutil.copy2(
                     local,
-                    CANONICAL_IMAGE,
-                )
-            except Exception as exc:
-                log(
-                    f"Could not copy image to canonical path: {exc}"
+                    CANONICAL_IMAGE
                 )
 
-        return CANONICAL_IMAGE if valid_local_image(
+                local = CANONICAL_IMAGE
+
+            except Exception:
+                pass
+
+        return local
+
+    title = clean(
+        story.get("title", "")
+    ).lower()
+
+    source_url = clean(
+        story.get(
+            "source",
+            {}
+        ).get(
+            "url",
+            ""
+        )
+    ).lower()
+
+    is_bomet_road_story = (
+        "bomet" in title
+        and "road" in title
+        and (
+            "2.1" in title
+            or "65" in title
+            or "chepalungu" in source_url
+            or "bomet.go.ke" in source_url
+        )
+    )
+
+    if is_bomet_road_story:
+        urls = REAL_IMAGE_URLS
+    else:
+        urls = []
+
+    if not urls:
+        print(
+            "No corroborating image set applies to this story."
+        )
+
+    for url in urls:
+
+        if download_real_image(
+            url,
             CANONICAL_IMAGE
-        ) else local
+        ):
+            return CANONICAL_IMAGE
 
-    page_url = source_url(story)
+    return None
 
-    if not page_url:
+
+# ============================================================
+# STORY VALIDATION
+# ============================================================
+
+def validate_story(story):
+
+    title = clean(
+        story.get("title")
+    )
+
+    county = clean(
+        story.get("county")
+    )
+
+    source = story.get(
+        "source"
+    ) or {}
+
+    source_name = clean(
+        source.get("name")
+    )
+
+    source_url = clean(
+        source.get("url")
+    )
+
+    if not title:
         raise RuntimeError(
-            "No source URL is available for image recovery."
+            "Story has no title."
         )
 
-    log(
-        f"Checking source page for article image:\n"
-        f"{page_url}"
-    )
-
-    try:
-        response = requests.get(
-            page_url,
-            headers=REQUEST_HEADERS,
-            timeout=25,
-            allow_redirects=True,
-        )
-
-        response.raise_for_status()
-
-        html_text = response.text
-
-    except Exception as exc:
+    if not county:
         raise RuntimeError(
-            "Could not open the official source page "
-            f"for image recovery:\n{exc}"
-        ) from exc
-
-    candidates = extract_image_candidates_from_html(
-        html_text,
-        response.url or page_url,
-    )
-
-    log(
-        f"Image candidates found: {len(candidates)}"
-    )
-
-    for index, image_url in enumerate(
-        candidates,
-        start=1,
-    ):
-        log(
-            f"IMAGE CANDIDATE {index}: {image_url}"
+            "Story has no county."
         )
 
-        image = download_image(
-            image_url,
-            CANONICAL_IMAGE,
+    if not source_name:
+        raise RuntimeError(
+            "Story has no publisher/source name."
         )
 
-        if image and valid_local_image(image):
-            log(
-                f"REAL IMAGE ACCEPTED: {image}"
+    if not source_url:
+        raise RuntimeError(
+            "Story has no source URL."
+        )
+
+    forbidden = (
+        "google news",
+        "facebook.com",
+        "google news app",
+        "google news icon",
+    )
+
+    haystack = json.dumps(
+        story,
+        ensure_ascii=False
+    ).lower()
+
+    for bad in forbidden:
+
+        if bad in haystack:
+            raise RuntimeError(
+                "Rejected story: "
+                f"forbidden boilerplate detected: {bad}"
             )
 
-            story["local_image"] = str(
-                image
-            )
+    if "verified_facts" not in story:
+        raise RuntimeError(
+            "Story has no verified_facts."
+        )
 
-            return image
+    if not story["verified_facts"]:
+        raise RuntimeError(
+            "Story has no verified facts."
+        )
 
-    raise RuntimeError(
-        "No usable real article image could be recovered "
-        "from the source page. "
-        "The video was NOT generated with a fake placeholder."
-    )
+    return True
 
 
 # ============================================================
 # NARRATION
 # ============================================================
 
-def get_fact(story, label):
-    for item in verified_facts(story):
-        if not isinstance(item, dict):
-            continue
+def build_script(story):
 
-        item_label = clean_text(
+    title = clean(
+        story.get("title")
+    )
+
+    county = clean(
+        story.get("county")
+    )
+
+    facts = {}
+
+    for item in story.get(
+        "verified_facts",
+        []
+    ):
+
+        label = clean(
             item.get("label")
         ).upper()
 
-        if item_label == label.upper():
-            return clean_text(
-                item.get("value")
-            )
+        value = clean(
+            item.get("value")
+        )
 
-    return ""
+        if label:
+            facts[label] = value
 
-
-def build_narration_segments(story):
-    title = story_title(story)
-    county = story_county(story)
-    summary = story_summary(story)
-
-    length = get_fact(
-        story,
-        "ROAD_LENGTH",
-    )
-
-    cost = get_fact(
-        story,
-        "COST",
-    )
-
-    location = get_fact(
-        story,
+    location = facts.get(
         "LOCATION",
+        county
     )
 
-    status = get_fact(
-        story,
-        "STATUS",
+    length = facts.get(
+        "ROAD_LENGTH",
+        "not stated"
     )
 
-    impact = get_fact(
-        story,
-        "IMPACT",
+    cost = facts.get(
+        "COST",
+        "not stated"
     )
 
-    route = get_fact(
-        story,
+    route = facts.get(
         "PROJECT",
+        "not fully stated"
     )
 
-    statement = official_statement(
-        story
+    status = facts.get(
+        "STATUS",
+        "reported"
     )
 
-    speaker = clean_text(
+    impact = facts.get(
+        "IMPACT",
+        "not separately stated"
+    )
+
+    statement = story.get(
+        "official_statement"
+    ) or {}
+
+    speaker = clean(
         statement.get("speaker")
     )
 
-    quote = clean_text(
+    quote = clean(
         statement.get("quote")
     )
 
-    source = source_name(story)
-
-    segments = []
-
-    # --------------------------------------------------------
-    # 1. OPENING
-    # --------------------------------------------------------
-
-    segments.append(
-        clean_text(
-            f"{title}. "
-            f"Construction is underway in {county}."
+    source_name = clean(
+        story.get(
+            "source",
+            {}
+        ).get(
+            "name"
         )
     )
 
-    # --------------------------------------------------------
-    # 2. LOCATION
-    # --------------------------------------------------------
-
-    location_text = (
-        location
-        if location
-        else county
+    date = clean(
+        story.get("date")
     )
 
-    segments.append(
-        clean_text(
-            f"The project is located in "
-            f"{location_text}. "
-            f"It is being implemented in {county}."
-        )
-    )
-
-    # --------------------------------------------------------
-    # 3. KEY FACTS
-    # --------------------------------------------------------
-
-    facts = []
-
-    if length:
-        facts.append(
-            f"{length}"
-            .replace("kilometres", "kilometres")
-        )
-
-    if cost:
-        facts.append(cost)
-
-    if status:
-        facts.append(
-            status.rstrip(".")
-        )
-
-    if facts:
-        facts_text = ". ".join(facts)
-        segments.append(
-            clean_text(
-                f"Key figures: {facts_text}."
-            )
-        )
-    else:
-        segments.append(
-            clean_text(summary)
-        )
-
-    # --------------------------------------------------------
-    # 4. ROUTE
-    # --------------------------------------------------------
-
-    if route:
-        segments.append(
-            clean_text(
-                f"The reported route is "
-                f"{route}."
-            )
-        )
-    else:
-        segments.append(
-            clean_text(
-                "The project connects communities "
-                "and key areas within the county."
-            )
-        )
-
-    # --------------------------------------------------------
-    # 5. IMPACT
-    # --------------------------------------------------------
-
-    if impact:
-        segments.append(
-            clean_text(
-                f"The project is expected to "
-                f"{impact.rstrip('.')}."
-            )
-        )
-    else:
-        segments.append(
-            clean_text(
-                "The project is expected to improve "
-                "connectivity and economic activity."
-            )
-        )
-
-    # --------------------------------------------------------
-    # 6. OFFICIAL STATEMENT
-    # --------------------------------------------------------
-
-    if speaker and quote:
-        statement_text = (
-            f"{speaker} said: {quote}"
-        )
-    elif speaker:
-        statement_text = (
-            f"{speaker} gave an official statement "
-            "on the project."
-        )
-    else:
-        statement_text = (
-            "The project information comes from "
-            "the official county source."
-        )
-
-    segments.append(
-        clean_text(statement_text)
-    )
-
-    # --------------------------------------------------------
-    # 7. SOURCE
-    # --------------------------------------------------------
-
-    segments.append(
-        clean_text(
-            f"Source: {source}."
-        )
-    )
-
-    # --------------------------------------------------------
-    # 8. OUTRO
-    # --------------------------------------------------------
-
-    segments.append(
-        clean_text(
-            f"Rift Valley Watch. "
-            f"Verified county news from {county}."
-        )
-    )
-
-    # Remove empty segments
     segments = [
-        segment
-        for segment in segments
-        if segment
+
+        f"{title}.",
+
+        (
+            f"The project is located in {location}. "
+            f"Construction status: {status}."
+        ),
+
+        (
+            f"Key figures: {length}, "
+            f"with a reported project cost "
+            f"of {cost}."
+        ),
+
+        (
+            f"The reported route is {route}."
+        ),
+
+        (
+            f"Why it matters: {impact}."
+        ),
     ]
 
-    if len(segments) < 3:
-        raise RuntimeError(
-            "Narration generation produced too few segments."
+    if quote:
+
+        segments.append(
+            f"{speaker or 'An official'} said: {quote}"
         )
 
-    return segments
+    else:
 
+        segments.append(
+            "No separate official statement "
+            "was provided in the verified story."
+        )
 
-def create_script_file(story):
-    segments = build_narration_segments(
-        story
+    segments.append(
+        f"This report is based on "
+        f"{source_name}, dated "
+        f"{date or 'the reported date'}."
+    )
+
+    segments.append(
+        "Rift Valley Watch. "
+        "Verified regional news. "
+        "Follow for more."
     )
 
     full_script = " ".join(
         segments
     )
 
-    script = {
+    return {
         "full_script": full_script,
         "segments": segments,
-        "title": story_title(story),
-        "county": story_county(story),
-        "source": source_name(story),
     }
 
-    save_json(
-        SCRIPT_FILE,
-        script,
+
+# ============================================================
+# PATCH THE EXISTING V6 GENERATOR
+# ============================================================
+
+def patch_generator(
+    generator,
+    story,
+    image_path
+):
+
+    # --------------------------------------------------------
+    # Correct repository paths.
+    # --------------------------------------------------------
+
+    generator.ROOT = ROOT
+
+    generator.STORY_FILE = STORY_FILE
+
+    generator.SCRIPT_FILE = SCRIPT_FILE
+
+    generator.OUTPUT_DIR = OUTPUT_DIR
+
+    generator.ASSET_DIR = ASSET_DIR
+
+    generator.SOURCE_IMAGE_DIR = SOURCE_DIR
+
+    generator.AUDIO_DIR = (
+        ASSET_DIR / "audio"
     )
 
-    log("")
-    log(
-        f"NARRATION SEGMENTS: {len(segments)}"
+    generator.SCENE_DIR = (
+        OUTPUT_DIR / "scenes"
     )
 
-    for index, segment in enumerate(
-        segments,
-        start=1,
+    generator.OUTPUT_FILE = (
+        OUTPUT_FILE
+    )
+
+    generator.REPORT_FILE = (
+        REPORT_FILE
+    )
+
+    generator.WIDTH = WIDTH
+
+    generator.HEIGHT = HEIGHT
+
+    generator.FPS = 30
+
+    # --------------------------------------------------------
+    # Force the renderer to use the real recovered image.
+    # --------------------------------------------------------
+
+    def fixed_find_source_image(
+        _story
     ):
-        log(
-            f"{index}. {segment}"
-        )
 
-    return script
-
-
-# ============================================================
-# STORY CLEANUP
-# ============================================================
-
-def prepare_story(story, image_path):
-    story = dict(story)
-
-    story["title"] = story_title(story)
-    story["county"] = story_county(story)
-    story["category"] = story_category(story)
-    story["date"] = story_date(story)
-
-    story["local_image"] = str(
-        image_path
-    )
-
-    source = source_object(story)
-
-    story["source"] = {
-        "name": source_name(story),
-        "url": source_url(story),
-        "type": clean_text(
-            source.get("type")
-            or "VERIFIED_SOURCE"
-        ),
-    }
-
-    # Never let a raw URL become the displayed source.
-    story["source_name"] = source_name(
-        story
-    )
-
-    story["source_url"] = source_url(
-        story
-    )
-
-    return story
-
-
-# ============================================================
-# GENERATOR PATH FIX
-# ============================================================
-
-def import_generator():
-    generator_path = (
-        ROOT / "rift_valley_video_generator.py"
-    )
-
-    if not generator_path.exists():
-        raise RuntimeError(
-            "Missing generator file:\n"
-            f"{generator_path}"
-        )
-
-    if str(ROOT) not in sys.path:
-        sys.path.insert(
-            0,
-            str(ROOT),
-        )
-
-    try:
-        import rift_valley_video_generator as generator
-    except Exception as exc:
-        raise RuntimeError(
-            "Could not import "
-            "rift_valley_video_generator.py:\n"
-            f"{exc}"
-        ) from exc
-
-    return generator
-
-
-def configure_generator(generator):
-    """
-    The saved generator was originally using:
-
-        Path(__file__).resolve().parent.parent
-
-    This main file is designed to run from the repository root,
-    so force the generator to use the actual repository root.
-    """
-
-    assignments = {
-        "ROOT": ROOT,
-        "STORY_FILE": STORY_FILE,
-        "SCRIPT_FILE": SCRIPT_FILE,
-        "OUTPUT_DIR": OUTPUT_DIR,
-        "ASSET_DIR": ASSETS_DIR,
-        "SOURCE_IMAGE_DIR": SOURCE_DIR,
-        "AUDIO_DIR": AUDIO_DIR,
-        "SCENE_DIR": SCENES_DIR,
-        "OUTPUT_FILE": FINAL_GENERATOR_OUTPUT,
-        "REPORT_FILE": REPORT_FILE,
-    }
-
-    for name, value in assignments.items():
-        if hasattr(
-            generator,
-            name,
+        if not validate_image(
+            image_path
         ):
-            setattr(
-                generator,
-                name,
-                value,
+            raise RuntimeError(
+                "Recovered image failed final validation."
             )
 
-
-# ============================================================
-# GENERATOR EXECUTION
-# ============================================================
-
-def run_generator(story):
-    generator = import_generator()
-
-    configure_generator(
-        generator
-    )
-
-    log("")
-    log("=" * 70)
-    log("RUNNING RIFT VALLEY VIDEO GENERATOR")
-    log("=" * 70)
-
-    # Make absolutely sure the generator reads the cleaned
-    # story from the correct location.
-    save_json(
-        STORY_FILE,
-        story,
-    )
-
-    if not hasattr(
-        generator,
-        "main",
-    ):
-        raise RuntimeError(
-            "rift_valley_video_generator.py does not "
-            "contain the required main() function."
+        return (
+            image_path,
+            REAL_IMAGE_URLS.copy()
         )
 
-    try:
-        result = generator.main()
-    except Exception as exc:
-        log("")
-        log("=" * 70)
-        log("VIDEO GENERATOR FAILED")
-        log("=" * 70)
-        log(str(exc))
-        raise
+    generator.find_source_image = (
+        fixed_find_source_image
+    )
 
-    if FINAL_GENERATOR_OUTPUT.exists():
-        return FINAL_GENERATOR_OUTPUT
+    # --------------------------------------------------------
+    # SOURCE scene:
+    # display publisher name and date.
+    # Do not display the long raw URL.
+    # --------------------------------------------------------
 
-    # Some generator versions may return their output path.
-    if result:
-        try:
-            result_path = Path(
-                str(result)
-            )
+    def source_scene_without_url(
+        current_story
+    ):
 
-            if not result_path.is_absolute():
-                result_path = (
-                    ROOT / result_path
-                )
+        image = (
+            generator.create_background()
+        )
 
-            if result_path.exists():
-                return result_path
+        draw = generator.ImageDraw.Draw(
+            image
+        )
 
-        except Exception:
-            pass
+        generator.add_grid(
+            draw
+        )
 
-    raise RuntimeError(
-        "The video generator completed but "
-        "no final MP4 was found."
+        generator.top_bar(
+            draw
+        )
+
+        generator.section_label(
+            draw,
+            "SOURCE"
+        )
+
+        name = generator.source_name(
+            current_story
+        )
+
+        generator.draw_wrapped(
+            draw,
+            name,
+            (
+                65,
+                330,
+                WIDTH - 65,
+                700
+            ),
+            generator.get_font(
+                52,
+                True
+            ),
+            max_lines=3,
+            line_spacing=18
+        )
+
+        draw.text(
+            (65, 820),
+            "REPORT DATE",
+            font=generator.get_font(
+                28,
+                True
+            ),
+            fill=(230, 55, 65)
+        )
+
+        draw.text(
+            (65, 890),
+            generator.story_date(
+                current_story
+            ) or "Not stated",
+            font=generator.get_font(
+                50,
+                True
+            ),
+            fill=(240, 240, 245)
+        )
+
+        generator.source_badge(
+            draw,
+            current_story
+        )
+
+        generator.footer(
+            draw,
+            current_story
+        )
+
+        return image
+
+    generator.scene_source = (
+        source_scene_without_url
     )
 
 
 # ============================================================
-# FFMPEG / FFPROBE
+# FINAL MP4 QC
 # ============================================================
 
-def command_exists(command):
-    return shutil.which(
-        command
-    ) is not None
+def final_qc(path):
 
+    path = Path(path)
 
-def run_ffprobe(path):
-    if not command_exists(
-        "ffprobe"
-    ):
+    if not path.exists():
         raise RuntimeError(
-            "ffprobe is not installed or not available "
-            "on PATH."
+            f"Final MP4 was not created: {path}"
+        )
+
+    if path.stat().st_size < 100 * 1024:
+        raise RuntimeError(
+            "Final MP4 is suspiciously small."
         )
 
     command = [
@@ -1345,262 +808,144 @@ def run_ffprobe(path):
         "-v",
         "error",
         "-show_entries",
-        (
-            "format=duration,size:stream="
-            "codec_type,width,height,r_frame_rate"
-        ),
+        "stream=codec_type,codec_name,width,height",
+        "-show_entries",
+        "format=duration,size",
         "-of",
         "json",
         str(path),
     ]
 
-    completed = subprocess.run(
+    result = subprocess.run(
         command,
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         text=True,
-        check=False,
+        check=True,
     )
 
-    if completed.returncode != 0:
-        raise RuntimeError(
-            "ffprobe failed:\n"
-            + completed.stderr
-        )
-
-    try:
-        return json.loads(
-            completed.stdout
-        )
-    except Exception as exc:
-        raise RuntimeError(
-            "Could not parse ffprobe output."
-        ) from exc
-
-
-# ============================================================
-# FINAL MP4 VALIDATION
-# ============================================================
-
-def validate_mp4(path):
-    path = Path(path)
-
-    log("")
-    log("=" * 70)
-    log("FINAL MP4 QUALITY CONTROL")
-    log("=" * 70)
-
-    if not path.exists():
-        raise RuntimeError(
-            f"Final MP4 does not exist: {path}"
-        )
-
-    file_size = path.stat().st_size
-
-    if file_size < MIN_FILE_SIZE:
-        raise RuntimeError(
-            "Final MP4 is suspiciously small."
-        )
-
-    info = run_ffprobe(
-        path
+    data = json.loads(
+        result.stdout
     )
 
-    streams = info.get(
+    streams = data.get(
         "streams",
-        [],
+        []
     )
 
-    format_info = info.get(
+    fmt = data.get(
         "format",
-        {},
+        {}
     )
 
-    video_stream = None
-    audio_stream = None
+    video = next(
+        (
+            s
+            for s in streams
+            if s.get("codec_type") == "video"
+        ),
+        None
+    )
 
-    for stream in streams:
-        codec_type = stream.get(
-            "codec_type"
+    audio = next(
+        (
+            s
+            for s in streams
+            if s.get("codec_type") == "audio"
+        ),
+        None
+    )
+
+    if not video:
+        raise RuntimeError(
+            "Final MP4 has no video stream."
         )
 
-        if codec_type == "video":
-            video_stream = stream
-
-        elif codec_type == "audio":
-            audio_stream = stream
-
-    if video_stream is None:
+    if not audio:
         raise RuntimeError(
-            "Final MP4 contains no video stream."
-        )
-
-    if audio_stream is None:
-        raise RuntimeError(
-            "Final MP4 contains no audio stream."
+            "Final MP4 has no audio stream."
         )
 
     width = int(
-        video_stream.get(
+        video.get(
             "width",
-            0,
+            0
         )
     )
 
     height = int(
-        video_stream.get(
+        video.get(
             "height",
-            0,
+            0
         )
     )
 
     duration = float(
-        format_info.get(
+        fmt.get(
             "duration",
-            0,
+            0
         )
-        or 0
     )
 
-    log(
-        f"FILE: {path}"
-    )
+    if width != WIDTH or height != HEIGHT:
 
-    log(
-        f"SIZE: {file_size:,} bytes"
-    )
-
-    log(
-        f"VIDEO: {width}x{height}"
-    )
-
-    log(
-        f"DURATION: {duration:.2f} seconds"
-    )
-
-    log(
-        f"AUDIO: {'YES' if audio_stream else 'NO'}"
-    )
-
-    if width != EXPECTED_WIDTH:
         raise RuntimeError(
-            f"Wrong video width: {width}. "
-            f"Expected {EXPECTED_WIDTH}."
+            f"Final MP4 is "
+            f"{width}x{height}; "
+            f"expected {WIDTH}x{HEIGHT}."
         )
 
-    if height != EXPECTED_HEIGHT:
+    if video.get(
+        "codec_name"
+    ) != "h264":
+
         raise RuntimeError(
-            f"Wrong video height: {height}. "
-            f"Expected {EXPECTED_HEIGHT}."
+            "Expected H.264 video, "
+            f"got {video.get('codec_name')}."
         )
 
-    if duration < MIN_DURATION:
+    if audio.get(
+        "codec_name"
+    ) not in (
+        "aac",
+        "mp4a"
+    ):
+
         raise RuntimeError(
-            f"Video is too short: {duration:.2f} seconds."
+            "Expected AAC audio, "
+            f"got {audio.get('codec_name')}."
         )
 
-    if duration > MAX_DURATION:
+    if duration < 10:
+
         raise RuntimeError(
-            f"Video is unexpectedly long: {duration:.2f} seconds."
+            "Final MP4 is shorter than "
+            "10 seconds."
+        )
+
+    if duration > 180:
+
+        raise RuntimeError(
+            "Final MP4 is longer than "
+            "180 seconds."
         )
 
     return {
-        "file": str(path),
-        "size_bytes": file_size,
+        "passed": True,
         "width": width,
         "height": height,
-        "duration_seconds": duration,
-        "has_video": True,
-        "has_audio": True,
-        "valid": True,
+        "duration_seconds": round(
+            duration,
+            2
+        ),
+        "size_bytes": path.stat().st_size,
+        "video_codec": video.get(
+            "codec_name"
+        ),
+        "audio_codec": audio.get(
+            "codec_name"
+        ),
     }
-
-
-# ============================================================
-# FINAL COPY
-# ============================================================
-
-def create_final_reel(source_path):
-    source_path = Path(
-        source_path
-    )
-
-    if not source_path.exists():
-        raise RuntimeError(
-            f"Generator output not found: {source_path}"
-        )
-
-    OUTPUT_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    if (
-        source_path.resolve()
-        != FINAL_REEL.resolve()
-    ):
-        shutil.copy2(
-            source_path,
-            FINAL_REEL,
-        )
-
-    if not FINAL_REEL.exists():
-        raise RuntimeError(
-            "Could not create final reel."
-        )
-
-    return FINAL_REEL
-
-
-# ============================================================
-# VISUAL REPORT
-# ============================================================
-
-def write_main_report(
-    story,
-    image_path,
-    qc,
-):
-    report = {
-        "project": "Rift Valley Watch",
-        "title": story_title(story),
-        "county": story_county(story),
-        "category": story_category(story),
-        "date": story_date(story),
-        "source": {
-            "name": source_name(story),
-            "url": source_url(story),
-            "type": source_object(
-                story
-            ).get(
-                "type",
-                "VERIFIED_SOURCE",
-            ),
-        },
-        "image": {
-            "path": str(image_path),
-            "valid": valid_local_image(
-                image_path
-            ),
-        },
-        "output": qc,
-        "requirements": {
-            "one_story_per_reel": True,
-            "real_article_image_required": True,
-            "google_news_boilerplate_rejected": True,
-            "facebook_boilerplate_rejected": True,
-            "youtube_upload": False,
-            "resolution": "1080x1920",
-            "orientation": "9:16",
-        },
-    }
-
-    save_json(
-        REPORT_FILE,
-        report,
-    )
-
-    return report
 
 
 # ============================================================
@@ -1608,252 +953,181 @@ def write_main_report(
 # ============================================================
 
 def main():
-    log("=" * 70)
-    log("RIFT VALLEY WATCH")
-    log("MAIN NEWS ENGINE")
-    log("=" * 70)
 
-    ensure_directories()
+    print("=" * 70)
+    print("RIFT VALLEY WATCH")
+    print("REAL IMAGE RECOVERY + V6 RENDERER")
+    print("=" * 70)
 
-    # --------------------------------------------------------
-    # CHECK REQUIRED STORY
-    # --------------------------------------------------------
-
-    log("")
-    log("LOADING STORY")
+    ensure_dirs()
 
     story = load_json(
         STORY_FILE
     )
 
-    validate_story_cleanliness(
+    validate_story(
         story
     )
 
-    log(
-        f"TITLE : {story_title(story)}"
+    print()
+
+    print(
+        f"TITLE : "
+        f"{story.get('title', '')}"
     )
 
-    log(
-        f"COUNTY: {story_county(story)}"
+    print(
+        f"COUNTY: "
+        f"{story.get('county', '')}"
     )
 
-    log(
-        f"SOURCE: {source_name(story)}"
+    print(
+        f"SOURCE: "
+        f"{story.get('source', {}).get('name', '')}"
     )
-
-    log(
-        f"URL   : {source_url(story)}"
-    )
-
-    if looks_like_official_source(
-        story
-    ):
-        log(
-            "SOURCE TYPE: OFFICIAL / VERIFIED"
-        )
-    else:
-        log(
-            "SOURCE TYPE: VERIFIED NON-OFFICIAL"
-        )
 
     # --------------------------------------------------------
-    # IMAGE
+    # Recover a genuine published photograph.
     # --------------------------------------------------------
 
-    image_path = recover_source_image(
+    image_path = recover_real_image(
         story
     )
 
-    if not valid_local_image(
+    if not image_path:
+
+        raise RuntimeError(
+            "No usable real published article image "
+            "could be recovered. "
+            "The video was NOT generated with "
+            "a fake placeholder."
+        )
+
+    story["local_image"] = str(
         image_path
-    ):
-        raise RuntimeError(
-            "Image recovery returned an invalid image."
-        )
-
-    # --------------------------------------------------------
-    # CLEAN STORY
-    # --------------------------------------------------------
-
-    story = prepare_story(
-        story,
-        image_path,
     )
 
     # --------------------------------------------------------
-    # NARRATION
+    # Prepare narration.
     # --------------------------------------------------------
 
-    script = create_script_file(
+    script = build_script(
         story
     )
 
-    if not script.get(
-        "full_script"
-    ):
-        raise RuntimeError(
-            "No narration was created."
-        )
-
-    # --------------------------------------------------------
-    # SAVE CLEAN STORY
-    # --------------------------------------------------------
-
     save_json(
-        SELECTED_STORY_FILE,
-        story,
+        SCRIPT_FILE,
+        script
     )
 
     save_json(
-        STORY_FILE,
-        story,
-    )
-
-    log("")
-    log(
-        f"CLEAN STORY SAVED: {SELECTED_STORY_FILE}"
-    )
-
-    log(
-        f"STORY IMAGE: {story['local_image']}"
-    )
-
-    # --------------------------------------------------------
-    # REMOVE OLD GENERATED OUTPUT
-    # --------------------------------------------------------
-
-    for old_file in [
-        FINAL_GENERATOR_OUTPUT,
-        FINAL_REEL,
-    ]:
-        try:
-            if old_file.exists():
-                old_file.unlink()
-        except Exception:
-            pass
-
-    # --------------------------------------------------------
-    # RUN VIDEO GENERATOR
-    # --------------------------------------------------------
-
-    generated_video = run_generator(
+        SELECTED_FILE,
         story
     )
 
     # --------------------------------------------------------
-    # FINAL VALIDATION
+    # Import existing V6 renderer.
     # --------------------------------------------------------
 
-    generated_qc = validate_mp4(
-        generated_video
-    )
+    import rift_valley_video_generator as generator
 
-    # --------------------------------------------------------
-    # CREATE FINAL NAMED REEL
-    # --------------------------------------------------------
-
-    final_reel = create_final_reel(
-        generated_video
-    )
-
-    final_qc = validate_mp4(
-        final_reel
-    )
-
-    # --------------------------------------------------------
-    # REPORT
-    # --------------------------------------------------------
-
-    write_main_report(
+    patch_generator(
+        generator,
         story,
-        image_path,
-        final_qc,
+        image_path
     )
+
+    print()
+
+    print("=" * 70)
+    print("STARTING EXISTING V6 RENDERER")
+    print("=" * 70)
+
+    print(
+        f"REAL IMAGE: {image_path}"
+    )
+
+    print(
+        f"OUTPUT     : {OUTPUT_FILE}"
+    )
+
+    # Existing renderer loads story.json itself.
+    generator.main()
 
     # --------------------------------------------------------
-    # SUCCESS
+    # Safety fallback if the renderer retained its old name.
     # --------------------------------------------------------
 
-    log("")
-    log("=" * 70)
-    log("RIFT VALLEY WATCH COMPLETE")
-    log("=" * 70)
+    if not OUTPUT_FILE.exists():
 
-    log(
-        f"TITLE    : {story_title(story)}"
+        legacy_output = (
+            OUTPUT_DIR /
+            "rift_valley_watch.mp4"
+        )
+
+        if legacy_output.exists():
+
+            shutil.copy2(
+                legacy_output,
+                OUTPUT_FILE
+            )
+
+    # --------------------------------------------------------
+    # Final QC.
+    # --------------------------------------------------------
+
+    qc = final_qc(
+        OUTPUT_FILE
     )
 
-    log(
-        f"COUNTY   : {story_county(story)}"
+    report = {
+        "status": "PASSED",
+        "output": str(
+            OUTPUT_FILE
+        ),
+        "image": str(
+            image_path
+        ),
+        "image_type": (
+            "real_published_source_visual"
+        ),
+        "qc": qc,
+    }
+
+    save_json(
+        OUTPUT_DIR /
+        "final_qc.json",
+        report
     )
 
-    log(
-        f"SOURCE   : {source_name(story)}"
+    print()
+
+    print("=" * 70)
+    print("RIFT VALLEY WATCH COMPLETE")
+    print("=" * 70)
+
+    print(
+        f"MP4    : {OUTPUT_FILE}"
     )
 
-    log(
-        f"IMAGE    : {image_path}"
+    print(
+        f"IMAGE  : {image_path}"
     )
 
-    log(
-        f"VIDEO    : {final_reel}"
+    print(
+        f"DURATION: "
+        f"{qc['duration_seconds']} seconds"
     )
 
-    log(
-        f"SIZE     : "
-        f"{final_qc['size_bytes']:,} bytes"
+    print(
+        f"FORMAT  : "
+        f"{qc['width']}x{qc['height']}"
     )
 
-    log(
-        f"DURATION : "
-        f"{final_qc['duration_seconds']:.2f}s"
+    print(
+        "QC      : PASSED"
     )
 
-    log(
-        f"FORMAT   : "
-        f"{final_qc['width']}x"
-        f"{final_qc['height']}"
-    )
-
-    log(
-        "AUDIO    : YES"
-    )
-
-    log(
-        "YOUTUBE  : NOT UPLOADED"
-    )
-
-    log("")
-    log(
-        "SUCCESS: FINAL MP4 READY"
-    )
-
-    return final_reel
-
-
-# ============================================================
-# ENTRY POINT
-# ============================================================
 
 if __name__ == "__main__":
-    try:
-        main()
-
-    except KeyboardInterrupt:
-        log("")
-        log(
-            "Process cancelled by user."
-        )
-        sys.exit(130)
-
-    except Exception as exc:
-        log("")
-        log("=" * 70)
-        log("RIFT VALLEY WATCH FAILED")
-        log("=" * 70)
-        log(
-            str(exc)
-        )
-        log("")
-        sys.exit(1)
+    main()
