@@ -1,4 +1,30 @@
 # ============================================================
+# RIFT VALLEY WATCH
+# MAIN NEWS ENGINE
+# ============================================================
+
+import os
+import re
+import json
+import time
+import html
+import hashlib
+import traceback
+from datetime import datetime, timezone, timedelta
+from urllib.parse import (
+    urlparse,
+    urljoin,
+    quote_plus,
+    parse_qs,
+    unquote,
+)
+
+import requests
+import feedparser
+from bs4 import BeautifulSoup
+
+
+# ============================================================
 # IMAGE EXTRACTION
 # ============================================================
 
@@ -1330,12 +1356,6 @@ def main():
     # --------------------------------------------------------
     # 3. CRITICAL NARRATION HANDOFF
     # --------------------------------------------------------
-    #
-    # generate_video() accepts ONLY story.
-    #
-    # Therefore narration must be inside story.
-    #
-    # --------------------------------------------------------
 
     story["narration"] = narration
 
@@ -1432,10 +1452,6 @@ def main():
 
     # --------------------------------------------------------
     # 6. GENERATE VIDEO
-    # --------------------------------------------------------
-    #
-    # DO NOT pass script as a second argument.
-    #
     # --------------------------------------------------------
 
     print(
