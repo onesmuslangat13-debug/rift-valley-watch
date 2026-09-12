@@ -6,7 +6,7 @@ from pathlib import Path
 import requests
 import xml.etree.ElementTree as ET
 
-from scripts.rift_valley_video_generator import generate_video
+
 
 
 COUNTIES = [
