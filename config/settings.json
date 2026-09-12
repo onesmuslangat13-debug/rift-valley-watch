@@ -1,7 +1,18 @@
 {
-  "page_name": "Rift Valley Watch",
-  "region": "Rift Valley, Kenya",
-  "language": "en",
-  "max_articles": 50,
-  "max_script_words": 180
+  "money_moves_daily": {
+    "name": "Money Moves Daily",
+    "theme": "global finance, markets and economics"
+  },
+  "luxury_life_daily": {
+    "name": "Luxury Life Daily",
+    "theme": "luxury, wealth and lifestyle"
+  },
+  "rift_valley_watch": {
+    "name": "Rift Valley Watch",
+    "theme": "regional development and current affairs"
+  },
+  "statehouse_radar": {
+    "name": "Statehouse Radar",
+    "theme": "Kenyan politics and government affairs"
+  }
 }
