@@ -16,6 +16,9 @@ from bs4 import BeautifulSoup
 # ============================================================
 # RIFT VALLEY WATCH
 # MAIN NEWS SELECTION + VERIFICATION PIPELINE
+#
+# FAST / GITHUB ACTIONS VERSION
+# ONE STORY PER REEL
 # ============================================================
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -107,32 +110,45 @@ COUNTY_ALIASES = {
     ],
 }
 
-RSS_TIMEOUT = 10
-ARTICLE_TIMEOUT = 12
-IMAGE_TIMEOUT = 8
-SEARCH_TIMEOUT = 10
 
-MAX_AGE_HOURS = 96
-MAX_CANDIDATES_TO_VERIFY = 15
-MAX_VERIFIED_TO_COMPARE = 5
+# ------------------------------------------------------------
+# IMPORTANT:
+# These values are intentionally lower than the previous
+# version so GitHub Actions does not spend 15+ minutes
+# searching before video generation.
+# ------------------------------------------------------------
 
-BING_RESULT_LIMIT = 8
-MAX_BING_IMAGES = 10
-MAX_IMAGE_CHECKS = 8
+RSS_TIMEOUT = 5
+ARTICLE_TIMEOUT = 6
+IMAGE_TIMEOUT = 4
+SEARCH_TIMEOUT = 5
 
-RSS_DELAY = 0.15
+MAX_AGE_HOURS = 72
+
+# Only verify a small number of candidates.
+MAX_CANDIDATES_TO_VERIFY = 4
+
+# We only need the strongest verified story.
+MAX_VERIFIED_TO_COMPARE = 2
+
+# Bing is fallback only.
+BING_RESULT_LIMIT = 5
+MAX_BING_IMAGES = 5
+MAX_IMAGE_CHECKS = 4
+
+RSS_DELAY = 0
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 "
     "(KHTML, like Gecko) "
     "Chrome/126.0 Safari/537.36 "
-    "RiftValleyWatch/2.0"
+    "RiftValleyWatch/3.0"
 )
 
 
 # ============================================================
-# TEXT AND URL HELPERS
+# TEXT / URL HELPERS
 # ============================================================
 
 def clean_text(value):
@@ -200,10 +216,8 @@ def valid_http_url(url):
         parsed = urlparse(url)
 
         return (
-            parsed.scheme.lower() in {
-                "http",
-                "https",
-            }
+            parsed.scheme.lower()
+            in {"http", "https"}
             and bool(parsed.netloc)
         )
 
@@ -213,9 +227,12 @@ def valid_http_url(url):
 
 def hostname(url):
     try:
-        return urlparse(
-            url
-        ).netloc.lower().split(":")[0]
+        return (
+            urlparse(url)
+            .netloc
+            .lower()
+            .split(":")[0]
+        )
     except Exception:
         return ""
 
@@ -251,16 +268,12 @@ def is_svg_url(url):
     return (
         ".svg" in lower
         or "image/svg" in lower
-        or lower.startswith(
-            "data:image/svg"
-        )
+        or lower.startswith("data:image/svg")
     )
 
 
 def now_utc():
-    return datetime.now(
-        timezone.utc
-    )
+    return datetime.now(timezone.utc)
 
 
 def story_hash(title, url):
@@ -351,16 +364,17 @@ def parse_date(value):
     )
 
 
-def is_recent(
-    value,
-    allow_missing=True,
-):
+def is_recent(value, allow_missing=True):
     dt = parse_date(value)
 
     if dt is None:
         return allow_missing
 
     age = now_utc() - dt
+
+    # Reject future-dated feeds.
+    if age < timedelta(minutes=-30):
+        return False
 
     return age <= timedelta(
         hours=MAX_AGE_HOURS
@@ -371,14 +385,15 @@ def is_recent(
 # HTTP
 # ============================================================
 
-def get_response(
-    url,
-    timeout,
-):
+def get_response(url, timeout):
     return requests.get(
         url,
         headers={
             "User-Agent": USER_AGENT,
+            "Accept": (
+                "text/html,application/xhtml+xml,"
+                "application/xml;q=0.9,*/*;q=0.8"
+            ),
         },
         timeout=timeout,
         allow_redirects=True,
@@ -411,6 +426,22 @@ def parse_feed(feed_url):
         parsed = feedparser.parse(
             response.content
         )
+
+        if getattr(
+            parsed,
+            "bozo",
+            False,
+        ):
+            # Feedparser may mark minor XML problems
+            # as bozo while still returning entries.
+            entries = getattr(
+                parsed,
+                "entries",
+                [],
+            )
+
+            if not entries:
+                return None
 
         return parsed
 
@@ -505,7 +536,7 @@ def bing_search(query):
         url = (
             "https://www.bing.com/search?"
             f"q={quote_plus(query)}"
-            "&count=10"
+            "&count=5"
             "&setlang=en-KE"
         )
 
@@ -538,7 +569,7 @@ def bing_search(query):
                 )
             )
 
-            url = anchor.get(
+            result_url = anchor.get(
                 "href",
                 "",
             )
@@ -559,15 +590,15 @@ def bing_search(query):
 
             if (
                 not title
-                or not valid_http_url(url)
-                or is_search_engine_url(url)
+                or not valid_http_url(result_url)
+                or is_search_engine_url(result_url)
             ):
                 continue
 
             results.append(
                 {
                     "title": title,
-                    "url": url,
+                    "url": result_url,
                     "summary": summary,
                 }
             )
@@ -584,7 +615,7 @@ def bing_search(query):
 
 
 # ============================================================
-# IMAGE EXTRACTION AND VALIDATION
+# IMAGE EXTRACTION
 # ============================================================
 
 def extract_image_candidates(
@@ -618,9 +649,7 @@ def extract_image_candidates(
         if value not in candidates:
             candidates.append(value)
 
-    for meta in soup.find_all(
-        "meta"
-    ):
+    for meta in soup.find_all("meta"):
         prop = (
             meta.get("property")
             or meta.get("name")
@@ -640,18 +669,13 @@ def extract_image_candidates(
                 )
             )
 
-    for link in soup.find_all(
-        "link"
-    ):
+    for link in soup.find_all("link"):
         rel = link.get(
             "rel",
             [],
         )
 
-        if isinstance(
-            rel,
-            str,
-        ):
+        if isinstance(rel, str):
             rel = [rel]
 
         rel = [
@@ -667,9 +691,8 @@ def extract_image_candidates(
                 )
             )
 
-    for image in soup.find_all(
-        "img"
-    ):
+    # Only inspect a limited number of <img> tags.
+    for image in soup.find_all("img")[:30]:
         for attribute in [
             "src",
             "data-src",
@@ -688,6 +711,10 @@ def extract_image_candidates(
     return candidates
 
 
+# ============================================================
+# IMAGE VALIDATION
+# ============================================================
+
 def verify_image(url):
     if not valid_http_url(url):
         return False
@@ -703,7 +730,10 @@ def verify_image(url):
             url,
             headers={
                 "User-Agent": USER_AGENT,
-                "Accept": "image/*,*/*;q=0.8",
+                "Accept": (
+                    "image/avif,image/webp,image/apng,"
+                    "image/svg+xml,image/*,*/*;q=0.8"
+                ),
             },
             timeout=IMAGE_TIMEOUT,
             allow_redirects=True,
@@ -746,24 +776,25 @@ def verify_image(url):
             },
         ]
 
-        return any(
-            valid_signatures
-        )
+        return any(valid_signatures)
 
     except Exception:
         return False
 
 
-def first_valid_image(
-    candidates,
-):
+def first_valid_image(candidates):
+    limit = min(
+        len(candidates),
+        MAX_IMAGE_CHECKS,
+    )
+
     for index, url in enumerate(
-        candidates[:MAX_IMAGE_CHECKS],
+        candidates[:limit],
         start=1,
     ):
         print(
             f"Checking image "
-            f"{index}/{min(len(candidates), MAX_IMAGE_CHECKS)}"
+            f"{index}/{limit}"
         )
 
         if verify_image(url):
@@ -776,9 +807,11 @@ def first_valid_image(
     return ""
 
 
-def extract_bing_image_urls(
-    text,
-):
+# ============================================================
+# BING IMAGE SEARCH
+# ============================================================
+
+def extract_bing_image_urls(text):
     urls = []
 
     patterns = [
@@ -842,6 +875,8 @@ def image_search_fallback(
     title,
     source_name,
 ):
+    # Only one query first.
+    # Second query is used only if necessary.
     queries = [
         title,
         f"{title} {source_name}",
@@ -892,7 +927,10 @@ def fetch_article(url):
             .lower()
         )
 
-        if "html" not in content_type:
+        if (
+            content_type
+            and "html" not in content_type
+        ):
             return None
 
         soup = BeautifulSoup(
@@ -938,7 +976,7 @@ def extract_article_summary(
         if not found:
             continue
 
-        for paragraph in found:
+        for paragraph in found[:15]:
             text = clean_text(
                 paragraph.get_text(
                     " ",
@@ -985,9 +1023,7 @@ def extract_article_summary(
     )[:1800]
 
 
-def extract_published_date(
-    soup,
-):
+def extract_published_date(soup):
     names = [
         "article:published_time",
         "date",
@@ -997,7 +1033,6 @@ def extract_published_date(
     ]
 
     for name in names:
-
         meta = soup.find(
             "meta",
             attrs={
@@ -1024,9 +1059,7 @@ def extract_published_date(
             if value:
                 return value
 
-    time_tag = soup.find(
-        "time"
-    )
+    time_tag = soup.find("time")
 
     if time_tag:
         return (
@@ -1100,12 +1133,24 @@ def verify_article_candidate(
     county,
     fallback_summary="",
 ):
+    print(
+        "Resolving publisher article..."
+    )
+
     resolved_url = unwrap_google_news_url(
         url
     )
 
     if not resolved_url:
+        print(
+            "Rejected: could not resolve URL."
+        )
         return None
+
+    print(
+        "Publisher URL:",
+        resolved_url,
+    )
 
     article = fetch_article(
         resolved_url
@@ -1132,9 +1177,7 @@ def verify_article_candidate(
         )
 
     if not page_title:
-        title_tag = soup.find(
-            "title"
-        )
+        title_tag = soup.find("title")
 
         if title_tag:
             page_title = clean_text(
@@ -1153,6 +1196,9 @@ def verify_article_candidate(
     )
 
     if len(summary) < 80:
+        print(
+            "Rejected: article summary too short."
+        )
         return None
 
     relevance = county_relevance(
@@ -1163,10 +1209,8 @@ def verify_article_candidate(
 
     if relevance < 10:
         print(
-            "Rejected: insufficient "
-            "county relevance."
+            "Rejected: insufficient county relevance."
         )
-
         return None
 
     source_host = hostname(
@@ -1175,11 +1219,15 @@ def verify_article_candidate(
 
     source_name = source_host
 
-    if source_name.startswith(
-        "www."
-    ):
+    if source_name.startswith("www."):
         source_name = source_name[4:]
 
+    print(
+        "Source:",
+        source_name,
+    )
+
+    # First try publisher's own article image.
     image_candidates = (
         extract_image_candidates(
             soup,
@@ -1191,7 +1239,12 @@ def verify_article_candidate(
         image_candidates
     )
 
+    # Only use Bing if article has no usable image.
     if not image:
+        print(
+            "Publisher image unavailable."
+        )
+
         image = image_search_fallback(
             page_title,
             source_name,
@@ -1199,14 +1252,24 @@ def verify_article_candidate(
 
     if not image:
         print(
-            "Rejected: no valid image."
+            "Rejected: no valid real image."
         )
-
         return None
 
     published = extract_published_date(
         soup
     )
+
+    # If article itself exposes a date,
+    # reject obviously old articles.
+    if published and not is_recent(
+        published,
+        allow_missing=False,
+    ):
+        print(
+            "Rejected: publisher article is too old."
+        )
+        return None
 
     return {
         "title": page_title,
@@ -1320,6 +1383,9 @@ def score_story(story):
         "president",
         "funding",
         "construction",
+        "economy",
+        "farmers",
+        "agriculture",
     ]
 
     for keyword in keywords:
@@ -1345,6 +1411,8 @@ def score_story(story):
         "kenyanews.go.ke",
         "tuko.co.ke",
         "businessdailyafrica.com",
+        "people.co.ke",
+        "peopledaily.digital",
         "bomet.go.ke",
         "kericho.go.ke",
         "nakuru.go.ke",
@@ -1364,6 +1432,16 @@ def score_story(story):
 
 # ============================================================
 # CANDIDATE COLLECTION
+#
+# IMPORTANT:
+# The previous version generated dozens of RSS and Bing
+# requests. That was the main reason the GitHub Action could
+# run for 15+ minutes.
+#
+# This version performs:
+#   8 RSS requests
+#   optional limited Bing fallback
+#   maximum 4 article verifications
 # ============================================================
 
 def collect_candidates():
@@ -1377,45 +1455,44 @@ def collect_candidates():
     print("COLLECTING RIFT VALLEY NEWS")
     print("=" * 70)
 
-    rss_queries = []
+    # --------------------------------------------------------
+    # EXACTLY ONE PRIMARY RSS QUERY PER COUNTY
+    # --------------------------------------------------------
 
-    for county in COUNTIES:
-
-        rss_queries.extend(
-            [
-                (
-                    county,
-                    f'"{county}" Kenya',
-                ),
-                (
-                    county,
-                    f'"{county}" latest Kenya',
-                ),
-                (
-                    county,
-                    f'"{county}" development Kenya',
-                ),
-                (
-                    county,
-                    f'"{county}" government Kenya',
-                ),
-            ]
-        )
-
-        for alias in COUNTY_ALIASES.get(
-            county,
-            [],
-        )[:5]:
-
-            if alias.lower() == county.lower():
-                continue
-
-            rss_queries.append(
-                (
-                    county,
-                    f'"{alias}" Kenya',
-                )
-            )
+    rss_queries = [
+        (
+            "Bomet",
+            '"Bomet" Kenya latest news',
+        ),
+        (
+            "Kericho",
+            '"Kericho" Kenya latest news',
+        ),
+        (
+            "Nakuru",
+            '"Nakuru" Kenya latest news',
+        ),
+        (
+            "Nandi",
+            '"Nandi" Kenya latest news',
+        ),
+        (
+            "Uasin Gishu",
+            '"Uasin Gishu" Kenya latest news',
+        ),
+        (
+            "Elgeyo-Marakwet",
+            '"Elgeyo-Marakwet" Kenya latest news',
+        ),
+        (
+            "West Pokot",
+            '"West Pokot" Kenya latest news',
+        ),
+        (
+            "Narok",
+            '"Narok" Kenya latest news',
+        ),
+    ]
 
     print(
         f"RSS queries: {len(rss_queries)}"
@@ -1428,7 +1505,6 @@ def collect_candidates():
         rss_queries,
         start=1,
     ):
-
         print(
             f"[RSS {index}/{len(rss_queries)}] "
             f"{query}"
@@ -1441,12 +1517,13 @@ def collect_candidates():
         if not parsed:
             continue
 
-        for entry in getattr(
+        entries = getattr(
             parsed,
             "entries",
             [],
-        ):
+        )
 
+        for entry in entries[:8]:
             title = clean_text(
                 entry.get(
                     "title",
@@ -1475,9 +1552,12 @@ def collect_candidates():
             if not title or not link:
                 continue
 
-            # Do not reject missing dates.
-            if published and not is_recent(
+            # Google News should normally provide a date.
+            # Missing dates are allowed because publisher
+            # verification happens later.
+            if (
                 published
+                and not is_recent(published)
             ):
                 continue
 
@@ -1485,17 +1565,20 @@ def collect_candidates():
                 title
             )
 
+            if not normalized:
+                continue
+
             if normalized in seen_titles:
                 continue
 
-            resolved = unwrap_google_news_url(
-                link
-            )
+            # IMPORTANT:
+            # Do NOT resolve every RSS URL here.
+            # That was another major source of delays.
+            #
+            # We only resolve the few candidates later
+            # during verification.
 
-            if not resolved:
-                continue
-
-            if resolved in seen_urls:
+            if link in seen_urls:
                 continue
 
             seen_titles.add(
@@ -1503,7 +1586,7 @@ def collect_candidates():
             )
 
             seen_urls.add(
-                resolved
+                link
             )
 
             candidates.append(
@@ -1525,75 +1608,60 @@ def collect_candidates():
                 }
             )
 
-        time.sleep(
-            RSS_DELAY
-        )
-
     print(
         f"RSS candidates: {len(candidates)}"
     )
 
-    # ========================================================
-    # BING FALLBACK
-    # ========================================================
+    # --------------------------------------------------------
+    # LIMITED BING FALLBACK
+    #
+    # Only run if RSS produced fewer than 4 candidates.
+    # Only search 4 counties to avoid another long loop.
+    # --------------------------------------------------------
 
-    if len(candidates) < 12:
+    if len(candidates) < 4:
 
         print()
         print("=" * 70)
-        print("RUNNING BING DISCOVERY FALLBACK")
+        print("LIMITED BING DISCOVERY FALLBACK")
         print("=" * 70)
 
-        bing_queries = []
-
-        for county in COUNTIES:
-
-            bing_queries.extend(
-                [
-                    (
-                        county,
-                        f"{county} Kenya latest news",
-                    ),
-                    (
-                        county,
-                        f"{county} Kenya development news",
-                    ),
-                    (
-                        county,
-                        f"{county} Kenya government news",
-                    ),
-                ]
-            )
-
-            for alias in COUNTY_ALIASES.get(
-                county,
-                [],
-            )[:3]:
-
-                bing_queries.append(
-                    (
-                        county,
-                        f"{alias} Kenya latest news",
-                    )
-                )
+        fallback_queries = [
+            (
+                "Bomet",
+                "Bomet Kenya latest news",
+            ),
+            (
+                "Kericho",
+                "Kericho Kenya latest news",
+            ),
+            (
+                "Nakuru",
+                "Nakuru Kenya latest news",
+            ),
+            (
+                "Uasin Gishu",
+                "Uasin Gishu Kenya latest news",
+            ),
+        ]
 
         for index, (
             county,
             query,
         ) in enumerate(
-            bing_queries,
+            fallback_queries,
             start=1,
         ):
-
             print(
-                f"[BING {index}/{len(bing_queries)}] "
+                f"[BING {index}/{len(fallback_queries)}] "
                 f"{query}"
             )
 
-            for result in bing_search(
+            results = bing_search(
                 query
-            ):
+            )
 
+            for result in results:
                 title = clean_text(
                     result.get(
                         "title",
@@ -1615,17 +1683,22 @@ def collect_candidates():
                     )
                 )
 
-                if not title or not url:
+                if (
+                    not title
+                    or not valid_http_url(url)
+                    or is_search_engine_url(url)
+                ):
                     continue
 
                 normalized = normalize_title(
                     title
                 )
 
-                if normalized in seen_titles:
-                    continue
-
-                if url in seen_urls:
+                if (
+                    not normalized
+                    or normalized in seen_titles
+                    or url in seen_urls
+                ):
                     continue
 
                 seen_titles.add(
@@ -1652,16 +1725,55 @@ def collect_candidates():
                     }
                 )
 
+                if len(candidates) >= 8:
+                    break
+
+            if len(candidates) >= 8:
+                break
+
+    # --------------------------------------------------------
+    # SORT:
+    # dated stories first, newest first
+    # --------------------------------------------------------
+
+    def candidate_date(item):
+        dt = parse_date(
+            item.get(
+                "published",
+                "",
+            )
+        )
+
+        if dt is None:
+            return datetime(
+                2000,
+                1,
+                1,
+                tzinfo=timezone.utc,
+            )
+
+        return dt
+
+    candidates.sort(
+        key=candidate_date,
+        reverse=True,
+    )
+
+    # Keep the verification queue small.
+    candidates = candidates[
+        :MAX_CANDIDATES_TO_VERIFY
+    ]
+
     print()
     print("=" * 70)
     print(
-        f"TOTAL CANDIDATES FOUND: "
+        f"CANDIDATES READY FOR VERIFICATION: "
         f"{len(candidates)}"
     )
     print("=" * 70)
 
     for index, candidate in enumerate(
-        candidates[:25],
+        candidates,
         start=1,
     ):
         print(
@@ -1683,7 +1795,7 @@ def select_story():
     if not candidates:
         raise RuntimeError(
             "No Rift Valley candidates found "
-            "from RSS or Bing discovery."
+            "from Google News RSS or limited Bing fallback."
         )
 
     print()
@@ -1693,16 +1805,19 @@ def select_story():
 
     verified = []
 
+    total = min(
+        len(candidates),
+        MAX_CANDIDATES_TO_VERIFY,
+    )
+
     for index, candidate in enumerate(
-        candidates[:MAX_CANDIDATES_TO_VERIFY],
+        candidates[:total],
         start=1,
     ):
-
         print()
         print("-" * 70)
         print(
-            f"VERIFYING "
-            f"{index}/{min(len(candidates), MAX_CANDIDATES_TO_VERIFY)}"
+            f"VERIFYING {index}/{total}"
         )
 
         print(
@@ -1714,7 +1829,6 @@ def select_story():
         )
 
         try:
-
             story = enrich_story(
                 candidate.get(
                     "entry",
@@ -1746,17 +1860,27 @@ def select_story():
             )
 
             print(
+                "Source:",
+                story.get("source_name"),
+            )
+
+            print(
                 "Score:",
                 story.get("score"),
             )
 
-            if len(verified) >= MAX_VERIFIED_TO_COMPARE:
+            # Stop early once we have enough.
+            if (
+                len(verified)
+                >= MAX_VERIFIED_TO_COMPARE
+            ):
                 break
 
         except Exception as exc:
             print(
                 f"Verification error: {exc}"
             )
+
             traceback.print_exc()
 
     if not verified:
@@ -1825,6 +1949,10 @@ def select_story():
 
     print(
         f"Score: {story.get('score')}"
+    )
+
+    print(
+        f"Image: {story.get('image')}"
     )
 
     return story
@@ -1914,10 +2042,7 @@ def build_script(story):
 # FILE WRITING
 # ============================================================
 
-def write_json(
-    path,
-    data,
-):
+def write_json(path, data):
     temporary = path + ".tmp"
 
     with open(
@@ -1943,10 +2068,13 @@ def write_json(
 # ============================================================
 
 def main():
+    start_time = time.time()
+
     print()
     print("=" * 70)
     print("RIFT VALLEY WATCH")
     print("AUTOMATED NEWS PIPELINE")
+    print("FAST GITHUB ACTIONS VERSION")
     print("=" * 70)
 
     story = select_story()
@@ -1973,6 +2101,10 @@ def main():
         f"Script saved: {SCRIPT_FILE}"
     )
 
+    # --------------------------------------------------------
+    # VIDEO GENERATOR
+    # --------------------------------------------------------
+
     from rift_valley_video_generator import (
         generate_video,
     )
@@ -1981,6 +2113,8 @@ def main():
         story,
         script,
     )
+
+    elapsed = time.time() - start_time
 
     print()
     print("=" * 70)
@@ -1992,24 +2126,5 @@ def main():
     )
 
     print(
-        f"Duration: {result.get('duration'):.2f}s"
-    )
-
-
-if __name__ == "__main__":
-    try:
-        main()
-
-    except Exception as exc:
-        print()
-        print("=" * 70)
-        print("PIPELINE FAILED")
-        print("=" * 70)
-
-        print(
-            f"{type(exc).__name__}: {exc}"
-        )
-
-        traceback.print_exc()
-
-        raise
+        f"Duration: "
+        f"{float(result.get('duration', 
