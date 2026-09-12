@@ -28,6 +28,10 @@ def patch_scene_video(generator):
                 f"Scene audio missing: {audio_path}"
             )
 
+        # --------------------------------------------------
+        # FONT
+        # --------------------------------------------------
+
         font = (
             "/usr/share/fonts/truetype/dejavu/"
             "DejaVuSans-Bold.ttf"
@@ -39,10 +43,20 @@ def patch_scene_video(generator):
                 "LiberationSans-Bold.ttf"
             )
 
+        if not Path(font).exists():
+            raise RuntimeError(
+                "No usable system font was found."
+            )
+
+        # --------------------------------------------------
+        # CAPTION
+        # --------------------------------------------------
+
         caption_text = str(
             caption or ""
-        )
+        ).strip()
 
+        # Escape characters that can break FFmpeg drawtext.
         caption_text = (
             caption_text
             .replace("\\", "\\\\")
@@ -54,14 +68,22 @@ def patch_scene_video(generator):
             .replace("%", "\\%")
         )
 
+        # --------------------------------------------------
+        # VIDEO FILTER
+        # --------------------------------------------------
+
         vf = (
             "scale=1080:1920:"
             "force_original_aspect_ratio=increase,"
             "crop=1080:1920,"
             "setsar=1,"
             "drawbox="
-            "x=0:y=0:w=1080:h=150:"
-            "color=black@0.72:t=fill,"
+            "x=0:"
+            "y=0:"
+            "w=1080:"
+            "h=150:"
+            "color=black@0.72:"
+            "t=fill,"
             "drawtext="
             f"fontfile='{font}':"
             f"text='{caption_text}':"
@@ -73,21 +95,29 @@ def patch_scene_video(generator):
             "bordercolor=black"
         )
 
+        # --------------------------------------------------
+        # FFMPEG COMMAND
+        # --------------------------------------------------
+
         cmd = [
             "ffmpeg",
             "-y",
 
+            # Still image
             "-loop",
             "1",
             "-i",
             str(image_path),
 
+            # Narration
             "-i",
             str(audio_path),
 
+            # Video filter
             "-vf",
             vf,
 
+            # Video
             "-c:v",
             "libx264",
 
@@ -100,27 +130,36 @@ def patch_scene_video(generator):
             "-pix_fmt",
             "yuv420p",
 
+            # Audio
             "-c:a",
             "aac",
 
             "-b:a",
             "128k",
 
+            # Stop when narration ends
             "-shortest",
 
+            # Frame rate
             "-r",
             str(FPS),
 
+            # Web-compatible MP4
             "-movflags",
             "+faststart",
 
+            # Output
             str(output_path),
         ]
 
         log(
-            f"Rendering scene: "
+            "Rendering scene: "
             f"{output_path.name}"
         )
+
+        # --------------------------------------------------
+        # RUN FFMPEG
+        # --------------------------------------------------
 
         result = subprocess.run(
             cmd,
@@ -129,36 +168,64 @@ def patch_scene_video(generator):
             text=True,
         )
 
+        # --------------------------------------------------
+        # ERROR HANDLING
+        # --------------------------------------------------
+
         if result.returncode != 0:
 
             log("")
-            log("FFMPEG SCENE ERROR:")
-            log(result.stderr[-5000:])
+            log(
+                "============================================================"
+            )
+            log("FFMPEG SCENE ERROR")
+            log(
+                "============================================================"
+            )
+            log(result.stderr[-10000:])
 
             raise RuntimeError(
-                f"FFmpeg failed creating "
+                "FFmpeg failed creating "
                 f"{output_path.name}"
             )
 
+        # --------------------------------------------------
+        # VERIFY OUTPUT
+        # --------------------------------------------------
+
         if not output_path.exists():
+
             raise RuntimeError(
-                f"Scene was not created: "
+                "Scene was not created: "
                 f"{output_path}"
             )
 
-        if output_path.stat().st_size < 10000:
+        file_size = output_path.stat().st_size
+
+        if file_size < 10000:
+
             raise RuntimeError(
-                f"Scene file is too small: "
-                f"{output_path}"
+                "Scene file is too small: "
+                f"{output_path} "
+                f"({file_size} bytes)"
             )
+
+        log(
+            "Scene created successfully: "
+            f"{output_path.name} "
+            f"({file_size:,} bytes)"
+        )
 
         return str(output_path)
 
-    # IMPORTANT:
-    # Always install our own renderer function.
-    # Do NOT check whether the old function exists.
+    # ==========================================================
+    # IMPORTANT
+    # ALWAYS INSTALL OUR OWN SCENE RENDERER
+    # ==========================================================
 
-    generator.create_scene_video = safe_create_scene_video
+    generator.create_scene_video = (
+        safe_create_scene_video
+    )
 
     log(
         "Scene video renderer installed."
