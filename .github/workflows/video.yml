@@ -14,35 +14,88 @@ jobs:
     timeout-minutes: 30
 
     steps:
+      # ------------------------------------------------------
+      # CHECKOUT
+      # ------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ------------------------------------------------------
+      # PYTHON
+      # ------------------------------------------------------
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+      # ------------------------------------------------------
+      # FFMPEG
+      # ------------------------------------------------------
       - name: Install FFmpeg
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
+
+          echo "=== FFmpeg ==="
           ffmpeg -version
+
+          echo "=== FFprobe ==="
           ffprobe -version
 
+      # ------------------------------------------------------
+      # PYTHON DEPENDENCIES
+      # ------------------------------------------------------
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests pillow gTTS
 
+          pip install \
+            requests \
+            feedparser \
+            beautifulsoup4 \
+            Pillow \
+            gTTS
+
+          echo "=== Installed packages ==="
+          python -m pip list
+
+      # ------------------------------------------------------
+      # VERIFY IMPORTS BEFORE RUNNING
+      # ------------------------------------------------------
+      - name: Verify Python dependencies
+        run: |
+          python - <<'PY'
+          import requests
+          import feedparser
+          import bs4
+          import PIL
+          import gtts
+
+          print("All required Python packages imported successfully.")
+          print("requests:", requests.__version__)
+          print("feedparser:", feedparser.__version__)
+          print("beautifulsoup4: OK")
+          print("Pillow:", PIL.__version__)
+          print("gTTS: OK")
+          PY
+
+      # ------------------------------------------------------
+      # GENERATE VIDEO
+      # ------------------------------------------------------
       - name: Generate Rift Valley Watch video
         run: |
           python rift_valley_main.py
 
+      # ------------------------------------------------------
+      # FINAL MP4 QC
+      # ------------------------------------------------------
       - name: Final MP4 QC
         run: |
           test -f output/rift_valley_watch_reel.mp4
 
-          echo "=== VIDEO QC ==="
+          echo "============================================================"
+          echo "VIDEO QC"
+          echo "============================================================"
 
           ffprobe -v error \
             -select_streams v:0 \
@@ -50,7 +103,9 @@ jobs:
             -of default=noprint_wrappers=1 \
             output/rift_valley_watch_reel.mp4
 
-          echo "=== AUDIO QC ==="
+          echo "============================================================"
+          echo "AUDIO QC"
+          echo "============================================================"
 
           ffprobe -v error \
             -select_streams a:0 \
@@ -58,10 +113,15 @@ jobs:
             -of default=noprint_wrappers=1 \
             output/rift_valley_watch_reel.mp4
 
-          echo "=== FILE QC ==="
+          echo "============================================================"
+          echo "FILE QC"
+          echo "============================================================"
 
           ls -lh output/rift_valley_watch_reel.mp4
 
+      # ------------------------------------------------------
+      # UPLOAD MP4 AS GITHUB ARTIFACT
+      # ------------------------------------------------------
       - name: Upload MP4 artifact
         uses: actions/upload-artifact@v4
         with:
