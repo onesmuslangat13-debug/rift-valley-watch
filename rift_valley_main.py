@@ -1,23 +1,48 @@
 # ============================================================
 # RIFT VALLEY WATCH
-# MAIN NEWS ENGINE
-# COMPLETE STORY + IMAGE RECOVERY PIPELINE
+# VIDEO GENERATOR V7
+#
+# COMPLETE REPLACEMENT
+#
+# Key fixes:
+# 1. Uses story["local_image"] first.
+# 2. Uses assets/source/story_image.jpg if available.
+# 3. Never calls download_image() when a valid local image exists.
+# 4. Recovers an article image from the source URL when needed.
+# 5. Rejects Google News / Facebook / placeholder images.
+# 6. Requires a real source image.
+# 7. Uses publisher name only.
+# 8. Generates a vertical 1080x1920 MP4.
+# 9. Generates narration automatically.
+# 10. Performs final MP4 validation.
 # ============================================================
 
 import os
 import re
+import io
 import json
 import time
+import math
 import html
+import shutil
 import hashlib
-import traceback
+import tempfile
+import subprocess
 from pathlib import Path
-from datetime import datetime, timezone
-from urllib.parse import urlparse, urljoin, quote_plus
+from urllib.parse import urljoin, urlparse
 
 import requests
-import feedparser
-from bs4 import BeautifulSoup
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
+
+try:
+    from bs4 import BeautifulSoup
+except Exception:
+    BeautifulSoup = None
+
+try:
+    from gtts import gTTS
+except Exception:
+    gTTS = None
 
 
 # ============================================================
@@ -32,83 +57,31 @@ SOURCE_DIR = ASSETS_DIR / "source"
 OUTPUT_DIR = ROOT / "output"
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
-ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 SOURCE_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 STORY_FILE = DATA_DIR / "story.json"
 SELECTED_STORY_FILE = DATA_DIR / "selected_story.json"
-SCRIPT_FILE = DATA_DIR / "script.json"
-SELECTED_SCRIPT_FILE = DATA_DIR / "selected_script.json"
 
 IMAGE_FILE = SOURCE_DIR / "story_image.jpg"
 
 FINAL_VIDEO = OUTPUT_DIR / "rift_valley_watch_reel.mp4"
-STANDARD_VIDEO = OUTPUT_DIR / "rift_valley_watch.mp4"
+SCRIPT_FILE = DATA_DIR / "script.txt"
+VISUAL_REPORT = OUTPUT_DIR / "visual_report.json"
 
 
 # ============================================================
-# CONFIGURATION
+# VIDEO SETTINGS
 # ============================================================
 
-COUNTIES = [
-    "Bomet",
-    "Kericho",
-    "Nakuru",
-    "Nandi",
-    "Uasin Gishu",
-    "Elgeyo-Marakwet",
-    "West Pokot",
-    "Narok",
-]
+WIDTH = 1080
+HEIGHT = 1920
 
-TRUSTED_DOMAINS = [
-    "bomet.go.ke",
-    "kericho.go.ke",
-    "nakuru.go.ke",
-    "nandi.go.ke",
-    "uasingishu.go.ke",
-    "elgeyomarakwet.go.ke",
-    "westpokot.go.ke",
-    "narok.go.ke",
-    "peopledaily.digital",
-    "nation.africa",
-    "citizen.digital",
-    "the-star.co.ke",
-    "capitalfm.co.ke",
-    "kbc.co.ke",
-]
+FPS = 30
 
-BLOCKED_DOMAINS = [
-    "facebook.com",
-    "fb.com",
-    "google.com",
-    "news.google.com",
-    "youtube.com",
-    "instagram.com",
-    "tiktok.com",
-]
+TARGET_DURATION = 35
 
-BAD_IMAGE_TERMS = [
-    "google",
-    "google-news",
-    "googleusercontent",
-    "facebook",
-    "instagram",
-    "youtube",
-    "tiktok",
-    "favicon",
-    "logo",
-    "placeholder",
-    "avatar",
-    "sprite",
-    "icon",
-    "default-image",
-    "default_image",
-    "no-image",
-    "no_image",
-    "blank",
-]
+REQUEST_TIMEOUT = 25
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -123,36 +96,68 @@ HEADERS = {
         "q=0.9,image/avif,image/webp,*/*;q=0.8"
     ),
     "Accept-Language": "en-US,en;q=0.9",
-    "Cache-Control": "no-cache",
 }
 
-IMAGE_HEADERS = {
-    "User-Agent": USER_AGENT,
-    "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-    "Referer": "https://bomet.go.ke/",
-}
 
-REQUEST_TIMEOUT = 25
+# ============================================================
+# COLORS
+# ============================================================
+
+BLACK = (7, 10, 15)
+WHITE = (248, 249, 250)
+LIGHT = (225, 230, 235)
+GREY = (150, 158, 168)
+DARK_GREY = (40, 46, 54)
+
+RED = (205, 32, 38)
+DARK_RED = (115, 17, 22)
+
+GOLD = (215, 170, 65)
+
+BLUE = (28, 78, 121)
+
+GREEN = (35, 125, 72)
 
 
 # ============================================================
-# LOGGING
+# FONT DISCOVERY
 # ============================================================
 
-def log(message):
-    print(message, flush=True)
+def find_font(size, bold=False):
+    candidates = []
+
+    if bold:
+        candidates.extend([
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+            "C:/Windows/Fonts/arialbd.ttf",
+            "C:/Windows/Fonts/segoeuib.ttf",
+        ])
+    else:
+        candidates.extend([
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+            "C:/Windows/Fonts/arial.ttf",
+            "C:/Windows/Fonts/segoeui.ttf",
+        ])
+
+    for path in candidates:
+        if os.path.exists(path):
+            return ImageFont.truetype(path, size=size)
+
+    return ImageFont.load_default()
 
 
-def warn(message):
-    print(f"WARNING: {message}", flush=True)
-
-
-def fail(message):
-    raise RuntimeError(message)
+FONT_SMALL = find_font(30)
+FONT_BODY = find_font(38)
+FONT_MEDIUM = find_font(48, True)
+FONT_LARGE = find_font(64, True)
+FONT_HUGE = find_font(92, True)
+FONT_TINY = find_font(24)
 
 
 # ============================================================
-# BASIC UTILITIES
+# BASIC HELPERS
 # ============================================================
 
 def clean_text(value):
@@ -160,79 +165,49 @@ def clean_text(value):
         return ""
 
     value = html.unescape(str(value))
-    value = re.sub(r"<[^>]+>", " ", value)
     value = re.sub(r"\s+", " ", value)
     return value.strip()
 
 
-def normalize_domain(url):
-    try:
-        return urlparse(url).netloc.lower().replace("www.", "")
-    except Exception:
-        return ""
+def safe_filename(value):
+    value = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value))
+    return value[:180]
 
 
-def is_http_url(url):
-    if not url:
-        return False
+def run_command(command, check=True):
+    print("COMMAND:", " ".join(map(str, command)))
 
-    try:
-        parsed = urlparse(url)
-        return parsed.scheme in ("http", "https") and bool(parsed.netloc)
-    except Exception:
-        return False
+    result = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
 
+    if result.stdout:
+        print(result.stdout[-4000:])
 
-def is_blocked_domain(url):
-    domain = normalize_domain(url)
+    if result.stderr:
+        print(result.stderr[-4000:])
 
-    for blocked in BLOCKED_DOMAINS:
-        if domain == blocked or domain.endswith("." + blocked):
-            return True
+    if check and result.returncode != 0:
+        raise RuntimeError(
+            f"Command failed with exit code {result.returncode}"
+        )
 
-    return False
-
-
-def is_trusted_domain(url):
-    domain = normalize_domain(url)
-
-    for trusted in TRUSTED_DOMAINS:
-        if domain == trusted or domain.endswith("." + trusted):
-            return True
-
-    return False
+    return result
 
 
-def image_url_is_bad(url):
-    if not url:
-        return True
-
-    lowered = url.lower()
-
-    if not is_http_url(url):
-        return True
-
-    if is_blocked_domain(url):
-        return True
-
-    for term in BAD_IMAGE_TERMS:
-        if term in lowered:
-            return True
-
-    if lowered.startswith("data:"):
-        return True
-
-    return False
+def ffmpeg_exists():
+    return shutil.which("ffmpeg") is not None
 
 
-def safe_filename(text):
-    text = clean_text(text)
-    text = re.sub(r"[^A-Za-z0-9._-]+", "_", text)
-    return text[:150]
+def ffprobe_exists():
+    return shutil.which("ffprobe") is not None
 
 
 # ============================================================
-# JSON HELPERS
+# STORY LOADING
 # ============================================================
 
 def load_json(path):
@@ -240,318 +215,346 @@ def load_json(path):
         return None
 
     try:
-        with path.open("r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception as exc:
-        warn(f"Could not read {path}: {exc}")
+        print(f"WARNING: Could not read {path}: {exc}")
         return None
 
 
-def save_json(path, data):
-    path.parent.mkdir(parents=True, exist_ok=True)
+def load_story():
+    story = load_json(STORY_FILE)
 
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    if not story:
+        story = load_json(SELECTED_STORY_FILE)
 
-
-# ============================================================
-# RECURSIVE URL EXTRACTION
-# ============================================================
-
-def recursive_find_urls(value):
-    found = []
-
-    if isinstance(value, str):
-        if is_http_url(value):
-            found.append(value)
-
-    elif isinstance(value, dict):
-        for v in value.values():
-            found.extend(recursive_find_urls(v))
-
-    elif isinstance(value, list):
-        for item in value:
-            found.extend(recursive_find_urls(item))
-
-    return found
-
-
-def extract_article_url(story):
-    """
-    Extract the best article/source URL from any reasonable
-    story structure.
-    """
+    if not story:
+        raise RuntimeError(
+            "No usable story JSON was found in data/story.json "
+            "or data/selected_story.json."
+        )
 
     if not isinstance(story, dict):
-        return None
+        raise RuntimeError("Story JSON is not a valid object.")
 
+    return story
+
+
+# ============================================================
+# STORY CLEANING
+# ============================================================
+
+def source_name(story):
     source = story.get("source")
 
-    # Normal structured source:
-    # {
-    #   "name": "...",
-    #   "url": "...",
-    #   "type": "OFFICIAL_SOURCE"
-    # }
     if isinstance(source, dict):
-        url = source.get("url")
+        name = source.get("name") or source.get("publisher")
+        if name:
+            return clean_text(name)
 
-        if is_http_url(url) and not is_blocked_domain(url):
-            return url
+    if isinstance(source, str):
+        value = clean_text(source)
 
-    # Other common fields
+        if value.startswith("http://") or value.startswith("https://"):
+            return ""
+
+        return value
+
+    return ""
+
+
+def source_url(story):
+    source = story.get("source")
+
+    if isinstance(source, dict):
+        return (
+            source.get("url")
+            or source.get("link")
+            or source.get("source_url")
+            or ""
+        )
+
+    if isinstance(source, str):
+        if source.startswith("http://") or source.startswith("https://"):
+            return source
+
+    return ""
+
+
+def story_title(story):
+    title = clean_text(
+        story.get("title")
+        or story.get("headline")
+        or ""
+    )
+
+    if not title:
+        raise RuntimeError("Story has no title.")
+
+    return title
+
+
+def story_county(story):
+    return clean_text(
+        story.get("county")
+        or story.get("location")
+        or "Rift Valley"
+    )
+
+
+def story_summary(story):
+    return clean_text(
+        story.get("summary")
+        or story.get("description")
+        or ""
+    )
+
+
+# ============================================================
+# REJECT BAD SOURCES / IMAGES
+# ============================================================
+
+BAD_IMAGE_WORDS = [
+    "google",
+    "google-news",
+    "google_news",
+    "facebook",
+    "fbcdn",
+    "favicon",
+    "logo",
+    "icon",
+    "avatar",
+    "placeholder",
+    "default-image",
+    "default_image",
+    "sprite",
+    "tracking",
+    "pixel",
+    "blank",
+    "spinner",
+    "loading",
+    ".svg",
+]
+
+
+def looks_like_bad_image_url(url):
+    if not url:
+        return True
+
+    value = url.lower()
+
+    for word in BAD_IMAGE_WORDS:
+        if word in value:
+            return True
+
+    return False
+
+
+def valid_local_image(path):
+    if not path:
+        return False
+
+    try:
+        path = Path(path)
+
+        if not path.exists():
+            return False
+
+        if path.stat().st_size < 10_000:
+            return False
+
+        with Image.open(path) as img:
+            img.verify()
+
+        with Image.open(path) as img:
+            width, height = img.size
+
+            if width < 300 or height < 200:
+                return False
+
+        return True
+
+    except Exception as exc:
+        print(f"INVALID LOCAL IMAGE: {path} -> {exc}")
+        return False
+
+
+# ============================================================
+# LOCAL IMAGE DISCOVERY
+# ============================================================
+
+def local_image_candidates(story):
+    candidates = []
+
+    # Most important: main.py should put this here.
     for key in [
-        "article_url",
-        "articleUrl",
-        "url",
-        "link",
-        "source_url",
-        "sourceUrl",
-        "canonical_url",
-        "canonicalUrl",
+        "local_image",
+        "image_path",
+        "localImage",
+        "local_image_path",
     ]:
         value = story.get(key)
 
-        if isinstance(value, str):
-            if is_http_url(value) and not is_blocked_domain(value):
-                return value
+        if value:
+            candidates.append(Path(str(value)))
 
-        if isinstance(value, dict):
-            urls = recursive_find_urls(value)
-            for url in urls:
-                if not is_blocked_domain(url):
-                    return url
+    # Standard project location.
+    candidates.extend([
+        IMAGE_FILE,
+        SOURCE_DIR / "story_image.png",
+        SOURCE_DIR / "story_image.webp",
+        SOURCE_DIR / "article_image.jpg",
+        SOURCE_DIR / "article_image.png",
+        SOURCE_DIR / "article_image.webp",
+        DATA_DIR / "story_image.jpg",
+        DATA_DIR / "story_image.png",
+        ROOT / "story_image.jpg",
+    ])
 
-    # Last resort: recursively inspect whole object.
-    urls = recursive_find_urls(story)
+    # Remove duplicates while preserving order.
+    unique = []
 
-    for url in urls:
-        if not is_blocked_domain(url):
-            return url
+    seen = set()
+
+    for path in candidates:
+        try:
+            path = Path(path)
+
+            if not path.is_absolute():
+                path = ROOT / path
+
+            path = path.resolve()
+
+            key = str(path).lower()
+
+            if key not in seen:
+                seen.add(key)
+                unique.append(path)
+
+        except Exception:
+            continue
+
+    return unique
+
+
+def find_existing_local_image(story):
+    print("\n================ LOCAL IMAGE CHECK ================")
+
+    for path in local_image_candidates(story):
+        print("CHECK IMAGE:", path)
+
+        if valid_local_image(path):
+            print("VALID LOCAL SOURCE IMAGE:", path)
+            return str(path)
+
+    print("NO VALID LOCAL IMAGE FOUND.")
 
     return None
 
 
 # ============================================================
-# STORY IMAGE URL EXTRACTION
+# URL IMAGE VALIDATION
 # ============================================================
 
-def extract_story_image_urls(story):
-    candidates = []
-
-    if not isinstance(story, dict):
-        return candidates
-
-    preferred_keys = [
-        "image",
-        "image_url",
-        "imageUrl",
-        "image_uri",
-        "imageUri",
-        "featured_image",
-        "featuredImage",
-        "featured_image_url",
-        "featuredImageUrl",
-        "thumbnail",
-        "thumbnail_url",
-        "thumbnailUrl",
-        "photo",
-        "photo_url",
-        "photoUrl",
-        "hero_image",
-        "heroImage",
-        "media",
-    ]
-
-    for key in preferred_keys:
-        value = story.get(key)
-
-        if isinstance(value, str) and is_http_url(value):
-            candidates.append(value)
-
-        elif isinstance(value, dict):
-            candidates.extend(recursive_find_urls(value))
-
-        elif isinstance(value, list):
-            candidates.extend(recursive_find_urls(value))
-
-    # Recursive fallback
-    for url in recursive_find_urls(story):
-        if url not in candidates:
-            candidates.append(url)
-
-    return [
-        url for url in candidates
-        if is_http_url(url) and not image_url_is_bad(url)
-    ]
-
-
-# ============================================================
-# HTTP FETCHING
-# ============================================================
-
-def fetch_url(url, timeout=REQUEST_TIMEOUT):
+def image_content_is_valid(data):
     try:
-        response = requests.get(
-            url,
-            headers=HEADERS,
-            timeout=timeout,
-            allow_redirects=True,
-        )
+        with Image.open(io.BytesIO(data)) as img:
+            width, height = img.size
 
-        response.raise_for_status()
-        return response
+            if width < 300 or height < 200:
+                return False
 
-    except Exception as exc:
-        warn(f"FETCH FAILED: {url}")
-        warn(str(exc))
-        return None
+            img.verify()
+
+        return True
+
+    except Exception:
+        return False
+
+
+def save_image_bytes(data, output_path):
+    if not image_content_is_valid(data):
+        raise RuntimeError("Downloaded file is not a valid image.")
+
+    with Image.open(io.BytesIO(data)) as img:
+        img = img.convert("RGB")
+        img.save(output_path, "JPEG", quality=95)
+
+    if not valid_local_image(output_path):
+        raise RuntimeError("Saved image failed validation.")
+
+    return str(output_path)
 
 
 # ============================================================
-# IMAGE CANDIDATE HELPERS
+# IMAGE URL EXTRACTION
 # ============================================================
-
-def add_candidate(candidates, url, base_url=None, score=0, reason=""):
-    if not url:
-        return
-
-    url = html.unescape(str(url)).strip()
-
-    if base_url:
-        url = urljoin(base_url, url)
-
-    if not is_http_url(url):
-        return
-
-    if image_url_is_bad(url):
-        return
-
-    candidates.append({
-        "url": url,
-        "score": int(score),
-        "reason": reason,
-    })
-
 
 def extract_srcset(value):
-    urls = []
+    results = []
 
     if not value:
-        return urls
+        return results
 
-    parts = str(value).split(",")
+    for item in value.split(","):
+        item = item.strip()
 
-    for part in parts:
-        part = part.strip()
-
-        if not part:
+        if not item:
             continue
 
-        bits = part.split()
+        parts = item.split()
 
-        if bits:
-            urls.append(bits[0])
+        if parts:
+            results.append(parts[0])
 
-    return urls
+    return results
 
 
-# ============================================================
-# HTML IMAGE EXTRACTION
-# ============================================================
-
-def extract_image_candidates(soup, base_url):
+def extract_image_candidates_from_html(html_text, base_url):
     candidates = []
 
-    # --------------------------------------------------------
-    # Open Graph
-    # --------------------------------------------------------
+    if not html_text:
+        return candidates
 
-    for tag in soup.find_all("meta"):
-        prop = (
-            tag.get("property")
-            or tag.get("name")
-            or tag.get("itemprop")
-            or ""
-        ).lower()
+    if BeautifulSoup is None:
+        return candidates
 
-        content = tag.get("content")
-
-        if not content:
-            continue
-
-        if prop in [
-            "og:image",
-            "og:image:url",
-            "og:image:secure_url",
-        ]:
-            add_candidate(
-                candidates,
-                content,
-                base_url,
-                100,
-                "Open Graph image",
-            )
-
-        elif prop in [
-            "twitter:image",
-            "twitter:image:src",
-        ]:
-            add_candidate(
-                candidates,
-                content,
-                base_url,
-                90,
-                "Twitter image",
-            )
-
-        elif prop in [
-            "image",
-            "thumbnail",
-            "thumbnailurl",
-            "imageurl",
-        ]:
-            add_candidate(
-                candidates,
-                content,
-                base_url,
-                75,
-                "Meta image",
-            )
+    soup = BeautifulSoup(html_text, "html.parser")
 
     # --------------------------------------------------------
-    # image_src
+    # META TAGS
     # --------------------------------------------------------
 
-    for link in soup.find_all("link"):
-        rel = link.get("rel") or []
+    meta_selectors = [
+        ("meta", {"property": "og:image"}),
+        ("meta", {"property": "og:image:url"}),
+        ("meta", {"name": "twitter:image"}),
+        ("meta", {"property": "twitter:image"}),
+        ("meta", {"name": "twitter:image:src"}),
+        ("meta", {"itemprop": "image"}),
+    ]
 
-        if isinstance(rel, str):
-            rel = [rel]
-
-        rel = [str(x).lower() for x in rel]
-
-        href = link.get("href")
-
-        if href and (
-            "image_src" in rel
-            or "image" in rel
-            or "thumbnail" in rel
-        ):
-            add_candidate(
-                candidates,
-                href,
-                base_url,
-                70,
-                "Image link",
+    for tag_name, attrs in meta_selectors:
+        for tag in soup.find_all(tag_name, attrs=attrs):
+            value = (
+                tag.get("content")
+                or tag.get("href")
+                or ""
             )
+
+            if value:
+                candidates.append(
+                    urljoin(base_url, value)
+                )
 
     # --------------------------------------------------------
     # JSON-LD
     # --------------------------------------------------------
 
-    for script in soup.find_all("script", type="application/ld+json"):
-
+    for script in soup.find_all(
+        "script",
+        attrs={"type": "application/ld+json"},
+    ):
         raw = script.string or script.get_text()
 
         if not raw:
@@ -562,17 +565,66 @@ def extract_image_candidates(soup, base_url):
         except Exception:
             continue
 
-        for url in extract_jsonld_images(data):
-            add_candidate(
-                candidates,
-                url,
-                base_url,
-                95,
-                "JSON-LD image",
-            )
+        def inspect_json(value):
+            found = []
+
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    key_lower = str(key).lower()
+
+                    if key_lower == "image":
+                        if isinstance(item, str):
+                            found.append(item)
+
+                        elif isinstance(item, list):
+                            for x in item:
+                                if isinstance(x, str):
+                                    found.append(x)
+
+                        elif isinstance(item, dict):
+                            for k in ["url", "contentUrl"]:
+                                if item.get(k):
+                                    found.append(item[k])
+
+                    found.extend(inspect_json(item))
+
+            elif isinstance(value, list):
+                for item in value:
+                    found.extend(inspect_json(item))
+
+            return found
+
+        for image in inspect_json(data):
+            if image:
+                candidates.append(
+                    urljoin(base_url, str(image))
+                )
 
     # --------------------------------------------------------
-    # Article images
+    # LINK IMAGE
+    # --------------------------------------------------------
+
+    for tag in soup.find_all("link"):
+        rel = tag.get("rel") or []
+
+        if isinstance(rel, str):
+            rel = [rel]
+
+        rel_text = " ".join(rel).lower()
+
+        if (
+            "image_src" in rel_text
+            or "image" in rel_text
+        ):
+            href = tag.get("href")
+
+            if href:
+                candidates.append(
+                    urljoin(base_url, href)
+                )
+
+    # --------------------------------------------------------
+    # ARTICLE IMAGES
     # --------------------------------------------------------
 
     containers = []
@@ -582,49 +634,34 @@ def extract_image_candidates(soup, base_url):
         "main",
         "[role='main']",
         ".article",
+        ".story",
         ".post",
         ".entry-content",
-        ".post-content",
-        ".single-post",
-        ".content",
+        ".article-content",
+        ".story-content",
     ]:
         containers.extend(soup.select(selector))
 
-    # Avoid duplicates
-    seen_container_ids = set()
-    unique_containers = []
+    if not containers:
+        containers = [soup]
 
     for container in containers:
-        marker = id(container)
-
-        if marker not in seen_container_ids:
-            seen_container_ids.add(marker)
-            unique_containers.append(container)
-
-    for container in unique_containers:
-
         for img in container.find_all("img"):
             attrs = [
                 "src",
                 "data-src",
-                "data-lazy-src",
                 "data-original",
+                "data-lazy-src",
                 "data-image",
-                "data-url",
                 "data-lazy",
-                "data-fallback-src",
             ]
 
             for attr in attrs:
                 value = img.get(attr)
 
                 if value:
-                    add_candidate(
-                        candidates,
-                        value,
-                        base_url,
-                        80,
-                        f"Article image {attr}",
+                    candidates.append(
+                        urljoin(base_url, value)
                     )
 
             for attr in [
@@ -634,833 +671,826 @@ def extract_image_candidates(soup, base_url):
             ]:
                 value = img.get(attr)
 
-                if value:
-                    for src in extract_srcset(value):
-                        add_candidate(
-                            candidates,
-                            src,
-                            base_url,
-                            82,
-                            f"Article image {attr}",
-                        )
-
-    # --------------------------------------------------------
-    # All page images
-    # --------------------------------------------------------
-
-    for img in soup.find_all("img"):
-
-        for attr in [
-            "src",
-            "data-src",
-            "data-lazy-src",
-            "data-original",
-            "data-image",
-            "data-url",
-        ]:
-            value = img.get(attr)
-
-            if value:
-                add_candidate(
-                    candidates,
-                    value,
-                    base_url,
-                    50,
-                    f"Page image {attr}",
-                )
-
-        for attr in [
-            "srcset",
-            "data-srcset",
-            "data-lazy-srcset",
-        ]:
-            value = img.get(attr)
-
-            if value:
-                for src in extract_srcset(value):
-                    add_candidate(
-                        candidates,
-                        src,
-                        base_url,
-                        55,
-                        f"Page image {attr}",
+                for item in extract_srcset(value):
+                    candidates.append(
+                        urljoin(base_url, item)
                     )
 
-    return deduplicate_image_candidates(candidates)
+    # --------------------------------------------------------
+    # DEDUPLICATE
+    # --------------------------------------------------------
 
+    output = []
 
-def extract_jsonld_images(data):
-    images = []
+    seen = set()
 
-    if isinstance(data, dict):
-
-        for key in [
-            "image",
-            "thumbnailUrl",
-            "contentUrl",
-            "url",
-        ]:
-            value = data.get(key)
-
-            if isinstance(value, str):
-                if value.startswith(("http://", "https://", "/")):
-                    images.append(value)
-
-            elif isinstance(value, dict):
-                images.extend(extract_jsonld_images(value))
-
-            elif isinstance(value, list):
-                images.extend(extract_jsonld_images(value))
-
-        for value in data.values():
-            if isinstance(value, (dict, list)):
-                images.extend(extract_jsonld_images(value))
-
-    elif isinstance(data, list):
-        for item in data:
-            images.extend(extract_jsonld_images(item))
-
-    return images
-
-
-def deduplicate_image_candidates(candidates):
-    best = {}
-
-    for item in candidates:
-
-        url = item.get("url")
+    for url in candidates:
+        url = str(url).strip()
 
         if not url:
             continue
 
-        key = url.split("#")[0]
+        if url.startswith("//"):
+            url = "https:" + url
 
-        existing = best.get(key)
+        if not (
+            url.startswith("http://")
+            or url.startswith("https://")
+        ):
+            continue
 
-        if existing is None or item["score"] > existing["score"]:
-            best[key] = item
+        key = url.lower()
 
-    result = list(best.values())
+        if key in seen:
+            continue
 
-    result.sort(
-        key=lambda x: x.get("score", 0),
-        reverse=True,
-    )
+        seen.add(key)
 
-    return result
+        if looks_like_bad_image_url(url):
+            continue
+
+        output.append(url)
+
+    return output
 
 
 # ============================================================
-# WORDPRESS REST API RECOVERY
+# WORDPRESS IMAGE RECOVERY
 # ============================================================
 
-def wordpress_api_candidates(article_url, title):
-    candidates = []
-
+def wordpress_featured_image(article_url):
     parsed = urlparse(article_url)
 
     if not parsed.scheme or not parsed.netloc:
-        return candidates
+        return []
 
     base = f"{parsed.scheme}://{parsed.netloc}"
 
-    api_root = base.rstrip("/") + "/wp-json/wp/v2"
-
-    slug = parsed.path.rstrip("/").split("/")[-1]
-
-    endpoints = []
-
-    if slug:
-        endpoints.append(
-            f"{api_root}/posts?slug={quote_plus(slug)}"
-        )
-
-        endpoints.append(
-            f"{api_root}/pages?slug={quote_plus(slug)}"
-        )
-
-    if title:
-        endpoints.append(
-            f"{api_root}/search?search={quote_plus(title)}&per_page=5"
-        )
-
-    for endpoint in endpoints:
-
-        try:
-            response = requests.get(
-                endpoint,
-                headers=HEADERS,
-                timeout=15,
-            )
-
-            if response.status_code != 200:
-                continue
-
-            data = response.json()
-
-            if not isinstance(data, list):
-                continue
-
-            for item in data:
-
-                if not isinstance(item, dict):
-                    continue
-
-                # Direct rendered link
-                link = item.get("link")
-
-                # Featured media
-                featured_media = item.get("featured_media")
-
-                if featured_media:
-                    media_url = (
-                        f"{api_root}/media/"
-                        f"{featured_media}"
-                    )
-
-                    try:
-                        media_response = requests.get(
-                            media_url,
-                            headers=HEADERS,
-                            timeout=15,
-                        )
-
-                        if media_response.status_code == 200:
-                            media_data = media_response.json()
-
-                            if isinstance(media_data, dict):
-
-                                source_url = (
-                                    media_data.get("source_url")
-                                    or media_data.get("guid", {}).get("rendered")
-                                )
-
-                                if source_url:
-                                    add_candidate(
-                                        candidates,
-                                        source_url,
-                                        base,
-                                        120,
-                                        "WordPress featured media",
-                                    )
-
-                                media_details = (
-                                    media_data.get("media_details")
-                                    or {}
-                                )
-
-                                sizes = media_details.get("sizes") or {}
-
-                                for size_name in [
-                                    "large",
-                                    "medium_large",
-                                    "medium",
-                                    "full",
-                                ]:
-                                    size_data = sizes.get(size_name)
-
-                                    if isinstance(size_data, dict):
-                                        source = size_data.get("source_url")
-
-                                        if source:
-                                            add_candidate(
-                                                candidates,
-                                                source,
-                                                base,
-                                                115,
-                                                f"WordPress {size_name}",
-                                            )
-
-                    except Exception:
-                        pass
-
-                # Search endpoint may expose URL only.
-                if link and is_http_url(link):
-                    try:
-                        page = fetch_url(link, timeout=15)
-
-                        if page is not None:
-                            soup = BeautifulSoup(
-                                page.text,
-                                "html.parser",
-                            )
-
-                            page_candidates = extract_image_candidates(
-                                soup,
-                                page.url,
-                            )
-
-                            for candidate in page_candidates:
-                                candidate["score"] += 20
-
-                            candidates.extend(page_candidates)
-
-                    except Exception:
-                        pass
-
-        except Exception as exc:
-            warn(f"WordPress recovery failed: {exc}")
-
-    return deduplicate_image_candidates(candidates)
-
-
-# ============================================================
-# DIRECT ARTICLE RECOVERY
-# ============================================================
-
-def recover_images_from_article(article_url):
     candidates = []
 
-    if not article_url:
-        return candidates
-
-    log("")
-    log("============================================================")
-    log("OFFICIAL ARTICLE IMAGE RECOVERY")
-    log("============================================================")
-    log(article_url)
-
-    response = fetch_url(article_url)
-
-    if response is None:
-        return candidates
-
-    final_url = response.url
-
-    if is_blocked_domain(final_url):
-        warn("Final article URL redirected to a blocked domain.")
-        return candidates
-
-    try:
-        soup = BeautifulSoup(
-            response.text,
-            "html.parser",
-        )
-    except Exception as exc:
-        warn(f"Could not parse article HTML: {exc}")
-        return candidates
-
-    candidates.extend(
-        extract_image_candidates(
-            soup,
-            final_url,
-        )
-    )
-
-    return deduplicate_image_candidates(candidates)
-
-
-# ============================================================
-# IMAGE DOWNLOAD + VALIDATION
-# ============================================================
-
-def validate_image_file(path):
-    if not path.exists():
-        return False
-
-    if path.stat().st_size < 10_000:
-        return False
-
-    try:
-        from PIL import Image
-
-        with Image.open(path) as image:
-            width, height = image.size
-
-            log(
-                f"IMAGE VALIDATED: "
-                f"{width}x{height}, "
-                f"{path.stat().st_size} bytes"
-            )
-
-            if width < 300 or height < 200:
-                return False
-
-            return True
-
-    except Exception as exc:
-        warn(f"Image validation failed: {exc}")
-        return False
-
-
-def download_image(url, destination):
-    if image_url_is_bad(url):
-        return False
-
-    log(f"TRYING IMAGE: {url}")
+    # First try REST API.
+    api_url = base.rstrip("/") + "/wp-json/wp/v2/posts"
 
     try:
         response = requests.get(
-            url,
-            headers=IMAGE_HEADERS,
-            timeout=25,
-            allow_redirects=True,
-            stream=True,
+            api_url,
+            params={
+                "search": "",
+                "per_page": 10,
+            },
+            headers=HEADERS,
+            timeout=REQUEST_TIMEOUT,
         )
 
-        if response.status_code != 200:
-            warn(
-                f"IMAGE HTTP {response.status_code}: {url}"
-            )
-            return False
+        if response.ok:
+            posts = response.json()
 
-        final_url = response.url
+            for post in posts:
+                link = post.get("link", "")
 
-        if image_url_is_bad(final_url):
-            warn("Rejected image after redirect.")
-            return False
-
-        content_type = (
-            response.headers.get("Content-Type")
-            or ""
-        ).lower()
-
-        if "text/html" in content_type:
-            warn("Rejected HTML response masquerading as image.")
-            return False
-
-        temp_path = destination.with_suffix(".download")
-
-        with temp_path.open("wb") as f:
-            total = 0
-
-            for chunk in response.iter_content(
-                chunk_size=64 * 1024
-            ):
-                if not chunk:
-                    continue
-
-                total += len(chunk)
-
-                if total > 20 * 1024 * 1024:
-                    warn("Image larger than 20MB.")
-                    break
-
-                f.write(chunk)
-
-        if not temp_path.exists():
-            return False
-
-        if temp_path.stat().st_size < 10_000:
-            temp_path.unlink(missing_ok=True)
-            return False
-
-        # Verify with Pillow
-        try:
-            from PIL import Image
-
-            with Image.open(temp_path) as image:
-                image.verify()
-
-            with Image.open(temp_path) as image:
-                width, height = image.size
-
-            if width < 300 or height < 200:
-                warn(
-                    f"Rejected small image: "
-                    f"{width}x{height}"
-                )
-                temp_path.unlink(missing_ok=True)
-                return False
-
-        except Exception as exc:
-            warn(f"Downloaded file is not a valid image: {exc}")
-            temp_path.unlink(missing_ok=True)
-            return False
-
-        # Convert to JPEG for reliable ffmpeg handling
-        try:
-            from PIL import Image
-
-            with Image.open(temp_path) as image:
-                image = image.convert("RGB")
-
-                # Limit extremely large source files
-                max_dimension = 3000
-
-                if (
-                    image.width > max_dimension
-                    or image.height > max_dimension
+                if link and (
+                    parsed.path.rstrip("/")
+                    in urlparse(link).path.rstrip("/")
+                    or
+                    urlparse(link).path.rstrip("/")
+                    in parsed.path.rstrip("/")
                 ):
-                    image.thumbnail(
-                        (max_dimension, max_dimension),
-                        Image.LANCZOS,
-                    )
+                    media_id = post.get("featured_media")
 
-                image.save(
-                    destination,
-                    "JPEG",
-                    quality=94,
-                    optimize=True,
-                )
+                    if media_id:
+                        media_url = (
+                            base.rstrip("/")
+                            + f"/wp-json/wp/v2/media/{media_id}"
+                        )
 
-            temp_path.unlink(missing_ok=True)
+                        media_response = requests.get(
+                            media_url,
+                            headers=HEADERS,
+                            timeout=REQUEST_TIMEOUT,
+                        )
 
-        except Exception as exc:
-            warn(f"JPEG conversion failed: {exc}")
-            temp_path.unlink(missing_ok=True)
-            return False
+                        if media_response.ok:
+                            media = media_response.json()
 
-        if not validate_image_file(destination):
-            destination.unlink(missing_ok=True)
-            return False
+                            source_url_value = (
+                                media.get("source_url")
+                            )
 
-        log(
-            "============================================================"
-        )
-        log("REAL ARTICLE IMAGE RECOVERED")
-        log(f"SAVED: {destination}")
-        log(f"SOURCE: {final_url}")
-        log(
-            "============================================================"
-        )
-
-        return True
+                            if source_url_value:
+                                candidates.append(
+                                    source_url_value
+                                )
 
     except Exception as exc:
-        warn(f"Image download failed: {exc}")
-
-        temp_path = destination.with_suffix(".download")
-        temp_path.unlink(missing_ok=True)
-
-        return False
-
-
-# ============================================================
-# IMAGE RECOVERY MASTER
-# ============================================================
-
-def recover_story_image(story):
-    """
-    Complete image recovery sequence.
-
-    Priority:
-    1. Existing valid local image.
-    2. Image URL explicitly inside story.
-    3. Official article HTML.
-    4. WordPress REST / featured media.
-    5. Re-fetch article using canonical URL.
-    """
-
-    log("")
-    log("============================================================")
-    log("STARTING IMAGE RECOVERY")
-    log("============================================================")
-
-    # --------------------------------------------------------
-    # 1. Existing local image
-    # --------------------------------------------------------
-
-    if IMAGE_FILE.exists():
-        log(f"LOCAL IMAGE FOUND: {IMAGE_FILE}")
-
-        if validate_image_file(IMAGE_FILE):
-            log("Using existing valid article image.")
-            return str(IMAGE_FILE)
-
-        IMAGE_FILE.unlink(missing_ok=True)
-
-    # --------------------------------------------------------
-    # 2. Image URLs already in story.json
-    # --------------------------------------------------------
-
-    candidates = extract_story_image_urls(story)
-
-    if candidates:
-        log(
-            f"FOUND {len(candidates)} IMAGE URL(S) "
-            "INSIDE STORY JSON"
+        print(
+            "WordPress REST image recovery failed:",
+            exc,
         )
 
-        for url in candidates:
-            if download_image(url, IMAGE_FILE):
-                return str(IMAGE_FILE)
+    return candidates
+
+
+# ============================================================
+# DOWNLOAD IMAGE FROM URL
+# ============================================================
+
+def download_image(image_url, output_path=IMAGE_FILE):
+    if not image_url:
+        raise RuntimeError(
+            "No story image URL was provided."
+        )
+
+    if looks_like_bad_image_url(image_url):
+        raise RuntimeError(
+            f"Rejected image URL: {image_url}"
+        )
+
+    print("DOWNLOADING SOURCE IMAGE:")
+    print(image_url)
+
+    response = requests.get(
+        image_url,
+        headers={
+            **HEADERS,
+            "Referer": source_url_from_current_story,
+        },
+        timeout=REQUEST_TIMEOUT,
+        allow_redirects=True,
+    )
+
+    response.raise_for_status()
+
+    content_type = (
+        response.headers.get("content-type", "")
+        .lower()
+    )
+
+    if (
+        "image" not in content_type
+        and not image_content_is_valid(response.content)
+    ):
+        raise RuntimeError(
+            "URL did not return a valid image."
+        )
+
+    return save_image_bytes(
+        response.content,
+        output_path,
+    )
+
+
+# Global reference used by download_image.
+source_url_from_current_story = ""
+
+
+# ============================================================
+# FIND SOURCE IMAGE
+# ============================================================
+
+def find_source_image(story):
+    global source_url_from_current_story
+
+    print("\n============================================================")
+    print("SOURCE IMAGE RECOVERY")
+    print("============================================================")
 
     # --------------------------------------------------------
-    # Article URL
+    # 1. LOCAL IMAGE FROM MAIN.PY
     # --------------------------------------------------------
 
-    article_url = extract_article_url(story)
+    local = find_existing_local_image(story)
+
+    if local:
+        return local, ["LOCAL:" + local]
+
+    # --------------------------------------------------------
+    # 2. ARTICLE URL
+    # --------------------------------------------------------
+
+    article_url = source_url(story)
+
+    source_url_from_current_story = article_url
 
     if not article_url:
-        warn("No usable article URL found in story.")
-    else:
-        log(f"ARTICLE URL: {article_url}")
-
-    title = clean_text(story.get("title"))
-
-    # --------------------------------------------------------
-    # 3. Official article HTML
-    # --------------------------------------------------------
-
-    if article_url:
-        candidates = recover_images_from_article(
-            article_url
+        raise RuntimeError(
+            "Story has no source URL and no local source image."
         )
 
-        if candidates:
-            log(
-                f"ARTICLE HTML PRODUCED "
-                f"{len(candidates)} IMAGE CANDIDATE(S)"
-            )
+    print("ARTICLE URL:", article_url)
 
-            for index, candidate in enumerate(
-                candidates[:25],
-                start=1,
-            ):
-                log(
-                    f"IMAGE CANDIDATE {index}: "
-                    f"score={candidate['score']} "
-                    f"reason={candidate['reason']}"
-                )
-                log(candidate["url"])
-
-                if download_image(
-                    candidate["url"],
-                    IMAGE_FILE,
-                ):
-                    return str(IMAGE_FILE)
+    candidates = []
 
     # --------------------------------------------------------
-    # 4. WordPress API recovery
+    # 3. FETCH ARTICLE
     # --------------------------------------------------------
 
-    if article_url:
-        log("")
-        log("TRYING WORDPRESS FEATURED MEDIA RECOVERY")
-
-        wp_candidates = wordpress_api_candidates(
+    try:
+        response = requests.get(
             article_url,
-            title,
+            headers=HEADERS,
+            timeout=REQUEST_TIMEOUT,
+            allow_redirects=True,
         )
 
-        log(
-            f"WORDPRESS RECOVERY PRODUCED "
-            f"{len(wp_candidates)} CANDIDATE(S)"
+        response.raise_for_status()
+
+        final_url = response.url or article_url
+
+        print("FINAL ARTICLE URL:", final_url)
+
+        candidates.extend(
+            extract_image_candidates_from_html(
+                response.text,
+                final_url,
+            )
         )
 
-        for candidate in wp_candidates[:30]:
+    except Exception as exc:
+        print("ARTICLE IMAGE EXTRACTION FAILED:", exc)
 
-            log(
-                f"WP IMAGE: "
-                f"score={candidate['score']} "
-                f"reason={candidate['reason']}"
+    # --------------------------------------------------------
+    # 4. WORDPRESS RECOVERY
+    # --------------------------------------------------------
+
+    try:
+        candidates.extend(
+            wordpress_featured_image(article_url)
+        )
+    except Exception as exc:
+        print(
+            "WORDPRESS FALLBACK FAILED:",
+            exc,
+        )
+
+    # --------------------------------------------------------
+    # 5. TEST CANDIDATES
+    # --------------------------------------------------------
+
+    unique = []
+
+    seen = set()
+
+    for url in candidates:
+        url = str(url).strip()
+
+        if not url:
+            continue
+
+        key = url.lower()
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+
+        if looks_like_bad_image_url(url):
+            continue
+
+        unique.append(url)
+
+    print(
+        f"IMAGE CANDIDATES FOUND: {len(unique)}"
+    )
+
+    for index, url in enumerate(unique[:30], 1):
+        print(f"IMAGE CANDIDATE {index}: {url}")
+
+    for index, url in enumerate(unique[:30], 1):
+        try:
+            print(
+                f"TRYING IMAGE {index}: {url}"
             )
 
-            if download_image(
-                candidate["url"],
+            saved = download_image(
+                url,
                 IMAGE_FILE,
-            ):
-                return str(IMAGE_FILE)
+            )
 
-    # --------------------------------------------------------
-    # 5. Final direct retry
-    # --------------------------------------------------------
+            if valid_local_image(saved):
+                print(
+                    "REAL SOURCE IMAGE RECOVERED:",
+                    saved,
+                )
 
-    if article_url:
-        log("")
-        log("FINAL DIRECT ARTICLE RETRY")
+                return saved, unique
 
-        response = fetch_url(
-            article_url,
-            timeout=35,
+        except Exception as exc:
+            print(
+                f"IMAGE {index} REJECTED:",
+                exc,
+            )
+
+    raise RuntimeError(
+        "No usable real article image could be recovered. "
+        "The reel was stopped rather than generating "
+        "a fake or placeholder visual."
+    )
+
+
+# ============================================================
+# IMAGE PREPARATION
+# ============================================================
+
+def prepare_source_image(image_path):
+    if not valid_local_image(image_path):
+        raise RuntimeError(
+            f"Invalid source image: {image_path}"
         )
 
-        if response is not None:
+    with Image.open(image_path) as img:
+        img = img.convert("RGB")
 
-            try:
-                soup = BeautifulSoup(
-                    response.text,
-                    "html.parser",
+        width, height = img.size
+
+        target_ratio = WIDTH / HEIGHT
+        source_ratio = width / height
+
+        if source_ratio > target_ratio:
+            new_height = height
+            new_width = int(height * target_ratio)
+
+            left = (width - new_width) // 2
+
+            img = img.crop(
+                (
+                    left,
+                    0,
+                    left + new_width,
+                    height,
                 )
+            )
 
-                all_candidates = extract_image_candidates(
-                    soup,
-                    response.url,
+        else:
+            new_width = width
+            new_height = int(width / target_ratio)
+
+            top = (height - new_height) // 2
+
+            img = img.crop(
+                (
+                    0,
+                    top,
+                    width,
+                    top + new_height,
                 )
+            )
 
-                all_candidates.sort(
-                    key=lambda x: x["score"],
-                    reverse=True,
-                )
+        img = img.resize(
+            (WIDTH, HEIGHT),
+            Image.Resampling.LANCZOS,
+        )
 
-                for candidate in all_candidates:
+        img.save(
+            IMAGE_FILE,
+            "JPEG",
+            quality=95,
+        )
 
-                    if download_image(
-                        candidate["url"],
-                        IMAGE_FILE,
-                    ):
-                        return str(IMAGE_FILE)
-
-            except Exception as exc:
-                warn(
-                    f"Final image retry failed: {exc}"
-                )
-
-    # --------------------------------------------------------
-    # No image
-    # --------------------------------------------------------
-
-    log("")
-    log("============================================================")
-    log("IMAGE RECOVERY FAILED")
-    log("============================================================")
-    log(f"Article: {article_url}")
-    log(f"Title: {title}")
-    log(f"Expected image: {IMAGE_FILE}")
-    log("")
-
-    return None
+    return str(IMAGE_FILE)
 
 
 # ============================================================
-# STORY QUALITY GATE
+# IMAGE EFFECTS
 # ============================================================
 
-def story_quality_gate(story):
-    if not isinstance(story, dict):
-        return False, "Story is not an object."
+def load_image(path):
+    return Image.open(path).convert("RGB")
 
-    title = clean_text(story.get("title"))
-    summary = clean_text(story.get("summary"))
-    county = clean_text(story.get("county"))
 
-    if not title:
-        return False, "Missing title."
-
-    if title.lower() in [
-        "google news",
-        "news",
-        "latest news",
-    ]:
-        return False, "Generic/banned title."
-
-    if not summary:
-        return False, "Missing summary."
-
-    if len(summary) < 80:
-        return False, "Summary is too short."
-
-    if not county:
-        return False, "Missing county."
-
-    source = story.get("source")
-
-    if not isinstance(source, dict):
-        return False, "Source must be structured."
-
-    source_name = clean_text(
-        source.get("name")
+def darken(img, amount=0.45):
+    overlay = Image.new(
+        "RGBA",
+        img.size,
+        (0, 0, 0, int(255 * amount)),
     )
 
-    source_url = source.get("url")
+    base = img.convert("RGBA")
 
-    if not source_name:
-        return False, "Missing source name."
+    return Image.alpha_composite(
+        base,
+        overlay,
+    ).convert("RGB")
 
-    if not is_http_url(source_url):
-        return False, "Missing source URL."
 
-    if is_blocked_domain(source_url):
-        return False, "Blocked source domain."
+def add_gradient(img):
+    img = img.convert("RGB")
 
-    verified_facts = story.get("verified_facts")
-
-    if not isinstance(verified_facts, list):
-        return False, "Missing verified facts."
-
-    if len(verified_facts) < 2:
-        return False, "Too few verified facts."
-
-    official_statement = story.get(
-        "official_statement"
+    overlay = Image.new(
+        "RGBA",
+        img.size,
+        (0, 0, 0, 0),
     )
 
-    if official_statement:
-        if not isinstance(
-            official_statement,
-            dict,
-        ):
-            return False, "Invalid official statement."
+    draw = ImageDraw.Draw(overlay)
 
-    editorial = story.get("editorial")
+    height = img.height
 
-    if isinstance(editorial, dict):
+    for y in range(height):
+        ratio = y / max(1, height - 1)
 
-        confirmed = editorial.get("confirmed")
+        alpha = int(205 * ratio)
 
-        if confirmed is not None:
-            if not isinstance(confirmed, list):
-                return False, "Invalid confirmed facts."
+        draw.line(
+            [(0, y), (img.width, y)],
+            fill=(0, 0, 0, alpha),
+        )
 
-    return True, "PASS"
+    return Image.alpha_composite(
+        img.convert("RGBA"),
+        overlay,
+    ).convert("RGB")
 
 
 # ============================================================
-# STORY NORMALIZATION
+# TEXT WRAPPING
 # ============================================================
 
-def normalize_story(story):
-    story = dict(story)
+def wrap_text(draw, text, font, max_width):
+    words = clean_text(text).split()
 
-    source = story.get("source")
+    if not words:
+        return []
 
-    if not isinstance(source, dict):
-        source = {
-            "name": "Official Source",
-            "url": extract_article_url(story),
-            "type": "OFFICIAL_SOURCE",
-        }
+    lines = []
 
-    source["name"] = (
-        clean_text(source.get("name"))
-        or "Official Source"
+    current = words[0]
+
+    for word in words[1:]:
+        candidate = current + " " + word
+
+        bbox = draw.textbbox(
+            (0, 0),
+            candidate,
+            font=font,
+        )
+
+        width = bbox[2] - bbox[0]
+
+        if width <= max_width:
+            current = candidate
+        else:
+            lines.append(current)
+            current = word
+
+    lines.append(current)
+
+    return lines
+
+
+def draw_wrapped_text(
+    draw,
+    text,
+    xy,
+    font,
+    fill,
+    max_width,
+    line_gap=12,
+):
+    x, y = xy
+
+    lines = wrap_text(
+        draw,
+        text,
+        font,
+        max_width,
     )
 
-    source["url"] = (
-        source.get("url")
-        or extract_article_url(story)
-    )
+    for line in lines:
+        draw.text(
+            (x, y),
+            line,
+            font=font,
+            fill=fill,
+        )
 
-    story["source"] = source
+        bbox = draw.textbbox(
+            (x, y),
+            line,
+            font=font,
+        )
 
-    story["title"] = clean_text(
-        story.get("title")
-    )
+        y += (
+            bbox[3]
+            - bbox[1]
+            + line_gap
+        )
 
-    story["county"] = clean_text(
-        story.get("county")
-    )
-
-    story["category"] = (
-        clean_text(story.get("category"))
-        or "COUNTY NEWS"
-    )
-
-    story["summary"] = clean_text(
-        story.get("summary")
-    )
-
-    story["local_image"] = str(
-        IMAGE_FILE
-    )
-
-    return story
+    return y
 
 
 # ============================================================
-# SCRIPT GENERATION
+# BROADCAST HEADER
 # ============================================================
 
-def fact_value(story, label):
-    facts = story.get("verified_facts", [])
+def draw_header(draw, section="RIFT VALLEY WATCH"):
+    draw.rectangle(
+        (0, 0, WIDTH, 125),
+        fill=BLACK,
+    )
+
+    draw.rectangle(
+        (0, 120, WIDTH, 128),
+        fill=RED,
+    )
+
+    draw.text(
+        (55, 37),
+        "RIFT VALLEY WATCH",
+        font=FONT_MEDIUM,
+        fill=WHITE,
+    )
+
+    section = clean_text(section).upper()
+
+    if section:
+        bbox = draw.textbbox(
+            (0, 0),
+            section,
+            font=FONT_SMALL,
+        )
+
+        tw = bbox[2] - bbox[0]
+
+        draw.text(
+            (
+                WIDTH - tw - 55,
+                46,
+            ),
+            section,
+            font=FONT_SMALL,
+            fill=GOLD,
+        )
+
+
+def draw_footer(draw, source=None):
+    draw.rectangle(
+        (
+            0,
+            HEIGHT - 145,
+            WIDTH,
+            HEIGHT,
+        ),
+        fill=BLACK,
+    )
+
+    draw.rectangle(
+        (
+            0,
+            HEIGHT - 145,
+            WIDTH,
+            HEIGHT - 139,
+        ),
+        fill=RED,
+    )
+
+    source = clean_text(source or "")
+
+    if source:
+        draw.text(
+            (50, HEIGHT - 112),
+            "SOURCE",
+            font=FONT_TINY,
+            fill=GOLD,
+        )
+
+        draw.text(
+            (50, HEIGHT - 78),
+            source[:60],
+            font=FONT_SMALL,
+            fill=WHITE,
+        )
+
+    draw.text(
+        (
+            WIDTH - 260,
+            HEIGHT - 78,
+        ),
+        "RIFT VALLEY WATCH",
+        font=FONT_TINY,
+        fill=GREY,
+    )
+
+
+# ============================================================
+# SCENE RENDERING
+# ============================================================
+
+def scene_base(
+    source_image=None,
+    dark=True,
+):
+    if source_image and valid_local_image(source_image):
+        img = load_image(source_image)
+        img = img.resize(
+            (WIDTH, HEIGHT),
+            Image.Resampling.LANCZOS,
+        )
+
+        if dark:
+            img = darken(img, 0.38)
+
+        img = add_gradient(img)
+
+        return img
+
+    return Image.new(
+        "RGB",
+        (WIDTH, HEIGHT),
+        BLACK,
+    )
+
+
+def scene_photo(story, image_path, index=1):
+    title = story_title(story)
+    county = story_county(story)
+    source = source_name(story)
+
+    if not valid_local_image(image_path):
+        raise RuntimeError(
+            "scene_photo received an invalid source image."
+        )
+
+    img = scene_base(
+        image_path,
+        dark=True,
+    )
+
+    draw = ImageDraw.Draw(img)
+
+    draw_header(
+        draw,
+        "SOURCE VISUAL",
+    )
+
+    draw_wrapped_text(
+        draw,
+        title,
+        (55, 1290),
+        FONT_LARGE,
+        WHITE,
+        970,
+        line_gap=12,
+    )
+
+    draw.text(
+        (55, 1575),
+        county.upper(),
+        font=FONT_MEDIUM,
+        fill=GOLD,
+    )
+
+    draw_footer(
+        draw,
+        source,
+    )
+
+    return img
+
+
+def scene_title(story):
+    title = story_title(story)
+    county = story_county(story)
+
+    img = Image.new(
+        "RGB",
+        (WIDTH, HEIGHT),
+        BLACK,
+    )
+
+    draw = ImageDraw.Draw(img)
+
+    draw.rectangle(
+        (0, 0, WIDTH, 20),
+        fill=RED,
+    )
+
+    draw.text(
+        (55, 110),
+        "BREAKING DEVELOPMENT",
+        font=FONT_MEDIUM,
+        fill=RED,
+    )
+
+    y = 260
+
+    y = draw_wrapped_text(
+        draw,
+        title,
+        (55, y),
+        FONT_HUGE,
+        WHITE,
+        960,
+        line_gap=18,
+    )
+
+    draw.text(
+        (55, y + 55),
+        county.upper(),
+        font=FONT_MEDIUM,
+        fill=GOLD,
+    )
+
+    draw.rectangle(
+        (55, 1500, 1025, 1508),
+        fill=RED,
+    )
+
+    draw.text(
+        (55, 1550),
+        "RIFT VALLEY WATCH",
+        font=FONT_MEDIUM,
+        fill=WHITE,
+    )
+
+    draw.text(
+        (55, 1630),
+        "Verified regional reporting",
+        font=FONT_BODY,
+        fill=GREY,
+    )
+
+    return img
+
+
+def scene_location(story):
+    county = story_county(story)
+
+    img = Image.new(
+        "RGB",
+        (WIDTH, HEIGHT),
+        (11, 18, 27),
+    )
+
+    draw = ImageDraw.Draw(img)
+
+    draw_header(
+        draw,
+        "LOCATION",
+    )
+
+    draw.text(
+        (60, 260),
+        "WHERE",
+        font=FONT_MEDIUM,
+        fill=GOLD,
+    )
+
+    draw_wrapped_text(
+        draw,
+        county,
+        (60, 360),
+        FONT_HUGE,
+        WHITE,
+        950,
+        line_gap=15,
+    )
+
+    # Editorial location graphic.
+    draw.rounded_rectangle(
+        (70, 850, 1010, 1430),
+        radius=30,
+        fill=(20, 30, 43),
+        outline=BLUE,
+        width=4,
+    )
+
+    draw.ellipse(
+        (390, 990, 690, 1290),
+        outline=RED,
+        width=14,
+    )
+
+    draw.ellipse(
+        (475, 1075, 605, 1205),
+        fill=RED,
+    )
+
+    draw.text(
+        (120, 1330),
+        "CHEPALUNGU CONSTITUENCY",
+        font=FONT_MEDIUM,
+        fill=WHITE,
+    )
+
+    draw_footer(
+        draw,
+        source_name(story),
+    )
+
+    return img
+
+
+def get_fact(story, label):
+    facts = story.get("verified_facts") or []
 
     for fact in facts:
         if not isinstance(fact, dict):
             continue
 
         if (
-            clean_text(fact.get("label")).upper()
+            clean_text(
+                fact.get("label")
+            ).upper()
             == label.upper()
         ):
             return clean_text(
@@ -1470,748 +1500,188 @@ def fact_value(story, label):
     return ""
 
 
-def build_script(story):
-    title = clean_text(story.get("title"))
-    county = clean_text(story.get("county"))
-    source = story.get("source") or {}
-
-    source_name = clean_text(
-        source.get("name")
-    )
-
-    project = fact_value(
-        story,
-        "PROJECT",
-    )
-
-    road_length = fact_value(
+def scene_facts(story):
+    road_length = get_fact(
         story,
         "ROAD_LENGTH",
     )
 
-    cost = fact_value(
+    cost = get_fact(
         story,
         "COST",
     )
 
-    location = fact_value(
+    location = get_fact(
         story,
         "LOCATION",
     )
 
-    status = fact_value(
+    img = Image.new(
+        "RGB",
+        (WIDTH, HEIGHT),
+        BLACK,
+    )
+
+    draw = ImageDraw.Draw(img)
+
+    draw_header(
+        draw,
+        "KEY FACTS",
+    )
+
+    draw.text(
+        (55, 230),
+        "THE NUMBERS",
+        font=FONT_MEDIUM,
+        fill=GOLD,
+    )
+
+    # Main number.
+    if road_length:
+        draw.text(
+            (55, 390),
+            road_length,
+            font=FONT_HUGE,
+            fill=WHITE,
+        )
+
+        draw.text(
+            (60, 510),
+            "ROAD PROJECT",
+            font=FONT_MEDIUM,
+            fill=RED,
+        )
+
+    # Cost card.
+    if cost:
+        draw.rounded_rectangle(
+            (55, 700, 1025, 1040),
+            radius=30,
+            fill=(21, 27, 35),
+            outline=GOLD,
+            width=4,
+        )
+
+        draw.text(
+            (90, 760),
+            "REPORTED PROJECT COST",
+            font=FONT_SMALL,
+            fill=GOLD,
+        )
+
+        draw_wrapped_text(
+            draw,
+            cost,
+            (90, 840),
+            FONT_HUGE,
+            WHITE,
+            870,
+            line_gap=10,
+        )
+
+    if location:
+        draw.text(
+            (55, 1160),
+            "LOCATION",
+            font=FONT_SMALL,
+            fill=GREY,
+        )
+
+        draw_wrapped_text(
+            draw,
+            location,
+            (55, 1225),
+            FONT_MEDIUM,
+            WHITE,
+            950,
+            line_gap=12,
+        )
+
+    draw_footer(
+        draw,
+        source_name(story),
+    )
+
+    return img
+
+
+def scene_route(story):
+    project = get_fact(
+        story,
+        "PROJECT",
+    )
+
+    status = get_fact(
         story,
         "STATUS",
     )
 
-    impact = fact_value(
-        story,
-        "IMPACT",
+    img = Image.new(
+        "RGB",
+        (WIDTH, HEIGHT),
+        (8, 14, 21),
     )
 
-    official = story.get(
-        "official_statement"
-    ) or {}
+    draw = ImageDraw.Draw(img)
 
-    speaker = clean_text(
-        official.get("speaker")
+    draw_header(
+        draw,
+        "PROJECT ROUTE",
     )
 
-    quote = clean_text(
-        official.get("quote")
+    draw.text(
+        (55, 240),
+        "ROAD LINK",
+        font=FONT_MEDIUM,
+        fill=GOLD,
     )
 
-    narration = []
-
-    narration.append(
-        f"Rift Valley Watch. "
-        f"A major road project is underway in "
-        f"{county}."
+    y = draw_wrapped_text(
+        draw,
+        project,
+        (55, 340),
+        FONT_LARGE,
+        WHITE,
+        950,
+        line_gap=16,
     )
 
-    if project:
-        narration.append(
-            f"The project covers the "
-            f"{project} route."
-        )
+    # Route line.
+    line_y = 1040
 
-    if road_length and cost:
-        narration.append(
-            f"The reported project covers "
-            f"{road_length} at a cost of "
-            f"{cost}."
-        )
+    draw.line(
+        (
+            100,
+            line_y,
+            980,
+            line_y,
+        ),
+        fill=RED,
+        width=12,
+    )
 
-    if location:
-        narration.append(
-            f"The project is located in "
-            f"{location}."
+    points = [
+        150,
+        350,
+        550,
+        750,
+        930,
+    ]
+
+    for x in points:
+        draw.ellipse(
+            (
+                x - 20,
+                line_y - 20,
+                x + 20,
+                line_y + 20,
+            ),
+            fill=WHITE,
         )
 
     if status:
-        narration.append(
-            f"Construction status: "
-            f"{status.lower()}."
-        )
-
-    if impact:
-        narration.append(
-            f"The county government says the "
-            f"project is expected to "
-            f"{impact.lower()}."
-        )
-
-    if speaker and quote:
-        narration.append(
-            f"{speaker} said the Roads and "
-            f"Transport Ministry has been "
-            f"instructed to closely monitor "
-            f"construction to ensure speedy "
-            f"completion and quality works."
-        )
-
-    narration.append(
-        f"Source: {source_name}."
-    )
-
-    text = " ".join(narration)
-
-    script = {
-        "title": title,
-        "county": county,
-        "source": source_name,
-        "source_url": source.get("url"),
-        "duration_target": 35,
-        "narration": text,
-        "local_image": str(IMAGE_FILE),
-        "scenes": [
-            {
-                "scene": 1,
-                "type": "PROJECT_TITLE",
-                "text": title,
-            },
-            {
-                "scene": 2,
-                "type": "LOCATION",
-                "text": location or county,
-            },
-            {
-                "scene": 3,
-                "type": "DATA",
-                "text": (
-                    f"{road_length} | {cost}"
-                    if road_length and cost
-                    else title
-                ),
-            },
-            {
-                "scene": 4,
-                "type": "PROJECT",
-                "text": project or title,
-            },
-            {
-                "scene": 5,
-                "type": "OFFICIAL_STATEMENT",
-                "text": (
-                    f"{speaker}: {quote}"
-                    if speaker and quote
-                    else (
-                        "Construction monitoring "
-                        "and quality works."
-                    )
-                ),
-            },
-            {
-                "scene": 6,
-                "type": "SOURCE",
-                "text": source_name,
-            },
-        ],
-    }
-
-    return script
-
-
-# ============================================================
-# SAVE SCRIPT
-# ============================================================
-
-def save_story_and_script(story, script):
-    save_json(
-        SELECTED_STORY_FILE,
-        story,
-    )
-
-    save_json(
-        SCRIPT_FILE,
-        script,
-    )
-
-    save_json(
-        SELECTED_SCRIPT_FILE,
-        script,
-    )
-
-    log(
-        f"SAVED: {SELECTED_STORY_FILE}"
-    )
-
-    log(
-        f"SAVED: {SCRIPT_FILE}"
-    )
-
-    log(
-        f"SAVED: {SELECTED_SCRIPT_FILE}"
-    )
-
-
-# ============================================================
-# LOAD STORY
-# ============================================================
-
-def load_best_story():
-    """
-    Prefer the structured story.json because this file already
-    contains verified facts and the official source.
-    """
-
-    candidates = [
-        STORY_FILE,
-        SELECTED_STORY_FILE,
-    ]
-
-    valid = []
-
-    for path in candidates:
-
-        story = load_json(path)
-
-        if not story:
-            continue
-
-        passed, reason = story_quality_gate(
-            story
-        )
-
-        if passed:
-            valid.append(
-                (
-                    path,
-                    story,
-                )
-            )
-        else:
-            warn(
-                f"Rejected {path.name}: {reason}"
-            )
-
-    if not valid:
-        fail(
-            "No usable structured story was found."
-        )
-
-    # Prefer story.json.
-    for path, story in valid:
-        if path == STORY_FILE:
-            log(
-                "STRUCTURED STORY FOUND"
-            )
-            log(
-                story.get("title", "")
-            )
-            return story
-
-    path, story = valid[0]
-
-    log(
-        f"STRUCTURED STORY FOUND: {path.name}"
-    )
-
-    log(
-        story.get("title", "")
-    )
-
-    return story
-
-
-# ============================================================
-# VIDEO GENERATOR IMPORT
-# ============================================================
-
-def load_video_generator():
-    possible_modules = [
-        "rift_valley_video_generator",
-        "video_generator",
-    ]
-
-    last_error = None
-
-    for module_name in possible_modules:
-
-        try:
-            module = __import__(
-                module_name
-            )
-
-            generator = getattr(
-                module,
-                "generate_video",
-                None,
-            )
-
-            if callable(generator):
-                log(
-                    f"VIDEO GENERATOR LOADED: "
-                    f"{module_name}.generate_video"
-                )
-
-                return generator
-
-        except Exception as exc:
-            last_error = exc
-
-    if last_error:
-        raise RuntimeError(
-            "Could not load video generator: "
-            + str(last_error)
-        )
-
-    raise RuntimeError(
-        "No generate_video() function was found."
-    )
-
-
-# ============================================================
-# FFMPEG / FFPROBE
-# ============================================================
-
-def probe_video(path):
-    if not path.exists():
-        return None
-
-    try:
-        import subprocess
-
-        command = [
-            "ffprobe",
-            "-v",
-            "error",
-            "-print_format",
-            "json",
-            "-show_streams",
-            "-show_format",
-            str(path),
-        ]
-
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-
-        if result.returncode != 0:
-            return None
-
-        return json.loads(
-            result.stdout
-        )
-
-    except Exception as exc:
-        warn(
-            f"ffprobe failed: {exc}"
-        )
-        return None
-
-
-# ============================================================
-# FINAL VIDEO QC
-# ============================================================
-
-def validate_final_video(path):
-    log("")
-    log("============================================================")
-    log("FINAL VIDEO QUALITY CONTROL")
-    log("============================================================")
-
-    if not path.exists():
-        fail(
-            f"Final video does not exist: {path}"
-        )
-
-    if path.stat().st_size < 100_000:
-        fail(
-            "Final video is suspiciously small."
-        )
-
-    probe = probe_video(path)
-
-    if not probe:
-        fail(
-            "ffprobe could not inspect final video."
-        )
-
-    streams = probe.get(
-        "streams",
-        [],
-    )
-
-    video_stream = None
-    audio_stream = None
-
-    for stream in streams:
-
-        if stream.get("codec_type") == "video":
-            video_stream = stream
-
-        elif stream.get("codec_type") == "audio":
-            audio_stream = stream
-
-    if video_stream is None:
-        fail(
-            "Final video has no video stream."
-        )
-
-    if audio_stream is None:
-        fail(
-            "Final video has no audio stream."
-        )
-
-    width = int(
-        video_stream.get("width", 0)
-    )
-
-    height = int(
-        video_stream.get("height", 0)
-    )
-
-    duration = float(
-        probe.get("format", {})
-        .get("duration", 0)
-        or 0
-    )
-
-    codec = (
-        video_stream.get("codec_name")
-        or ""
-    ).lower()
-
-    audio_codec = (
-        audio_stream.get("codec_name")
-        or ""
-    ).lower()
-
-    log(f"WIDTH: {width}")
-    log(f"HEIGHT: {height}")
-    log(f"DURATION: {duration:.2f}s")
-    log(f"VIDEO CODEC: {codec}")
-    log(f"AUDIO CODEC: {audio_codec}")
-    log(
-        f"SIZE: {path.stat().st_size} bytes"
-    )
-
-    if width != 1080 or height != 1920:
-        fail(
-            f"Incorrect dimensions: "
-            f"{width}x{height}"
-        )
-
-    if codec != "h264":
-        warn(
-            f"Video codec is {codec}, expected H.264."
-        )
-
-    if audio_codec not in [
-        "aac",
-        "mp3",
-        "opus",
-    ]:
-        warn(
-            f"Unexpected audio codec: "
-            f"{audio_codec}"
-        )
-
-    if duration < 25:
-        fail(
-            f"Video is too short: "
-            f"{duration:.2f}s"
-        )
-
-    if duration > 45:
-        fail(
-            f"Video is too long: "
-            f"{duration:.2f}s"
-        )
-
-    log(
-        "FINAL VIDEO QC: PASS"
-    )
-
-    return True
-
-
-# ============================================================
-# OUTPUT DISCOVERY
-# ============================================================
-
-def find_generated_video():
-    preferred = [
-        FINAL_VIDEO,
-        STANDARD_VIDEO,
-        OUTPUT_DIR / "rift_valley_watch_reel.mp4",
-        OUTPUT_DIR / "rift_valley_watch.mp4",
-    ]
-
-    for path in preferred:
-        if path.exists():
-            return path
-
-    mp4_files = sorted(
-        OUTPUT_DIR.glob("*.mp4"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-
-    if mp4_files:
-        return mp4_files[0]
-
-    return None
-
-
-# ============================================================
-# MAIN VIDEO GENERATION
-# ============================================================
-
-def generate_final_video(story):
-    log("")
-    log("============================================================")
-    log("STARTING VIDEO GENERATION")
-    log("============================================================")
-
-    if not IMAGE_FILE.exists():
-        fail(
-            "No article image exists before video generation."
-        )
-
-    if not validate_image_file(
-        IMAGE_FILE
-    ):
-        fail(
-            "Article image failed validation."
-        )
-
-    generator = load_video_generator()
-
-    # IMPORTANT:
-    # generate_video() accepts ONE story argument.
-    result = generator(story)
-
-    log(
-        f"VIDEO GENERATOR RETURNED: {result}"
-    )
-
-    generated = None
-
-    if isinstance(result, str):
-        generated = Path(result)
-
-    elif isinstance(result, Path):
-        generated = result
-
-    elif isinstance(result, dict):
-
-        for key in [
-            "output",
-            "output_file",
-            "video",
-            "video_path",
-            "path",
-        ]:
-            value = result.get(key)
-
-            if value:
-                generated = Path(
-                    str(value)
-                )
-                break
-
-    # If generator did not return a path,
-    # discover the MP4 in output/.
-    if generated is None or not generated.exists():
-        generated = find_generated_video()
-
-    if generated is None:
-        fail(
-            "Video generator completed but no MP4 "
-            "was produced."
-        )
-
-    log(
-        f"GENERATED VIDEO: {generated}"
-    )
-
-    # Normalize final filename
-    if generated.resolve() != FINAL_VIDEO.resolve():
-
-        if FINAL_VIDEO.exists():
-            FINAL_VIDEO.unlink()
-
-        generated.replace(
-            FINAL_VIDEO
-        )
-
-        generated = FINAL_VIDEO
-
-    validate_final_video(
-        generated
-    )
-
-    return generated
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-def main():
-
-    started = time.time()
-
-    log("")
-    log("============================================================")
-    log("RIFT VALLEY WATCH")
-    log("OFFICIAL COUNTY NEWS PIPELINE")
-    log("============================================================")
-    log(f"ROOT: {ROOT}")
-    log(f"DATA: {DATA_DIR}")
-    log(f"SOURCE: {SOURCE_DIR}")
-    log(f"OUTPUT: {OUTPUT_DIR}")
-
-    try:
-
-        # ----------------------------------------------------
-        # 1. Load structured story
-        # ----------------------------------------------------
-
-        story = load_best_story()
-
-        log("")
-        log("SELECTED STORY")
-        log(
-            f"TITLE: {story.get('title')}"
-        )
-        log(
-            f"COUNTY: {story.get('county')}"
-        )
-
-        source = story.get(
-            "source"
-        ) or {}
-
-        log(
-            f"SOURCE: {source.get('name')}"
-        )
-        log(
-            f"ARTICLE: {source.get('url')}"
-        )
-
-        # ----------------------------------------------------
-        # 2. Normalize story
-        # ----------------------------------------------------
-
-        story = normalize_story(
-            story
-        )
-
-        # ----------------------------------------------------
-        # 3. Recover real article image
-        # ----------------------------------------------------
-
-        recovered = recover_story_image(
-            story
-        )
-
-        if not recovered:
-            fail(
-                "No usable real article image could be "
-                "recovered from the official source."
-            )
-
-        story["local_image"] = recovered
-
-        # ----------------------------------------------------
-        # 4. Build narration/script
-        # ----------------------------------------------------
-
-        script = build_script(
-            story
-        )
-
-        # ----------------------------------------------------
-        # 5. Save selected data
-        # ----------------------------------------------------
-
-        save_story_and_script(
-            story,
-            script,
-        )
-
-        # ----------------------------------------------------
-        # 6. Generate final MP4
-        # ----------------------------------------------------
-
-        final_video = generate_final_video(
-            story
-        )
-
-        # ----------------------------------------------------
-        # 7. Final confirmation
-        # ----------------------------------------------------
-
-        elapsed = time.time() - started
-
-        log("")
-        log("============================================================")
-        log("RIFT VALLEY WATCH SUCCESS")
-        log("============================================================")
-        log(
-            f"FINAL MP4: {final_video}"
-        )
-        log(
-            f"IMAGE: {IMAGE_FILE}"
-        )
-        log(
-            f"SOURCE: {source.get('name')}"
-        )
-        log(
-            f"ELAPSED: {elapsed:.1f}s"
-        )
-        log("============================================================")
-
-        return 0
-
-    except Exception as exc:
-
-        log("")
-        log("============================================================")
-        log("RIFT VALLEY WATCH FAILED")
-        log("============================================================")
-        log(
-            f"{type(exc).__name__}: {exc}"
-        )
-        log("")
-        traceback.print_exc()
-        log("")
-        log("============================================================")
-
-        return 1
-
-
-# ============================================================
-# ENTRY POINT
-# ============================================================
-
-if __name__ == "__main__":
-    raise SystemExit(
-        main()
-    )
+        draw.text(
+            (55, 1250),
+            "STATUS",
+            font=FONT_SMALL,
+            fill
