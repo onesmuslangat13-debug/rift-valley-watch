@@ -2,7 +2,6 @@ name: Rift Valley Watch — Generate MP4
 
 on:
   workflow_dispatch:
-
   schedule:
     - cron: "0 7 * * *"
 
@@ -10,15 +9,11 @@ permissions:
   contents: read
 
 jobs:
-
   generate-video:
-
     runs-on: ubuntu-latest
-
     timeout-minutes: 30
 
     steps:
-
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -28,14 +23,18 @@ jobs:
           python-version: "3.11"
 
       - name: Install FFmpeg
-        uses: FedericoCarboni/setup-ffmpeg@v3
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          ffmpeg -version
+          ffprobe -version
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install requests pillow gTTS
 
-      - name: Generate Rift Valley Watch
+      - name: Generate Rift Valley Watch video
         run: |
           python rift_valley_main.py
 
@@ -43,17 +42,25 @@ jobs:
         run: |
           test -f output/rift_valley_watch_reel.mp4
 
+          echo "=== VIDEO QC ==="
+
           ffprobe -v error \
             -select_streams v:0 \
             -show_entries stream=codec_name,width,height,duration \
             -of default=noprint_wrappers=1 \
             output/rift_valley_watch_reel.mp4
 
+          echo "=== AUDIO QC ==="
+
           ffprobe -v error \
             -select_streams a:0 \
             -show_entries stream=codec_name,sample_rate,channels,duration \
             -of default=noprint_wrappers=1 \
             output/rift_valley_watch_reel.mp4
+
+          echo "=== FILE QC ==="
+
+          ls -lh output/rift_valley_watch_reel.mp4
 
       - name: Upload MP4 artifact
         uses: actions/upload-artifact@v4
