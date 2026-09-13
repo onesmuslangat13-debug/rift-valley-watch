@@ -19,7 +19,7 @@ from PIL import Image
 # MAIN STORY SELECTION ENGINE
 # ============================================================
 
-VERSION = "RVW_MAIN_V17_STABLE"
+VERSION = "RVW_MAIN_V18_SYNTAX_FIXED"
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -1439,7 +1439,6 @@ def discover_candidate_urls():
 
         local_seen = set()
 
-        # IMPORTANT: colon is present here.
         for candidate in source_candidates:
             url = candidate.get(
                 "url",
@@ -2043,12 +2042,16 @@ def validate(article, script):
                 "in narration."
             )
 
-    sentences = split_sentences(script)
+    sentences = split_sentences(
+        script
+    )
 
     seen = set()
 
     for sentence in sentences:
-        key = sentence_key(sentence)
+        key = sentence_key(
+            sentence
+        )
 
         if not key:
             continue
@@ -2107,7 +2110,853 @@ def process_candidate(candidate):
     )
 
     if not article:
-    print(
-        "[SKIP] Could not parse article."
+        print(
+            "[SKIP] Could not parse article."
+        )
+        return None
+
+    if not is_relevant_story(article):
+        print(
+            "[SKIP] Article is not relevant."
+        )
+        return None
+
+    article["score"] = relevance_score(
+        article
     )
-    continue
+
+    article["story_type"] = determine_story_type(
+        article
+    )
+
+    if history_contains(
+        article,
+        load_history(),
+    ):
+        print(
+            "[SKIP] Story already used."
+        )
+        return None
+
+    try:
+        script = build_narration(
+            article
+        )
+    except Exception as exc:
+        print(
+            f"[SKIP] Narration failed: {exc}"
+        )
+        return None
+
+    if word_count(script) < MIN_SCRIPT_WORDS:
+        print(
+            "[SKIP] Narration too short."
+        )
+        return None
+
+    FINAL_IMAGE.unlink(
+        missing_ok=True
+    )
+
+    if not download_article_image(
+        article,
+        response.text,
+    ):
+        print(
+            "[SKIP] Could not download a valid "
+            "article image."
+        )
+        return None
+
+    try:
+        validate(
+            article,
+            script,
+        )
+
+    except Exception as exc:
+        print(
+            f"[SKIP] Validation failed: {exc}"
+        )
+
+        FINAL_IMAGE.unlink(
+            missing_ok=True
+        )
+
+        return None
+
+    print()
+    print("=" * 70)
+    print("[CANDIDATE ACCEPTED]")
+    print("=" * 70)
+    print(
+        f"HEADLINE: {article['title']}"
+    )
+    print(
+        f"COUNTY: {article['county']}"
+    )
+    print(
+        f"TYPE: {article['story_type']}"
+    )
+    print(
+        f"SCORE: {article['score']}"
+    )
+    print(
+        f"WORDS: {word_count(script)}"
+    )
+    print("=" * 70)
+
+    article["script"] = script
+
+    return article
+
+
+# ============================================================
+# SAVE SELECTED STORY
+# ============================================================
+
+def save_selected_story(article):
+    story_data = {
+        "title": article.get(
+            "title",
+            "",
+        ),
+        "url": article.get(
+            "url",
+            "",
+        ),
+        "publisher": article.get(
+            "publisher",
+            "",
+        ),
+        "domain": article.get(
+            "domain",
+            "",
+        ),
+        "county": article.get(
+            "county",
+            "",
+        ),
+        "published": article.get(
+            "published",
+            "",
+        ),
+        "description": article.get(
+            "description",
+            "",
+        ),
+        "story_type": article.get(
+            "story_type",
+            "",
+        ),
+        "score": article.get(
+            "score",
+            0,
+        ),
+        "image_urls": article.get(
+            "image_urls",
+            [],
+        ),
+    }
+
+    script_data = {
+        "title": article.get(
+            "title",
+            "",
+        ),
+        "county": article.get(
+            "county",
+            "",
+        ),
+        "story_type": article.get(
+            "story_type",
+            "",
+        ),
+        "script": article.get(
+            "script",
+            "",
+        ),
+        "word_count": word_count(
+            article.get(
+                "script",
+                "",
+            )
+        ),
+    }
+
+    save_json(
+        STORY_FILE,
+        story_data,
+    )
+
+    save_json(
+        SCRIPT_FILE,
+        script_data,
+    )
+
+    print(
+        "[FILES] selected_story.json created."
+    )
+
+    print(
+        "[FILES] selected_script.json created."
+    )
+
+    if not STORY_FILE.exists():
+        raise RuntimeError(
+            "selected_story.json was not generated."
+        )
+
+    if not SCRIPT_FILE.exists():
+        raise RuntimeError(
+            "selected_script.json was not generated."
+        )
+
+
+# ============================================================
+# SELECT STORY
+# ============================================================
+
+def select_story():
+    candidates = discover_candidate_urls()
+
+    if not candidates:
+        raise RuntimeError(
+            "No candidate story URLs were discovered."
+        )
+
+    history = load_history()
+
+    parsed_candidates = []
+
+    print()
+    print("=" * 70)
+    print("[STORY SELECTION] Parsing candidates")
+    print("=" * 70)
+
+    for index, candidate in enumerate(
+        candidates,
+        start=1,
+    ):
+        url = candidate.get(
+            "url",
+            "",
+        )
+
+        publisher = candidate.get(
+            "publisher",
+            {},
+        )
+
+        print()
+        print(
+            f"[PARSE {index}/{len(candidates)}] "
+            f"{url}"
+        )
+
+        if not url:
+            continue
+
+        if not is_approved_url(url):
+            print(
+                "[SKIP] URL is not approved."
+            )
+            continue
+
+        if history_contains(
+            {
+                "url": url,
+                "title": candidate.get(
+                    "anchor_text",
+                    "",
+                ),
+            },
+            history,
+        ):
+            print(
+                "[SKIP] Candidate already appears "
+                "in history."
+            )
+
+        try:
+            article = parse_article(
+                url,
+                publisher,
+            )
+
+        except Exception as exc:
+            print(
+                f"[SKIP] Parse error: {exc}"
+            )
+            continue
+
+        if not article:
+            print(
+                "[SKIP] Article could not be parsed."
+            )
+            continue
+
+        if not is_relevant_story(article):
+            print(
+                "[SKIP] Article is not relevant."
+            )
+            continue
+
+        if history_contains(
+            article,
+            history,
+        ):
+            print(
+                "[SKIP] Story already used."
+            )
+            continue
+
+        article["score"] = relevance_score(
+            article
+        )
+
+        article["story_type"] = determine_story_type(
+            article
+        )
+
+        parsed_candidates.append(
+            article
+        )
+
+    if not parsed_candidates:
+        raise RuntimeError(
+            "No relevant unused stories were found."
+        )
+
+    parsed_candidates.sort(
+        key=lambda item: (
+            item.get(
+                "score",
+                0,
+            ),
+            word_count(
+                item.get(
+                    "text",
+                    "",
+                )
+            ),
+            len(
+                item.get(
+                    "image_urls",
+                    [],
+                )
+            ),
+        ),
+        reverse=True,
+    )
+
+    print()
+    print("=" * 70)
+    print(
+        "[STORY SELECTION] Ranked candidates"
+    )
+    print("=" * 70)
+
+    for index, article in enumerate(
+        parsed_candidates[:15],
+        start=1,
+    ):
+        print(
+            f"{index}. "
+            f"{article.get('score', 0)} | "
+            f"{article.get('county', '')} | "
+            f"{article.get('title', '')}"
+        )
+
+    print("=" * 70)
+
+    print()
+    print("=" * 70)
+    print(
+        "[STORY SELECTION] Testing candidates "
+        "for final acceptance"
+    )
+    print("=" * 70)
+
+    for index, article in enumerate(
+        parsed_candidates,
+        start=1,
+    ):
+        print()
+        print(
+            f"[FINAL TEST {index}/{len(parsed_candidates)}]"
+        )
+        print(
+            article.get(
+                "title",
+                "",
+            )
+        )
+
+        FINAL_IMAGE.unlink(
+            missing_ok=True
+        )
+
+        try:
+            response = fetch_url(
+                article.get(
+                    "url",
+                    "",
+                )
+            )
+
+            if response is None:
+                print(
+                    "[SKIP] Could not fetch final article."
+                )
+                continue
+
+            refreshed = parse_article(
+                response.url,
+                {
+                    "name": article.get(
+                        "publisher",
+                        "",
+                    ),
+                    "domain": article.get(
+                        "domain",
+                        "",
+                    ),
+                },
+            )
+
+            if not refreshed:
+                print(
+                    "[SKIP] Refreshed article could "
+                    "not be parsed."
+                )
+                continue
+
+            refreshed["score"] = relevance_score(
+                refreshed
+            )
+
+            refreshed["story_type"] = determine_story_type(
+                refreshed
+            )
+
+            if history_contains(
+                refreshed,
+                history,
+            ):
+                print(
+                    "[SKIP] Refreshed story is already "
+                    "in history."
+                )
+                continue
+
+            script = build_narration(
+                refreshed
+            )
+
+            if word_count(script) < MIN_SCRIPT_WORDS:
+                print(
+                    "[SKIP] Final narration is too short."
+                )
+                continue
+
+            if not download_article_image(
+                refreshed,
+                response.text,
+            ):
+                print(
+                    "[SKIP] No valid article image "
+                    "could be downloaded."
+                )
+                continue
+
+            try:
+                validate(
+                    refreshed,
+                    script,
+                )
+
+            except Exception as exc:
+                print(
+                    f"[SKIP] Final validation failed: {exc}"
+                )
+
+                FINAL_IMAGE.unlink(
+                    missing_ok=True
+                )
+
+                continue
+
+            refreshed["script"] = script
+
+            save_selected_story(
+                refreshed
+            )
+
+            add_to_history(
+                refreshed
+            )
+
+            print()
+            print("=" * 70)
+            print("[STORY SELECTED]")
+            print("=" * 70)
+            print(
+                f"HEADLINE: "
+                f"{refreshed.get('title', '')}"
+            )
+            print(
+                f"COUNTY: "
+                f"{refreshed.get('county', '')}"
+            )
+            print(
+                f"TYPE: "
+                f"{refreshed.get('story_type', '')}"
+            )
+            print(
+                f"SCORE: "
+                f"{refreshed.get('score', 0)}"
+            )
+            print(
+                f"WORDS: "
+                f"{word_count(script)}"
+            )
+            print(
+                f"IMAGE: "
+                f"{FINAL_IMAGE}"
+            )
+            print("=" * 70)
+
+            return refreshed
+
+        except Exception as exc:
+            print(
+                f"[SKIP] Candidate failed: {exc}"
+            )
+
+            FINAL_IMAGE.unlink(
+                missing_ok=True
+            )
+
+    raise RuntimeError(
+        "No candidate passed final story, "
+        "image, narration and validation checks."
+    )
+
+
+# ============================================================
+# VERIFY SELECTED FILES
+# ============================================================
+
+def verify_selected_files():
+    print()
+    print("=" * 70)
+    print("[VERIFY] Checking selected story files")
+    print("=" * 70)
+
+    if not STORY_FILE.exists():
+        raise RuntimeError(
+            "selected_story.json was not generated."
+        )
+
+    if not SCRIPT_FILE.exists():
+        raise RuntimeError(
+            "selected_script.json was not generated."
+        )
+
+    if not FINAL_IMAGE.exists():
+        raise RuntimeError(
+            "story_image.jpg was not generated."
+        )
+
+    story = load_json(
+        STORY_FILE,
+        default=None,
+    )
+
+    script_data = load_json(
+        SCRIPT_FILE,
+        default=None,
+    )
+
+    if not isinstance(
+        story,
+        dict,
+    ):
+        raise RuntimeError(
+            "selected_story.json is not valid JSON."
+        )
+
+    if not isinstance(
+        script_data,
+        dict,
+    ):
+        raise RuntimeError(
+            "selected_script.json is not valid JSON."
+        )
+
+    if not story.get("title"):
+        raise RuntimeError(
+            "Selected story title is missing."
+        )
+
+    if not story.get("url"):
+        raise RuntimeError(
+            "Selected story URL is missing."
+        )
+
+    script = script_data.get(
+        "script",
+        "",
+    )
+
+    if word_count(script) < MIN_SCRIPT_WORDS:
+        raise RuntimeError(
+            "Selected narration is too short."
+        )
+
+    try:
+        with Image.open(
+            FINAL_IMAGE
+        ) as image:
+            image.verify()
+
+    except Exception as exc:
+        raise RuntimeError(
+            f"Selected image is invalid: {exc}"
+        )
+
+    print(
+        "[VERIFY] selected_story.json OK"
+    )
+
+    print(
+        "[VERIFY] selected_script.json OK"
+    )
+
+    print(
+        "[VERIFY] story_image.jpg OK"
+    )
+
+    print(
+        f"[VERIFY] Script words: "
+        f"{word_count(script)}"
+    )
+
+    print(
+        "[VERIFY] All selected files are valid."
+    )
+
+
+# ============================================================
+# VIDEO GENERATOR
+# ============================================================
+
+def run_video_generator():
+    if not GENERATOR_FILE.exists():
+        raise RuntimeError(
+            "rift_valley_video_generator.py does not exist."
+        )
+
+    print()
+    print("=" * 70)
+    print(
+        "[VIDEO] Starting video generator."
+    )
+    print("=" * 70)
+
+    command = [
+        sys.executable,
+        "-u",
+        str(GENERATOR_FILE),
+    ]
+
+    result = subprocess.run(
+        command,
+        cwd=str(BASE_DIR),
+        check=False,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Video generator failed with "
+            f"exit code {result.returncode}."
+        )
+
+    if not FINAL_VIDEO.exists():
+        raise RuntimeError(
+            "Rift Valley Watch MP4 was NOT generated."
+        )
+
+    if FINAL_VIDEO.stat().st_size < 10000:
+        raise RuntimeError(
+            "Generated MP4 is unexpectedly small."
+        )
+
+    print(
+        "[VIDEO] Final MP4 generated successfully."
+    )
+
+    print(
+        f"[VIDEO] {FINAL_VIDEO}"
+    )
+
+    print(
+        f"[VIDEO] Size: "
+        f"{FINAL_VIDEO.stat().st_size:,} bytes"
+    )
+
+
+# ============================================================
+# CLEAN PREVIOUS GENERATED SELECTION
+# ============================================================
+
+def clean_previous_selection():
+    STORY_FILE.unlink(
+        missing_ok=True
+    )
+
+    SCRIPT_FILE.unlink(
+        missing_ok=True
+    )
+
+    FINAL_IMAGE.unlink(
+        missing_ok=True
+    )
+
+    FINAL_VIDEO.unlink(
+        missing_ok=True
+    )
+
+    print(
+        "[CLEAN] Previous generated selection removed."
+    )
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+    print()
+    print("=" * 70)
+    print(
+        "RIFT VALLEY WATCH"
+    )
+    print(
+        "MAIN STORY SELECTION ENGINE"
+    )
+    print(
+        f"VERSION: {VERSION}"
+    )
+    print("=" * 70)
+
+    print(
+        f"BASE DIR: {BASE_DIR}"
+    )
+
+    print(
+        f"STORY FILE: {STORY_FILE}"
+    )
+
+    print(
+        f"SCRIPT FILE: {SCRIPT_FILE}"
+    )
+
+    print(
+        f"IMAGE FILE: {FINAL_IMAGE}"
+    )
+
+    print(
+        f"VIDEO FILE: {FINAL_VIDEO}"
+    )
+
+    print("=" * 70)
+
+    try:
+        clean_previous_selection()
+
+        selected = select_story()
+
+        if not selected:
+            raise RuntimeError(
+                "Story selection returned no story."
+            )
+
+        verify_selected_files()
+
+        run_video_generator()
+
+        if not FINAL_VIDEO.exists():
+            raise RuntimeError(
+                "Final MP4 does not exist after "
+                "video generation."
+            )
+
+        print()
+        print("=" * 70)
+        print(
+            "RIFT VALLEY WATCH GENERATION COMPLETE"
+        )
+        print("=" * 70)
+
+        print(
+            f"HEADLINE: "
+            f"{selected.get('title', '')}"
+        )
+
+        print(
+            f"COUNTY: "
+            f"{selected.get('county', '')}"
+        )
+
+        print(
+            f"TYPE: "
+            f"{selected.get('story_type', '')}"
+        )
+
+        print(
+            f"MP4: {FINAL_VIDEO}"
+        )
+
+        print(
+            f"SIZE: "
+            f"{FINAL_VIDEO.stat().st_size:,} bytes"
+        )
+
+        print("=" * 70)
+
+        return 0
+
+    except KeyboardInterrupt:
+        print()
+        print(
+            "[STOPPED] Generation interrupted."
+        )
+        return 130
+
+    except Exception as exc:
+        print()
+        print("=" * 70)
+        print(
+            "[FATAL ERROR]"
+        )
+        print("=" * 70)
+
+        print(
+            str(exc)
+        )
+
+        print("=" * 70)
+
+        return 1
+
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
+
+if __name__ == "__main__":
+    sys.exit(
+        main()
+    )
