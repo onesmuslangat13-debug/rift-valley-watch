@@ -11,7 +11,7 @@ from PIL import Image, ImageDraw, ImageFont
 # ============================================================
 # RIFT VALLEY WATCH
 # VIDEO GENERATOR
-# VERSION: RVW_VIDEO_V14_AUDIO_STABLE
+# VERSION: RVW_VIDEO_V15_NARRATION_FIXED
 # ============================================================
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -42,6 +42,10 @@ FPS = 30
 
 MIN_DURATION = 15
 MAX_DURATION = 60
+
+# The main script now targets 80+ words.
+MIN_NARRATION_WORDS = 80
+MAX_NARRATION_WORDS = 145
 
 
 # ============================================================
@@ -84,6 +88,7 @@ def ensure_directories():
 SOURCE_NAMES = [
     "KBC Digital",
     "KBC News",
+    "KBC",
     "Citizen Digital",
     "Citizen",
     "Daily Nation",
@@ -245,7 +250,14 @@ def load_story():
 
 
 def load_script():
-    return load_json(SCRIPT_FILE)
+    script = load_json(SCRIPT_FILE)
+
+    if not script:
+        log(
+            "WARNING: selected_script.json is missing or empty."
+        )
+
+    return script
 
 
 # ============================================================
@@ -335,103 +347,514 @@ def deduplicate_sentences(sentences):
 
 
 # ============================================================
+# NARRATION HELPERS
+# ============================================================
+
+def add_sentence_candidates(container, value):
+    if not value:
+        return
+
+    if not isinstance(value, str):
+        return
+
+    cleaned = remove_source_language(value)
+
+    if not cleaned:
+        return
+
+    sentences = normalize_sentences(
+        cleaned
+    )
+
+    for sentence in sentences:
+        if sentence not in container:
+            container.append(sentence)
+
+
+def clean_narration_text(text):
+    if not text:
+        return ""
+
+    text = remove_source_language(
+        text
+    )
+
+    text = re.sub(
+        r"^\s*Here is the latest development from [^.]+\.?\s*",
+        "",
+        text,
+        flags=re.IGNORECASE
+    )
+
+    text = re.sub(
+        r"^\s*Here is the latest update from [^.]+\.?\s*",
+        "",
+        text,
+        flags=re.IGNORECASE
+    )
+
+    text = re.sub(
+        r"^\s*Latest development from [^.]+\.?\s*",
+        "",
+        text,
+        flags=re.IGNORECASE
+    )
+
+    text = re.sub(
+        r"^\s*Latest update from [^.]+\.?\s*",
+        "",
+        text,
+        flags=re.IGNORECASE
+    )
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    ).strip()
+
+    return text
+
+
+def word_count(text):
+    if not text:
+        return 0
+
+    return len(
+        re.findall(
+            r"\b[\w'-]+\b",
+            text
+        )
+    )
+
+
+def trim_to_max_words(text, maximum):
+    words = text.split()
+
+    if len(words) <= maximum:
+        return text.strip()
+
+    trimmed = " ".join(
+        words[:maximum]
+    )
+
+    if not re.search(
+        r"[.!?]$",
+        trimmed
+    ):
+        trimmed += "."
+
+    return trimmed.strip()
+
+
+# ============================================================
 # NARRATION
 # ============================================================
 
 def get_narration(story, script):
-    narration = ""
+    """
+    Robust narration loader.
+
+    Priority:
+    1. selected_script.json narration
+    2. selected_script.json script/text/body
+    3. selected_story.json narration/script
+    4. story title + description + body
+    5. other useful story text fields
+
+    The function deliberately does NOT fail just because
+    one JSON field contains only a few words.
+    """
+
+    log("")
+    log("=" * 70)
+    log("BUILDING NARRATION")
+    log("=" * 70)
+
+    direct_candidates = []
+
+    # --------------------------------------------------------
+    # SCRIPT JSON
+    # --------------------------------------------------------
 
     if isinstance(script, dict):
-        narration = (
-            script.get("narration", "")
-            or ""
-        )
 
-    if not narration and isinstance(story, dict):
-        narration = (
-            story.get("script", "")
-            or ""
-        )
-
-    if not narration and isinstance(story, dict):
-        body = story.get(
+        for key in [
+            "narration",
+            "script",
+            "voiceover",
+            "voice_over",
+            "voiceover_text",
+            "narration_text",
+            "text",
             "body",
-            ""
-        ) or ""
+            "content",
+        ]:
+            value = script.get(
+                key,
+                ""
+            )
 
-        sentences = normalize_sentences(
-            body
+            if isinstance(value, str) and value.strip():
+                cleaned = clean_narration_text(
+                    value
+                )
+
+                if cleaned:
+                    direct_candidates.append(
+                        cleaned
+                    )
+
+                    log(
+                        f"SCRIPT FIELD FOUND: {key} "
+                        f"({word_count(cleaned)} words)"
+                    )
+
+    # --------------------------------------------------------
+    # STORY JSON DIRECT FIELDS
+    # --------------------------------------------------------
+
+    if isinstance(story, dict):
+
+        for key in [
+            "narration",
+            "script",
+            "voiceover",
+            "voice_over",
+            "narration_text",
+        ]:
+            value = story.get(
+                key,
+                ""
+            )
+
+            if isinstance(value, str) and value.strip():
+                cleaned = clean_narration_text(
+                    value
+                )
+
+                if cleaned:
+                    direct_candidates.append(
+                        cleaned
+                    )
+
+                    log(
+                        f"STORY FIELD FOUND: {key} "
+                        f"({word_count(cleaned)} words)"
+                    )
+
+    # --------------------------------------------------------
+    # If a direct narration is already long enough,
+    # use it as-is.
+    # --------------------------------------------------------
+
+    for candidate in direct_candidates:
+
+        count = word_count(
+            candidate
         )
 
-        sentences = deduplicate_sentences(
-            sentences
+        if count >= MIN_NARRATION_WORDS:
+            log(
+                f"USING DIRECT NARRATION: "
+                f"{count} words"
+            )
+
+            return trim_to_max_words(
+                candidate,
+                MAX_NARRATION_WORDS
+            )
+
+    # --------------------------------------------------------
+    # Build from story/article material.
+    # --------------------------------------------------------
+
+    sentence_pool = []
+
+    if isinstance(story, dict):
+
+        add_sentence_candidates(
+            sentence_pool,
+            story.get(
+                "description",
+                ""
+            )
         )
+
+        add_sentence_candidates(
+            sentence_pool,
+            story.get(
+                "summary",
+                ""
+            )
+        )
+
+        add_sentence_candidates(
+            sentence_pool,
+            story.get(
+                "body",
+                ""
+            )
+        )
+
+        add_sentence_candidates(
+            sentence_pool,
+            story.get(
+                "content",
+                ""
+            )
+        )
+
+        add_sentence_candidates(
+            sentence_pool,
+            story.get(
+                "article",
+                ""
+            )
+        )
+
+        add_sentence_candidates(
+            sentence_pool,
+            story.get(
+                "text",
+                ""
+            )
+        )
+
+    # --------------------------------------------------------
+    # Add sentences from shorter direct candidates.
+    # --------------------------------------------------------
+
+    for candidate in direct_candidates:
+        add_sentence_candidates(
+            sentence_pool,
+            candidate
+        )
+
+    sentence_pool = deduplicate_sentences(
+        sentence_pool
+    )
+
+    log(
+        f"UNIQUE NARRATION SENTENCES: "
+        f"{len(sentence_pool)}"
+    )
+
+    # --------------------------------------------------------
+    # Build final narration.
+    # --------------------------------------------------------
+
+    selected = []
+
+    for sentence in sentence_pool:
+
+        test = " ".join(
+            selected + [sentence]
+        )
+
+        if word_count(test) > MAX_NARRATION_WORDS:
+            break
+
+        selected.append(
+            sentence
+        )
+
+        if word_count(test) >= MIN_NARRATION_WORDS:
+            break
+
+    narration = " ".join(
+        selected
+    )
+
+    # --------------------------------------------------------
+    # If still short, add useful direct candidates.
+    # --------------------------------------------------------
+
+    if word_count(narration) < MIN_NARRATION_WORDS:
+
+        for candidate in direct_candidates:
+
+            candidate_sentences = normalize_sentences(
+                candidate
+            )
+
+            for sentence in candidate_sentences:
+
+                if sentence in selected:
+                    continue
+
+                test = " ".join(
+                    selected + [sentence]
+                )
+
+                if word_count(test) > MAX_NARRATION_WORDS:
+                    continue
+
+                selected.append(
+                    sentence
+                )
+
+                narration = " ".join(
+                    selected
+                )
+
+                if word_count(narration) >= MIN_NARRATION_WORDS:
+                    break
+
+            if word_count(narration) >= MIN_NARRATION_WORDS:
+                break
+
+    # --------------------------------------------------------
+    # Last useful fallback:
+    # use title + description/body.
+    # --------------------------------------------------------
+
+    if word_count(narration) < MIN_NARRATION_WORDS:
+
+        title = clean_title(
+            story.get(
+                "title",
+                ""
+            )
+            if isinstance(story, dict)
+            else ""
+        )
+
+        description = clean_narration_text(
+            story.get(
+                "description",
+                ""
+            )
+            if isinstance(story, dict)
+            else ""
+        )
+
+        body = clean_narration_text(
+            story.get(
+                "body",
+                ""
+            )
+            if isinstance(story, dict)
+            else ""
+        )
+
+        fallback_parts = []
+
+        if title:
+            fallback_parts.append(
+                title
+            )
+
+        if description:
+            fallback_parts.append(
+                description
+            )
+
+        if body:
+            fallback_parts.append(
+                body
+            )
+
+        fallback_text = " ".join(
+            fallback_parts
+        )
+
+        fallback_sentences = normalize_sentences(
+            fallback_text
+        )
+
+        fallback_sentences = deduplicate_sentences(
+            fallback_sentences
+        )
+
+        selected = []
+
+        for sentence in fallback_sentences:
+
+            test = " ".join(
+                selected + [sentence]
+            )
+
+            if word_count(test) > MAX_NARRATION_WORDS:
+                break
+
+            selected.append(
+                sentence
+            )
+
+            if word_count(test) >= MIN_NARRATION_WORDS:
+                break
 
         narration = " ".join(
-            sentences[:10]
+            selected
         )
 
-    narration = remove_source_language(
+    narration = clean_narration_text(
         narration
     )
 
-    narration = re.sub(
-        r"^\s*Here is the latest development from [^.]+\.?\s*",
-        "",
+    narration = trim_to_max_words(
         narration,
-        flags=re.IGNORECASE
+        MAX_NARRATION_WORDS
     )
 
-    narration = re.sub(
-        r"^\s*Here is the latest update from [^.]+\.?\s*",
-        "",
-        narration,
-        flags=re.IGNORECASE
-    )
-
-    narration = re.sub(
-        r"^\s*Latest development from [^.]+\.?\s*",
-        "",
-        narration,
-        flags=re.IGNORECASE
-    )
-
-    narration = re.sub(
-        r"\s+",
-        " ",
+    count = word_count(
         narration
-    ).strip()
+    )
 
-    if not narration:
-        body = story.get(
-            "body",
-            ""
-        ) or ""
+    log(
+        f"FINAL NARRATION WORD COUNT: {count}"
+    )
 
-        sentences = normalize_sentences(
-            body
+    if count < MIN_NARRATION_WORDS:
+        log("")
+        log("=" * 70)
+        log("NARRATION DATA TOO SHORT")
+        log("=" * 70)
+
+        log(
+            f"Minimum required: "
+            f"{MIN_NARRATION_WORDS}"
         )
 
-        sentences = deduplicate_sentences(
-            sentences
+        log(
+            f"Actual words: {count}"
         )
 
-        if sentences:
-            narration = " ".join(
-                sentences[:10]
-            )
-        else:
-            county = story.get(
-                "county",
-                "the Rift Valley"
+        log(
+            f"Story file: {STORY_FILE}"
+        )
+
+        log(
+            f"Script file: {SCRIPT_FILE}"
+        )
+
+        if isinstance(story, dict):
+            log(
+                "Available story keys: "
+                + ", ".join(
+                    str(k)
+                    for k in story.keys()
+                )
             )
 
-            narration = (
-                f"New developments are being "
-                f"reported in {county}."
+        if isinstance(script, dict):
+            log(
+                "Available script keys: "
+                + ", ".join(
+                    str(k)
+                    for k in script.keys()
+                )
             )
 
-    return narration.strip()
+        log("=" * 70)
+
+        raise RuntimeError(
+            "Narration is too short after all available "
+            "story and script text was combined."
+        )
+
+    return narration
 
 
 # ============================================================
@@ -446,9 +869,11 @@ def remove_old_audio():
         try:
             if path.exists():
                 path.unlink()
+
                 log(
                     f"REMOVED OLD AUDIO: {path}"
                 )
+
         except Exception as exc:
             raise RuntimeError(
                 f"Could not remove old audio {path}: {exc}"
@@ -456,7 +881,9 @@ def remove_old_audio():
 
 
 def check_command(command_name):
-    path = shutil.which(command_name)
+    path = shutil.which(
+        command_name
+    )
 
     if not path:
         raise RuntimeError(
@@ -541,13 +968,30 @@ def generate_audio(narration):
             "Narration text is empty."
         )
 
+    count = word_count(
+        narration
+    )
+
     log(
         f"NARRATION CHARACTERS: {len(narration)}"
     )
 
     log(
-        f"NARRATION WORDS: {len(narration.split())}"
+        f"NARRATION WORDS: {count}"
     )
+
+    log(
+        f"MINIMUM WORDS REQUIRED: "
+        f"{MIN_NARRATION_WORDS}"
+    )
+
+    if count < MIN_NARRATION_WORDS:
+        raise RuntimeError(
+            f"Narration is too short: "
+            f"{count} words. "
+            f"Minimum required: "
+            f"{MIN_NARRATION_WORDS}."
+        )
 
     log(
         "TTS ENGINE: gTTS"
@@ -562,6 +1006,7 @@ def generate_audio(narration):
 
     try:
         from gtts import gTTS
+
     except Exception as exc:
         raise RuntimeError(
             "gTTS could not be imported. "
@@ -586,20 +1031,26 @@ def generate_audio(narration):
         )
 
         log(
-            f"gTTS SAVE COMPLETED: {TEMP_AUDIO}"
+            f"gTTS SAVE COMPLETED: "
+            f"{TEMP_AUDIO}"
         )
 
     except Exception as exc:
+
         log("")
         log("=" * 70)
         log("G TTS FAILED")
         log("=" * 70)
+
         log(
-            f"ERROR TYPE: {type(exc).__name__}"
+            f"ERROR TYPE: "
+            f"{type(exc).__name__}"
         )
+
         log(
             f"ERROR MESSAGE: {exc}"
         )
+
         log("=" * 70)
 
         raise RuntimeError(
@@ -610,7 +1061,8 @@ def generate_audio(narration):
 
     if not TEMP_AUDIO.exists():
         raise RuntimeError(
-            "gTTS completed without creating narration_temp.mp3."
+            "gTTS completed without creating "
+            "narration_temp.mp3."
         )
 
     if TEMP_AUDIO.stat().st_size < 1000:
@@ -618,7 +1070,6 @@ def generate_audio(narration):
             "gTTS created an invalid or empty MP3."
         )
 
-    # Validate temporary MP3 before moving it.
     validate_audio_file(
         TEMP_AUDIO
     )
@@ -627,6 +1078,7 @@ def generate_audio(narration):
         TEMP_AUDIO.replace(
             AUDIO_FILE
         )
+
     except Exception as exc:
         raise RuntimeError(
             f"Could not move generated audio into "
@@ -638,7 +1090,8 @@ def generate_audio(narration):
     )
 
     log(
-        f"NARRATION CREATED SUCCESSFULLY: {AUDIO_FILE}"
+        f"NARRATION CREATED SUCCESSFULLY: "
+        f"{AUDIO_FILE}"
     )
 
     log("=" * 70)
@@ -677,6 +1130,7 @@ def get_media_duration(path):
         return float(
             result.stdout.strip()
         )
+
     except Exception:
         raise RuntimeError(
             f"Could not determine duration: {path}"
@@ -706,11 +1160,13 @@ def calculate_duration(audio_path):
 # ============================================================
 
 def get_font(size, bold=False):
+
     if bold:
         candidates = [
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
             "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
         ]
+
     else:
         candidates = [
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -718,7 +1174,10 @@ def get_font(size, bold=False):
         ]
 
     for font_path in candidates:
-        path = Path(font_path)
+
+        path = Path(
+            font_path
+        )
 
         if path.exists():
             return ImageFont.truetype(
@@ -733,13 +1192,19 @@ def get_font(size, bold=False):
 # TEXT WRAPPING
 # ============================================================
 
-def wrap_text(draw, text, font, max_width):
+def wrap_text(
+    draw,
+    text,
+    font,
+    max_width
+):
     words = text.split()
 
     lines = []
     current = ""
 
     for word in words:
+
         test = (
             word
             if not current
@@ -758,19 +1223,28 @@ def wrap_text(draw, text, font, max_width):
 
         if text_width <= max_width:
             current = test
+
         else:
+
             if current:
-                lines.append(current)
+                lines.append(
+                    current
+                )
 
             current = word
 
     if current:
-        lines.append(current)
+        lines.append(
+            current
+        )
 
     return lines
 
 
-def fit_headline(draw, title):
+def fit_headline(
+    draw,
+    title
+):
     max_width = WIDTH - 120
 
     for size in range(
@@ -778,6 +1252,7 @@ def fit_headline(draw, title):
         30,
         -2
     ):
+
         font = get_font(
             size,
             bold=True
@@ -812,7 +1287,10 @@ def fit_headline(draw, title):
 # OVERLAY
 # ============================================================
 
-def create_overlay(county, title):
+def create_overlay(
+    county,
+    title
+):
     log(
         "CREATING STATIC NEWS OVERLAY"
     )
@@ -944,6 +1422,7 @@ def create_overlay(county, title):
     y = 175
 
     for line in lines:
+
         draw.text(
             (
                 55,
@@ -972,7 +1451,9 @@ def create_overlay(county, title):
             bbox[3] - bbox[1]
         )
 
-        y += line_height + 8
+        y += (
+            line_height + 8
+        )
 
     # --------------------------------------------------------
     # BOTTOM PANEL
@@ -1051,7 +1532,9 @@ def create_overlay(county, title):
 # PREPARE IMAGE
 # ============================================================
 
-def prepare_source_image(source_path):
+def prepare_source_image(
+    source_path
+):
     if not source_path.exists():
         raise RuntimeError(
             f"Story image not found: {source_path}"
@@ -1061,6 +1544,7 @@ def prepare_source_image(source_path):
         image = Image.open(
             source_path
         ).convert("RGB")
+
     except Exception as exc:
         raise RuntimeError(
             f"Could not open story image: {exc}"
@@ -1090,14 +1574,21 @@ def prepare_source_image(source_path):
     )
 
     if source_ratio > target_ratio:
+
         new_height = HEIGHT
+
         new_width = int(
-            new_height * source_ratio
+            new_height *
+            source_ratio
         )
+
     else:
+
         new_width = WIDTH
+
         new_height = int(
-            new_width / source_ratio
+            new_width /
+            source_ratio
         )
 
     image = image.resize(
@@ -1111,14 +1602,16 @@ def prepare_source_image(source_path):
     left = max(
         0,
         (
-            new_width - WIDTH
+            new_width -
+            WIDTH
         ) // 2
     )
 
     top = max(
         0,
         (
-            new_height - HEIGHT
+            new_height -
+            HEIGHT
         ) // 2
     )
 
@@ -1247,6 +1740,7 @@ def create_motion_video(
     )
 
     if result.returncode != 0:
+
         print(
             result.stdout,
             flush=True
@@ -1294,7 +1788,8 @@ def combine_audio(
 
     if not audio_path.exists():
         raise RuntimeError(
-            f"Audio file missing before muxing: {audio_path}"
+            f"Audio file missing before muxing: "
+            f"{audio_path}"
         )
 
     command = [
@@ -1343,6 +1838,7 @@ def combine_audio(
     )
 
     if result.returncode != 0:
+
         print(
             result.stdout,
             flush=True
@@ -1476,7 +1972,8 @@ def verify_final_video(path):
     )
 
     log(
-        f"AUDIO CODEC: {audio_result.stdout.strip()}"
+        f"AUDIO CODEC: "
+        f"{audio_result.stdout.strip()}"
     )
 
     log(
@@ -1511,12 +2008,17 @@ def cleanup_work_files():
         PREPARED_IMAGE,
         TEMP_AUDIO,
     ]:
+
         try:
+
             if path.exists():
                 path.unlink()
+
         except Exception as exc:
+
             log(
-                f"WARNING: Could not remove {path}: {exc}"
+                f"WARNING: Could not remove "
+                f"{path}: {exc}"
             )
 
 
@@ -1525,18 +2027,25 @@ def cleanup_work_files():
 # ============================================================
 
 def main():
+
     log("")
     log("=" * 70)
     log("STARTING RIFT VALLEY WATCH VIDEO GENERATOR")
-    log("VERSION: RVW_VIDEO_V14_AUDIO_STABLE")
+    log("VERSION: RVW_VIDEO_V15_NARRATION_FIXED")
     log("=" * 70)
 
     ensure_directories()
 
-    check_command("ffmpeg")
-    check_command("ffprobe")
+    check_command(
+        "ffmpeg"
+    )
+
+    check_command(
+        "ffprobe"
+    )
 
     story = load_story()
+
     script = load_script()
 
     county = story.get(
@@ -1568,15 +2077,46 @@ def main():
         script
     )
 
-    log("")
-    log("NARRATION PREVIEW:")
-    log(
-        narration[:700]
+    narration_words = word_count(
+        narration
     )
 
-    if len(narration.split()) < 8:
+    log("")
+    log("=" * 70)
+    log("FINAL NARRATION")
+    log("=" * 70)
+
+    log(
+        f"NARRATION WORDS: "
+        f"{narration_words}"
+    )
+
+    log(
+        f"MINIMUM REQUIRED: "
+        f"{MIN_NARRATION_WORDS}"
+    )
+
+    log(
+        f"MAXIMUM ALLOWED: "
+        f"{MAX_NARRATION_WORDS}"
+    )
+
+    log(
+        "NARRATION TEXT:"
+    )
+
+    log(
+        narration
+    )
+
+    log("=" * 70)
+
+    if narration_words < MIN_NARRATION_WORDS:
         raise RuntimeError(
-            "Narration is too short."
+            f"Narration is too short: "
+            f"{narration_words} words. "
+            f"Minimum required: "
+            f"{MIN_NARRATION_WORDS}."
         )
 
     # --------------------------------------------------------
@@ -1588,7 +2128,8 @@ def main():
     )
 
     log(
-        f"NARRATION FILE: {audio_path}"
+        f"NARRATION FILE: "
+        f"{audio_path}"
     )
 
     duration = calculate_duration(
@@ -1609,7 +2150,8 @@ def main():
     )
 
     log(
-        f"ONE ARTICLE IMAGE: {image_path}"
+        f"ONE ARTICLE IMAGE: "
+        f"{image_path}"
     )
 
     # --------------------------------------------------------
@@ -1656,31 +2198,44 @@ def main():
     log("=" * 70)
 
     log(
-        f"FINAL MP4: {final_video}"
+        f"FINAL MP4: "
+        f"{final_video}"
     )
 
     log(
-        f"NARRATION MP3: {audio_path}"
+        f"NARRATION MP3: "
+        f"{audio_path}"
     )
 
     log("=" * 70)
 
 
+# ============================================================
+# ENTRY POINT
+# ============================================================
+
 if __name__ == "__main__":
+
     try:
+
         main()
 
     except Exception as exc:
+
         log("")
         log("=" * 70)
         log("RIFT VALLEY WATCH VIDEO GENERATION FAILED")
         log("=" * 70)
+
         log(
-            f"ERROR TYPE: {type(exc).__name__}"
+            f"ERROR TYPE: "
+            f"{type(exc).__name__}"
         )
+
         log(
             f"ERROR: {exc}"
         )
+
         log("=" * 70)
 
         sys.exit(1)
