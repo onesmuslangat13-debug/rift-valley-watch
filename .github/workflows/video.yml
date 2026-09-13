@@ -40,10 +40,10 @@ jobs:
           sudo apt-get install -y ffmpeg
 
       # ============================================================
-      # PYTHON DEPENDENCIES
+      # DEPENDENCIES
       # ============================================================
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install requests
@@ -55,7 +55,7 @@ jobs:
           pip install numpy
 
       # ============================================================
-      # CLEAN OLD OUTPUT
+      # CLEAN OLD GENERATED FILES
       # ============================================================
 
       - name: Clean previous generated files
@@ -66,6 +66,7 @@ jobs:
 
           rm -f output/rift_valley_watch_reel.mp4
           rm -f audio/narration.mp3
+          rm -f assets/video_work/narration.mp3
           rm -f assets/source/story_image.jpg
           rm -f data/selected_story.json
           rm -f data/selected_script.json
@@ -73,13 +74,14 @@ jobs:
           mkdir -p output
           mkdir -p audio
           mkdir -p assets/source
+          mkdir -p assets/video_work
           mkdir -p data
 
       # ============================================================
-      # GENERATE STORY + NARRATION + VIDEO
+      # GENERATE EVERYTHING
       # ============================================================
 
-      - name: Generate Rift Valley Watch video
+      - name: Generate Rift Valley Watch
         env:
           PYTHONUNBUFFERED: "1"
         run: |
@@ -99,18 +101,31 @@ jobs:
           echo "VERIFYING NARRATION"
           echo "============================================================"
 
-          if [ ! -f "audio/narration.mp3" ]; then
+          NARRATION=""
+
+          if [ -f "audio/narration.mp3" ]; then
+            NARRATION="audio/narration.mp3"
+          elif [ -f "assets/video_work/narration.mp3" ]; then
+            NARRATION="assets/video_work/narration.mp3"
+          fi
+
+          if [ -z "$NARRATION" ]; then
             echo ""
             echo "**Error:** Narration MP3 was not generated."
             echo ""
             echo "Available audio files:"
-            find . -type f \( -name "*.mp3" -o -name "*.wav" -o -name "*.m4a" \) -print || true
+            find . -type f \( \
+              -name "*.mp3" -o \
+              -name "*.wav" -o \
+              -name "*.m4a" \
+            \) -print || true
+
             exit 1
           fi
 
-          SIZE=$(stat -c%s "audio/narration.mp3")
+          SIZE=$(stat -c%s "$NARRATION")
 
-          echo "Narration file: audio/narration.mp3"
+          echo "Narration file: $NARRATION"
           echo "Narration size: ${SIZE} bytes"
 
           if [ "$SIZE" -lt 1000 ]; then
@@ -123,7 +138,7 @@ jobs:
           echo "NARRATION VERIFIED"
 
       # ============================================================
-      # VERIFY STORY IMAGE
+      # VERIFY IMAGE
       # ============================================================
 
       - name: Verify story image
@@ -132,15 +147,17 @@ jobs:
           echo "VERIFYING STORY IMAGE"
           echo "============================================================"
 
-          if [ ! -f "assets/source/story_image.jpg" ]; then
+          FILE="assets/source/story_image.jpg"
+
+          if [ ! -f "$FILE" ]; then
             echo ""
             echo "**Error:** Story image was not generated."
             exit 1
           fi
 
-          SIZE=$(stat -c%s "assets/source/story_image.jpg")
+          SIZE=$(stat -c%s "$FILE")
 
-          echo "Story image: assets/source/story_image.jpg"
+          echo "Story image: $FILE"
           echo "Image size: ${SIZE} bytes"
 
           if [ "$SIZE" -lt 10000 ]; then
@@ -199,7 +216,7 @@ jobs:
           echo "FINAL MP4 VERIFIED"
 
       # ============================================================
-      # FINAL OUTPUT SUMMARY
+      # SHOW FINAL FILES
       # ============================================================
 
       - name: Show generated files
@@ -214,7 +231,11 @@ jobs:
 
           echo ""
           echo "NARRATION:"
-          ls -lh audio/narration.mp3
+          if [ -f "audio/narration.mp3" ]; then
+            ls -lh audio/narration.mp3
+          else
+            ls -lh assets/video_work/narration.mp3
+          fi
 
           echo ""
           echo "IMAGE:"
@@ -234,10 +255,10 @@ jobs:
           echo "============================================================"
 
       # ============================================================
-      # COMMIT GENERATED MP4
+      # COMMIT FINAL MP4
       # ============================================================
 
-      - name: Commit generated video
+      - name: Commit generated MP4
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
