@@ -1812,3 +1812,6 @@ def verify_final_video(path):
     )
 
     if result.returncode != 0:
+    raise RuntimeError(
+        f"Video generation failed with exit code {result.returncode}"
+    )
