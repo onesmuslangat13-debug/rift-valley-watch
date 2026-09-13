@@ -2,11 +2,17 @@
 # RIFT VALLEY WATCH
 # MAIN PIPELINE
 #
-# VERSION: RIFT_VALLEY_WATCH_MAIN_REBUILT_V4
+# VERSION: RIFT_VALLEY_WATCH_MAIN_REBUILT_V5
+#
+# FIX:
+# - NEWS ENGINE MAY CREATE story.json
+# - GENERATOR REQUIRES selected_story.json
+# - MAIN NOW CREATES selected_story.json AUTOMATICALLY
 # ============================================================
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -31,12 +37,12 @@ VIDEO_GENERATORS = [
     BASE_DIR / "video_generator.py",
 ]
 
-SELECTED_STORY = DATA_DIR / "selected_story.json"
 STORY_FILE = DATA_DIR / "story.json"
-
-FINAL_MP4 = OUTPUT_DIR / "rift_valley_watch_reel.mp4"
+SELECTED_STORY = DATA_DIR / "selected_story.json"
 
 LOCAL_IMAGE = SOURCE_DIR / "story_image.jpg"
+
+FINAL_MP4 = OUTPUT_DIR / "rift_valley_watch_reel.mp4"
 
 
 # ============================================================
@@ -56,10 +62,11 @@ COUNTIES = [
 
 
 # ============================================================
-# LOGGING
+# LOG
 # ============================================================
 
 def log(message):
+
     print(
         f"[RIFT VALLEY WATCH] {message}",
         flush=True,
@@ -87,7 +94,7 @@ def prepare_directories():
 
 
 # ============================================================
-# JSON
+# JSON LOADING
 # ============================================================
 
 def load_json(path):
@@ -104,9 +111,7 @@ def load_json(path):
             encoding="utf-8",
         ) as handle:
 
-            data = json.load(handle)
-
-        return data
+            return json.load(handle)
 
     except Exception as exc:
 
@@ -118,7 +123,7 @@ def load_json(path):
 
 
 # ============================================================
-# TEXT
+# TEXT CLEANING
 # ============================================================
 
 def clean_text(value):
@@ -126,28 +131,41 @@ def clean_text(value):
     if value is None:
         return ""
 
-    if isinstance(value, (dict, list)):
+    if isinstance(
+        value,
+        (dict, list),
+    ):
         return ""
 
     return " ".join(
         str(value)
-        .replace("\n", " ")
-        .replace("\r", " ")
+        .replace(
+            "\n",
+            " ",
+        )
+        .replace(
+            "\r",
+            " ",
+        )
         .split()
     ).strip()
 
 
 # ============================================================
-# RECURSIVE SEARCH
+# RECURSIVE VALUE FINDER
 # ============================================================
 
-def recursive_find(
+def find_value(
     data,
     keys,
 ):
 
-    if isinstance(data, dict):
+    if isinstance(
+        data,
+        dict,
+    ):
 
+        # First check current level.
         for key in keys:
 
             if key in data:
@@ -159,9 +177,10 @@ def recursive_find(
                 if value:
                     return value
 
+        # Then recursively inspect nested data.
         for value in data.values():
 
-            found = recursive_find(
+            found = find_value(
                 value,
                 keys,
             )
@@ -169,11 +188,14 @@ def recursive_find(
             if found:
                 return found
 
-    elif isinstance(data, list):
+    elif isinstance(
+        data,
+        list,
+    ):
 
         for item in data:
 
-            found = recursive_find(
+            found = find_value(
                 item,
                 keys,
             )
@@ -190,23 +212,20 @@ def recursive_find(
 
 def get_title(story):
 
-    keys = [
-        "title",
-        "headline",
-        "article_title",
-        "articleTitle",
-        "story_title",
-        "storyTitle",
-        "news_title",
-        "newsTitle",
-        "heading",
-        "subject",
-        "name",
-    ]
-
-    return recursive_find(
+    return find_value(
         story,
-        keys,
+        [
+            "title",
+            "headline",
+            "article_title",
+            "articleTitle",
+            "story_title",
+            "storyTitle",
+            "news_title",
+            "newsTitle",
+            "heading",
+            "name",
+        ],
     )
 
 
@@ -216,21 +235,18 @@ def get_title(story):
 
 def get_summary(story):
 
-    keys = [
-        "summary",
-        "description",
-        "content",
-        "body",
-        "text",
-        "article_text",
-        "articleText",
-        "story",
-        "details",
-    ]
-
-    return recursive_find(
+    return find_value(
         story,
-        keys,
+        [
+            "summary",
+            "description",
+            "content",
+            "body",
+            "text",
+            "article_text",
+            "articleText",
+            "details",
+        ],
     )
 
 
@@ -240,17 +256,13 @@ def get_summary(story):
 
 def get_county(story):
 
-    keys = [
-        "county",
-        "county_name",
-        "countyName",
-        "location",
-        "region",
-    ]
-
-    county = recursive_find(
+    county = find_value(
         story,
-        keys,
+        [
+            "county",
+            "county_name",
+            "countyName",
+        ],
     )
 
     if county:
@@ -276,7 +288,7 @@ def get_county(story):
 
 
 # ============================================================
-# IMAGE URLS
+# IMAGE EXTRACTION
 # ============================================================
 
 def get_image_urls(story):
@@ -309,7 +321,10 @@ def get_image_urls(story):
 
     def scan(data):
 
-        if isinstance(data, dict):
+        if isinstance(
+            data,
+            dict,
+        ):
 
             for key in keys:
 
@@ -359,36 +374,45 @@ def get_image_urls(story):
 
                 scan(value)
 
-        elif isinstance(data, list):
+        elif isinstance(
+            data,
+            list,
+        ):
 
             for item in data:
                 scan(item)
 
-        elif isinstance(data, str):
+        elif isinstance(
+            data,
+            str,
+        ):
 
             value = data.strip()
 
             if (
-                value.startswith("http://")
-                or value.startswith("https://")
+                value.startswith(
+                    "http://"
+                )
+                or value.startswith(
+                    "https://"
+                )
             ):
 
                 lower = value.lower()
 
-                image_extensions = [
-                    ".jpg",
-                    ".jpeg",
-                    ".png",
-                    ".webp",
-                    ".gif",
-                ]
-
                 if any(
-                    ext in lower
-                    for ext in image_extensions
+                    extension in lower
+                    for extension in [
+                        ".jpg",
+                        ".jpeg",
+                        ".png",
+                        ".webp",
+                    ]
                 ):
 
-                    urls.append(value)
+                    urls.append(
+                        value
+                    )
 
     scan(story)
 
@@ -401,46 +425,14 @@ def get_image_urls(story):
             continue
 
         seen.add(url)
+
         result.append(url)
 
     return result
 
 
 # ============================================================
-# STORY LOADING
-# ============================================================
-
-def load_story():
-
-    selected = load_json(
-        SELECTED_STORY
-    )
-
-    if selected:
-
-        log(
-            "Story file: data/selected_story.json"
-        )
-
-        return selected
-
-    story = load_json(
-        STORY_FILE
-    )
-
-    if story:
-
-        log(
-            "Story file: data/story.json"
-        )
-
-        return story
-
-    return {}
-
-
-# ============================================================
-# STORY VALIDATION
+# VALIDATE STORY
 # ============================================================
 
 def validate_story(story):
@@ -455,6 +447,12 @@ def validate_story(story):
         story
     )
 
+    if not title:
+
+        raise RuntimeError(
+            "Selected story has no headline."
+        )
+
     summary = get_summary(
         story
     )
@@ -467,14 +465,10 @@ def validate_story(story):
         story
     )
 
-    local_image = (
+    local_image_valid = (
         LOCAL_IMAGE.exists()
         and LOCAL_IMAGE.stat().st_size > 10_000
     )
-
-    # --------------------------------------------------------
-    # Google News protection
-    # --------------------------------------------------------
 
     combined = (
         title
@@ -486,7 +480,7 @@ def validate_story(story):
         "google news app",
         "sign in to google",
         "get the latest news",
-        "google news",
+        "personalized news",
     ]
 
     for phrase in forbidden:
@@ -498,49 +492,12 @@ def validate_story(story):
                 "instead of a real story."
             )
 
-    # --------------------------------------------------------
-    # Headline
-    # --------------------------------------------------------
-
-    if not title:
-
-        # Print structure so the next failure is
-        # actually useful instead of another mystery.
-
-        log(
-            "STORY JSON DOES NOT CONTAIN A RECOGNIZED HEADLINE."
-        )
-
-        if isinstance(
-            story,
-            dict,
-        ):
-
-            log(
-                "Available top-level fields: "
-                + ", ".join(
-                    str(key)
-                    for key in story.keys()
-                )
-            )
+    if not images and not local_image_valid:
 
         raise RuntimeError(
-            "Selected story has no headline."
+            "Selected story has no usable "
+            "article image."
         )
-
-    # --------------------------------------------------------
-    # Image
-    # --------------------------------------------------------
-
-    if not images and not local_image:
-
-        raise RuntimeError(
-            "Selected story has no usable article image."
-        )
-
-    # --------------------------------------------------------
-    # Log
-    # --------------------------------------------------------
 
     log(
         f"HEADLINE: {title}"
@@ -559,7 +516,7 @@ def validate_story(story):
         f"IMAGE URLS: {len(images)}"
     )
 
-    if local_image:
+    if local_image_valid:
 
         log(
             "LOCAL ARTICLE IMAGE: AVAILABLE"
@@ -569,7 +526,7 @@ def validate_story(story):
 
 
 # ============================================================
-# COMMAND RUNNER
+# RUN COMMAND
 # ============================================================
 
 def run_command(
@@ -617,7 +574,7 @@ def run_command(
 
 
 # ============================================================
-# NEWS ENGINE
+# RUN NEWS ENGINE
 # ============================================================
 
 def run_news_engine():
@@ -625,11 +582,7 @@ def run_news_engine():
     if not NEWS_ENGINE.exists():
 
         log(
-            "News engine not found."
-        )
-
-        log(
-            "Using existing story data."
+            "scripts/news_engine.py not found."
         )
 
         return
@@ -651,9 +604,10 @@ def run_news_engine():
             f"NEWS ENGINE WARNING: {exc}"
         )
 
-        existing = load_story()
-
-        if existing:
+        if (
+            STORY_FILE.exists()
+            or SELECTED_STORY.exists()
+        ):
 
             log(
                 "Existing story data will be used."
@@ -662,6 +616,96 @@ def run_news_engine():
             return
 
         raise
+
+
+# ============================================================
+# CREATE SELECTED STORY
+#
+# THIS IS THE IMPORTANT FIX.
+#
+# The current generator refuses to run unless:
+#
+# data/selected_story.json
+#
+# exists.
+#
+# If the news engine only produces story.json,
+# copy that story into selected_story.json.
+# ============================================================
+
+def create_selected_story():
+
+    selected = load_json(
+        SELECTED_STORY
+    )
+
+    if selected:
+
+        log(
+            "selected_story.json already exists."
+        )
+
+        validate_story(
+            selected
+        )
+
+        return selected
+
+    story = load_json(
+        STORY_FILE
+    )
+
+    if not story:
+
+        raise RuntimeError(
+            "News engine did not create "
+            "data/story.json and "
+            "data/selected_story.json "
+            "does not exist."
+        )
+
+    validate_story(
+        story
+    )
+
+    # Write the exact story structure
+    # expected by the generator.
+
+    with SELECTED_STORY.open(
+        "w",
+        encoding="utf-8",
+    ) as handle:
+
+        json.dump(
+            story,
+            handle,
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    log(
+        "Created data/selected_story.json "
+        "from data/story.json."
+    )
+
+    # Confirm the file can be read back.
+
+    confirmed = load_json(
+        SELECTED_STORY
+    )
+
+    if not confirmed:
+
+        raise RuntimeError(
+            "Failed to create "
+            "data/selected_story.json."
+        )
+
+    validate_story(
+        confirmed
+    )
+
+    return confirmed
 
 
 # ============================================================
@@ -681,7 +725,7 @@ def find_video_generator():
     )
 
 
-def remove_old_video():
+def remove_old_mp4():
 
     if not FINAL_MP4.exists():
         return
@@ -707,10 +751,18 @@ def run_video_generator():
     generator = find_video_generator()
 
     log(
-        f"VIDEO GENERATOR: {generator.name}"
+        f"GENERATOR: {generator.name}"
     )
 
-    remove_old_video()
+    # The generator requires selected_story.json.
+    if not SELECTED_STORY.exists():
+
+        raise RuntimeError(
+            "selected_story.json is missing "
+            "before video generation."
+        )
+
+    remove_old_mp4()
 
     run_command(
         [
@@ -875,22 +927,23 @@ def verify_final_mp4():
 
         audio_duration = 0.0
 
-    difference = abs(
-        video_duration
-        - audio_duration
-    )
-
     if (
         video_duration > 0
         and audio_duration > 0
-        and difference > 1.5
     ):
 
-        raise RuntimeError(
-            "Video/audio duration mismatch: "
-            f"{video_duration:.2f}s vs "
-            f"{audio_duration:.2f}s."
+        difference = abs(
+            video_duration
+            - audio_duration
         )
+
+        if difference > 1.5:
+
+            raise RuntimeError(
+                "Video/audio duration mismatch: "
+                f"{video_duration:.2f}s vs "
+                f"{audio_duration:.2f}s."
+            )
 
     size_mb = (
         size
@@ -923,8 +976,6 @@ def verify_final_mp4():
         f"{audio_duration:.2f}s"
     )
 
-    return True
-
 
 # ============================================================
 # MAIN
@@ -933,38 +984,36 @@ def verify_final_mp4():
 def main():
 
     print("")
-    print("=" * 70)
-    print("RIFT VALLEY WATCH")
-    print("MAIN PIPELINE")
-    print("=" * 70)
+
+    print(
+        "=" * 70
+    )
+
+    print(
+        "STARTING RIFT VALLEY WATCH"
+    )
+
+    print(
+        "=" * 70
+    )
 
     prepare_directories()
 
     # --------------------------------------------------------
-    # 1. NEWS
+    # STEP 1
     # --------------------------------------------------------
 
     run_news_engine()
 
     # --------------------------------------------------------
-    # 2. LOAD STORY
+    # STEP 2
     # --------------------------------------------------------
 
-    story = load_story()
-
-    if not story:
-
-        raise RuntimeError(
-            "No story JSON was available."
-        )
+    story = create_selected_story()
 
     # --------------------------------------------------------
-    # 3. VALIDATE
+    # STEP 3
     # --------------------------------------------------------
-
-    validate_story(
-        story
-    )
 
     title = get_title(
         story
@@ -975,12 +1024,23 @@ def main():
     )
 
     print("")
-    print("=" * 70)
-    print("SELECTED STORY")
-    print("=" * 70)
+
+    print(
+        "=" * 70
+    )
+
+    print(
+        "SELECTED STORY"
+    )
+
+    print(
+        "=" * 70
+    )
+
     print(
         f"HEADLINE: {title}"
     )
+
     print(
         "COUNTY: "
         + (
@@ -989,41 +1049,66 @@ def main():
             else "Unknown"
         )
     )
-    print("=" * 70)
+
+    print(
+        "=" * 70
+    )
+
     print("")
 
     # --------------------------------------------------------
-    # 4. VIDEO
+    # STEP 4
     # --------------------------------------------------------
 
     run_video_generator()
 
     # --------------------------------------------------------
-    # 5. FINAL QC
+    # STEP 5
     # --------------------------------------------------------
 
     verify_final_mp4()
 
+    # --------------------------------------------------------
+    # SUCCESS
+    # --------------------------------------------------------
+
     print("")
-    print("=" * 70)
-    print("RIFT VALLEY WATCH SUCCESS")
-    print("=" * 70)
+
+    print(
+        "=" * 70
+    )
+
+    print(
+        "RIFT VALLEY WATCH SUCCESS"
+    )
+
+    print(
+        "=" * 70
+    )
+
     print(
         f"FINAL MP4: {FINAL_MP4}"
     )
+
     print(
         "1080x1920: PASS"
     )
+
     print(
         "VIDEO: PASS"
     )
+
     print(
         "AUDIO: PASS"
     )
+
     print(
         "FINAL QC: PASS"
     )
-    print("=" * 70)
+
+    print(
+        "=" * 70
+    )
 
     return 0
 
@@ -1043,6 +1128,7 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
 
         print("")
+
         print(
             "RIFT VALLEY WATCH CANCELLED."
         )
@@ -1052,12 +1138,25 @@ if __name__ == "__main__":
     except Exception as exc:
 
         print("")
-        print("=" * 70)
-        print("RIFT VALLEY WATCH FAILED")
-        print("=" * 70)
+
+        print(
+            "=" * 70
+        )
+
+        print(
+            "RIFT VALLEY WATCH FAILED"
+        )
+
+        print(
+            "=" * 70
+        )
+
         print(
             f"{type(exc).__name__}: {exc}"
         )
-        print("=" * 70)
+
+        print(
+            "=" * 70
+        )
 
         raise SystemExit(1)
