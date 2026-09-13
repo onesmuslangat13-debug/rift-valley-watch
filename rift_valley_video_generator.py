@@ -1,131 +1,125 @@
-import os
-import re
-import json
-import shutil
-import subprocess
 from pathlib import Path
+import json
+import re
+import subprocess
+import sys
+import math
 
-import requests
-from PIL import Image, ImageOps, ImageDraw, ImageFont
-from gtts import gTTS
+from PIL import Image, ImageDraw, ImageFont
 
 
 # ============================================================
 # RIFT VALLEY WATCH
 # VIDEO GENERATOR
-# VERSION: V11 ROBUST
+# VERSION: RVW_VIDEO_V12_CONTINUOUS
 # ============================================================
 
-GENERATOR_VERSION = "RIFT_VALLEY_WATCH_GENERATOR_V11"
+BASE_DIR = Path(__file__).resolve().parent
 
-ROOT = Path(__file__).resolve().parent
-
-DATA_DIR = ROOT / "data"
-ASSETS_DIR = ROOT / "assets"
-SOURCE_DIR = ASSETS_DIR / "source"
-AUDIO_DIR = ROOT / "audio"
-OUTPUT_DIR = ROOT / "output"
-WORK_DIR = ROOT / "work"
-
-OUTPUT_FILE = OUTPUT_DIR / "rift_valley_watch_reel.mp4"
-SOURCE_IMAGE = SOURCE_DIR / "story_image.jpg"
-AUDIO_FILE = AUDIO_DIR / "narration.mp3"
+OUTPUT_DIR = BASE_DIR / "output"
+DATA_DIR = BASE_DIR / "data"
+ASSET_DIR = BASE_DIR / "assets" / "source"
+WORK_DIR = BASE_DIR / "assets" / "video_work"
 
 STORY_FILE = DATA_DIR / "selected_story.json"
 SCRIPT_FILE = DATA_DIR / "selected_script.json"
 
+IMAGE_FILE = ASSET_DIR / "story_image.jpg"
+
+OUTPUT_FILE = OUTPUT_DIR / "rift_valley_watch_reel.mp4"
+TEMP_VIDEO = WORK_DIR / "motion_background.mp4"
+OVERLAY_FILE = WORK_DIR / "overlay.png"
+AUDIO_FILE = WORK_DIR / "narration.mp3"
+
 WIDTH = 1080
 HEIGHT = 1920
+FPS = 30
+
+MIN_DURATION = 15
+MAX_DURATION = 60
 
 
 # ============================================================
-# LOG
+# LOGGING
 # ============================================================
 
-def log(message=""):
-    print(message, flush=True)
+def log(message):
+    print(f"[RIFT VALLEY WATCH] {message}", flush=True)
 
 
 # ============================================================
-# DIRECTORIES
+# DIRECTORY SETUP
 # ============================================================
 
-def prepare_directories():
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    SOURCE_DIR.mkdir(parents=True, exist_ok=True)
-    AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+def ensure_directories():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    ASSET_DIR.mkdir(parents=True, exist_ok=True)
     WORK_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ============================================================
-# JSON
+# TEXT CLEANING
 # ============================================================
 
-def load_json(path):
-    path = Path(path)
-
-    if not path.exists():
-        raise RuntimeError(
-            f"Required JSON file not found: {path}"
-        )
-
-    try:
-        with path.open(
-            "r",
-            encoding="utf-8",
-        ) as file:
-            return json.load(file)
-
-    except Exception as exc:
-        raise RuntimeError(
-            f"Could not read {path}: {exc}"
-        )
-
-
-# ============================================================
-# TEXT
-# ============================================================
-
-def clean_text(value):
-    if value is None:
-        return ""
-
-    if isinstance(value, (dict, list)):
-        return ""
-
-    return re.sub(
-        r"\s+",
-        " ",
-        str(value),
-    ).strip()
-
-
-def first_nonempty(*values):
-    for value in values:
-        text = clean_text(value)
-
-        if text:
-            return text
-
-    return ""
+SOURCE_NAMES = [
+    "KBC Digital",
+    "KBC News",
+    "Citizen Digital",
+    "Citizen",
+    "Daily Nation",
+    "Nation Africa",
+    "The Star",
+    "People Daily",
+    "The Standard",
+    "Standard Media",
+    "Capital News",
+    "NTV Kenya",
+    "NTV",
+    "TV47",
+    "Tuko",
+]
 
 
 def remove_source_language(text):
-    text = clean_text(text)
+    if not text:
+        return ""
 
-    patterns = [
-        r"\baccording to\s+[^.]+",
-        r"\breported by\s+[^.]+",
-        r"\breport from\s+[^.]+",
-        r"\bsource\s*:\s*[^.]+",
-        r"\bvia\s+[^.]+",
-        r"\bas reported by\s+[^.]+",
-        r"\bthe source said\b",
-        r"\bthe publisher said\b",
-    ]
+    text = str(text)
 
-    for pattern in patterns:
+    # Remove URLs
+    text = re.sub(
+        r"https?://\S+|www\.\S+",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    # Remove advertisement markers
+    text = re.sub(
+        r"\bAdvertisement\b",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    text = re.sub(
+        r"\bAdvert\b",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    # Remove bracketed junk
+    text = re.sub(
+        r"\[[^\]]*\]",
+        "",
+        text,
+    )
+
+    # Remove common publisher attribution
+    for source in SOURCE_NAMES:
+        pattern = rf"\b{re.escape(source)}\b"
         text = re.sub(
             pattern,
             "",
@@ -133,464 +127,426 @@ def remove_source_language(text):
             flags=re.IGNORECASE,
         )
 
-    return re.sub(
-        r"\s+([,.])",
+    # Remove common attribution phrases
+    text = re.sub(
+        r"\bas reported by\b.*?(?=[.!?]|$)",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    text = re.sub(
+        r"\breported by\b.*?(?=[.!?]|$)",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    text = re.sub(
+        r"\baccording to\s+[^.!?]+",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    # Remove repeated whitespace
+    text = re.sub(
+        r"\s+",
+        " ",
+        text,
+    )
+
+    # Clean punctuation spacing
+    text = re.sub(
+        r"\s+([,.!?;:])",
         r"\1",
+        text,
+    )
+
+    return text.strip()
+
+
+# ============================================================
+# TITLE CLEANING
+# ============================================================
+
+def clean_title(title):
+    if not title:
+        return "Latest Rift Valley Update"
+
+    title = remove_source_language(title)
+
+    title = re.sub(
+        r"\s*[\|\-–—:]\s*$",
+        "",
+        title,
+    )
+
+    title = re.sub(
+        r"\s*[\|\-–—:]\s*(KBC|Citizen|Nation|The Star|People Daily|"
+        r"The Standard|Standard Media|Capital News|NTV|TV47|Tuko).*$",
+        "",
+        title,
+        flags=re.IGNORECASE,
+    )
+
+    title = re.sub(
+        r"\s+",
+        " ",
+        title,
+    )
+
+    return title.strip()
+
+
+# ============================================================
+# LOAD STORY
+# ============================================================
+
+def load_json(path):
+    if not path.exists():
+        return {}
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as exc:
+        log(f"WARNING: Could not read {path}: {exc}")
+        return {}
+
+
+def load_story():
+    story = load_json(STORY_FILE)
+
+    if not story:
+        raise RuntimeError(
+            f"Selected story file not found or empty: {STORY_FILE}"
+        )
+
+    return story
+
+
+def load_script():
+    return load_json(SCRIPT_FILE)
+
+
+# ============================================================
+# NARRATION
+# ============================================================
+
+def normalize_sentences(text):
+    if not text:
+        return []
+
+    text = remove_source_language(text)
+
+    text = re.sub(
+        r"\s+",
+        " ",
         text,
     ).strip()
 
+    sentences = re.split(
+        r"(?<=[.!?])\s+",
+        text,
+    )
 
-# ============================================================
-# STORY FIELDS
-# ============================================================
+    cleaned = []
 
-def get_story_title(story):
-    return first_nonempty(
-        story.get("title"),
-        story.get("headline"),
-        story.get("story_title"),
+    for sentence in sentences:
+        sentence = sentence.strip()
+
+        if not sentence:
+            continue
+
+        words = sentence.split()
+
+        if len(words) < 4:
+            continue
+
+        cleaned.append(sentence)
+
+    return cleaned
+
+
+def sentence_similarity(a, b):
+    a_words = set(
+        re.findall(
+            r"[a-zA-Z0-9']+",
+            a.lower(),
+        )
+    )
+
+    b_words = set(
+        re.findall(
+            r"[a-zA-Z0-9']+",
+            b.lower(),
+        )
+    )
+
+    if not a_words or not b_words:
+        return 0
+
+    intersection = len(a_words & b_words)
+
+    return intersection / max(
+        1,
+        min(len(a_words), len(b_words)),
     )
 
 
-def get_story_county(story):
-    return first_nonempty(
-        story.get("county"),
-        story.get("location"),
-        "Rift Valley",
-    )
+def deduplicate_sentences(sentences):
+    result = []
+
+    for sentence in sentences:
+        duplicate = False
+
+        for previous in result:
+            if sentence_similarity(sentence, previous) >= 0.82:
+                duplicate = True
+                break
+
+        if not duplicate:
+            result.append(sentence)
+
+    return result
 
 
 def get_narration(story, script):
-    candidates = [
-        script.get("narration"),
-        script.get("voiceover"),
-        script.get("text"),
-        story.get("script"),
-        story.get("narration"),
-        story.get("voiceover"),
-    ]
+    narration = ""
 
-    for candidate in candidates:
-        text = remove_source_language(
-            candidate
-        )
+    # Preferred location
+    if isinstance(script, dict):
+        narration = script.get("narration", "") or ""
 
-        if text:
-            return text
+    # Secondary location
+    if not narration and isinstance(story, dict):
+        narration = story.get("script", "") or ""
 
-    title = get_story_title(story)
-    county = get_story_county(story)
+    # Body fallback
+    if not narration and isinstance(story, dict):
+        body = story.get("body", "") or ""
 
-    summary = first_nonempty(
-        story.get("summary"),
-        story.get("description"),
-        story.get("excerpt"),
-        story.get("body"),
+        sentences = normalize_sentences(body)
+        sentences = deduplicate_sentences(sentences)
+
+        narration = " ".join(sentences[:10])
+
+    narration = remove_source_language(narration)
+
+    # Remove common artificial intros
+    narration = re.sub(
+        r"^\s*Here is the latest development from [^.]+\.?\s*",
+        "",
+        narration,
+        flags=re.IGNORECASE,
     )
 
-    if title and summary:
-        return remove_source_language(
-            f"Here is the latest development from "
-            f"{county}. {title}. {summary}"
-        )
-
-    if title:
-        return (
-            f"Rift Valley Watch. {title}."
-        )
-
-    raise RuntimeError(
-        "No usable narration was provided."
+    narration = re.sub(
+        r"^\s*Here is the latest update from [^.]+\.?\s*",
+        "",
+        narration,
+        flags=re.IGNORECASE,
     )
 
-
-# ============================================================
-# IMAGE VALIDATION
-# ============================================================
-
-def validate_image_file(path):
-    path = Path(path)
-
-    if not path.exists():
-        return False
-
-    if not path.is_file():
-        return False
-
-    try:
-        if path.stat().st_size < 5000:
-            return False
-    except Exception:
-        return False
-
-    try:
-        with Image.open(path) as image:
-            image.verify()
-
-        with Image.open(path) as image:
-            if image.width < 250:
-                return False
-
-            if image.height < 180:
-                return False
-
-        return True
-
-    except Exception:
-        return False
-
-
-# ============================================================
-# IMAGE URL
-# ============================================================
-
-def clean_image_url(value):
-    value = clean_text(value)
-
-    if not value:
-        return ""
-
-    if value.startswith("//"):
-        value = "https:" + value
-
-    if not value.startswith(
-        ("http://", "https://")
-    ):
-        return ""
-
-    return value
-
-
-# ============================================================
-# DOWNLOAD REMOTE IMAGE
-# ============================================================
-
-def download_image(image_url, article_url=""):
-    image_url = clean_image_url(
-        image_url
+    narration = re.sub(
+        r"^\s*Latest development from [^.]+\.?\s*",
+        "",
+        narration,
+        flags=re.IGNORECASE,
     )
 
-    if not image_url:
-        raise RuntimeError(
-            "Remote image URL is empty."
+    # Remove publisher-like title fragments
+    for source in SOURCE_NAMES:
+        narration = re.sub(
+            rf"\b{re.escape(source)}\b",
+            "",
+            narration,
+            flags=re.IGNORECASE,
         )
 
-    log(
-        f"Downloading article image: {image_url}"
-    )
+    # Clean whitespace
+    narration = re.sub(
+        r"\s+",
+        " ",
+        narration,
+    ).strip()
 
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (X11; Linux x86_64) "
-            "AppleWebKit/537.36 "
-            "(KHTML, like Gecko) "
-            "Chrome/131.0 Safari/537.36"
-        ),
-        "Accept": (
-            "image/avif,image/webp,"
-            "image/apng,image/svg+xml,"
-            "image/*,*/*;q=0.8"
-        ),
-    }
-
-    if article_url:
-        headers["Referer"] = article_url
-
-    try:
-        response = requests.get(
-            image_url,
-            headers=headers,
-            timeout=30,
-            allow_redirects=True,
-        )
-
-        response.raise_for_status()
-
-    except Exception as exc:
-        raise RuntimeError(
-            f"Could not download article image: {exc}"
-        )
-
-    if len(response.content) < 10000:
-        raise RuntimeError(
-            "Downloaded article image is too small."
-        )
-
-    temporary_file = (
-        SOURCE_DIR /
-        "downloaded_source_image"
-    )
-
-    try:
-        with temporary_file.open(
-            "wb"
-        ) as file:
-            file.write(
-                response.content
+    if not narration:
+        county = str(
+            story.get(
+                "county",
+                "the Rift Valley",
             )
-
-        if not validate_image_file(
-            temporary_file
-        ):
-            raise RuntimeError(
-                "Downloaded image failed validation."
-            )
-
-        with Image.open(
-            temporary_file
-        ) as image:
-            image = ImageOps.exif_transpose(
-                image
-            )
-
-            image = image.convert(
-                "RGB"
-            )
-
-            image.save(
-                SOURCE_IMAGE,
-                "JPEG",
-                quality=95,
-                optimize=True,
-            )
-
-        temporary_file.unlink(
-            missing_ok=True
         )
 
-        if not validate_image_file(
-            SOURCE_IMAGE
-        ):
-            raise RuntimeError(
-                "Converted article image failed validation."
-            )
+        body = story.get("body", "") or ""
 
-        log(
-            f"REMOTE IMAGE SAVED: {SOURCE_IMAGE}"
-        )
+        sentences = normalize_sentences(body)
+        sentences = deduplicate_sentences(sentences)
 
-        return SOURCE_IMAGE
-
-    except Exception:
-        temporary_file.unlink(
-            missing_ok=True
-        )
-        raise
-
-
-# ============================================================
-# IMAGE RESOLUTION
-# ============================================================
-
-def resolve_image(story, script):
-    log("")
-    log("=" * 60)
-    log("IMAGE RESOLUTION")
-    log("=" * 60)
-
-    local_candidates = [
-        story.get("local_image"),
-        script.get("local_image"),
-        story.get("image_path"),
-        script.get("image_path"),
-        SOURCE_IMAGE,
-    ]
-
-    checked = set()
-
-    for candidate in local_candidates:
-        if not candidate:
-            continue
-
-        candidate = Path(
-            str(candidate)
-        )
-
-        if not candidate.is_absolute():
-            candidate = ROOT / candidate
-
-        try:
-            candidate = candidate.resolve()
-        except Exception:
-            pass
-
-        key = str(candidate)
-
-        if key in checked:
-            continue
-
-        checked.add(key)
-
-        log(
-            f"Checking local image: {candidate}"
-        )
-
-        if validate_image_file(
-            candidate
-        ):
-            log(
-                "VERIFIED LOCAL ARTICLE IMAGE FOUND"
-            )
-
-            return candidate
-
-    image_url = first_nonempty(
-        story.get("image"),
-        story.get("image_url"),
-        story.get("imageUrl"),
-        script.get("image"),
-        script.get("image_url"),
-        script.get("imageUrl"),
-    )
-
-    if image_url:
-        return download_image(
-            image_url,
-            story.get("url", ""),
-        )
-
-    raise RuntimeError(
-        "No valid local article image exists "
-        "and no remote article image URL was supplied."
-    )
-
-
-# ============================================================
-# BASE IMAGE
-# ============================================================
-
-def prepare_base_image(image_path):
-    image_path = Path(
-        image_path
-    )
-
-    if not validate_image_file(
-        image_path
-    ):
-        raise RuntimeError(
-            f"Invalid source image: {image_path}"
-        )
-
-    with Image.open(
-        image_path
-    ) as image:
-        image = ImageOps.exif_transpose(
-            image
-        )
-
-        image = image.convert(
-            "RGB"
-        )
-
-        source_ratio = (
-            image.width /
-            image.height
-        )
-
-        target_ratio = (
-            WIDTH /
-            HEIGHT
-        )
-
-        if source_ratio > target_ratio:
-            new_height = HEIGHT
-
-            new_width = int(
-                new_height *
-                source_ratio
-            )
-
+        if sentences:
+            narration = " ".join(sentences[:10])
         else:
-            new_width = WIDTH
-
-            new_height = int(
-                new_width /
-                source_ratio
+            narration = (
+                f"New developments are being reported in {county}."
             )
 
-        image = image.resize(
-            (
-                new_width,
-                new_height,
-            ),
-            Image.Resampling.LANCZOS,
-        )
-
-        left = max(
-            0,
-            (image.width - WIDTH) // 2,
-        )
-
-        top = max(
-            0,
-            (image.height - HEIGHT) // 2,
-        )
-
-        image = image.crop(
-            (
-                left,
-                top,
-                left + WIDTH,
-                top + HEIGHT,
-            )
-        )
-
-        return image.copy()
+    return narration
 
 
 # ============================================================
-# FONTS
+# AUDIO
 # ============================================================
 
-def find_font(bold=False):
-    if bold:
-        candidates = [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
-        ]
-    else:
-        candidates = [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-        ]
+def find_audio():
+    candidates = [
+        AUDIO_FILE,
+        BASE_DIR / "audio" / "narration.mp3",
+        DATA_DIR / "narration.mp3",
+    ]
 
     for path in candidates:
-        if os.path.exists(path):
+        if path.exists() and path.stat().st_size > 1000:
             return path
 
     return None
 
 
-FONT_BOLD = find_font(True)
-FONT_REGULAR = find_font(False)
+def generate_audio(narration):
+    audio_path = find_audio()
 
+    # If main script already generated narration.mp3,
+    # use it rather than unnecessarily generating another file.
+    if audio_path:
+        log(f"USING EXISTING NARRATION: {audio_path}")
+        return audio_path
 
-def get_font(size, bold=False):
-    path = (
-        FONT_BOLD
-        if bold
-        else FONT_REGULAR
+    log("GENERATING NARRATION AUDIO")
+
+    try:
+        from gtts import gTTS
+    except ImportError:
+        raise RuntimeError(
+            "gTTS is not installed. Run: pip install gTTS"
+        )
+
+    AUDIO_FILE.parent.mkdir(
+        parents=True,
+        exist_ok=True,
     )
 
-    if path:
-        return ImageFont.truetype(
-            path,
-            size,
+    tts = gTTS(
+        text=narration,
+        lang="en",
+        slow=False,
+    )
+
+    tts.save(str(AUDIO_FILE))
+
+    if not AUDIO_FILE.exists():
+        raise RuntimeError(
+            "Narration audio was not generated."
         )
+
+    if AUDIO_FILE.stat().st_size < 1000:
+        raise RuntimeError(
+            "Narration audio file is unexpectedly small."
+        )
+
+    return AUDIO_FILE
+
+
+# ============================================================
+# AUDIO DURATION
+# ============================================================
+
+def get_media_duration(path):
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(path),
+    ]
+
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"ffprobe failed for {path}: {result.stderr}"
+        )
+
+    try:
+        return float(result.stdout.strip())
+    except Exception:
+        raise RuntimeError(
+            f"Could not determine duration for {path}"
+        )
+
+
+def calculate_duration(audio_path):
+    duration = get_media_duration(audio_path)
+
+    duration = max(
+        MIN_DURATION,
+        duration,
+    )
+
+    duration = min(
+        MAX_DURATION,
+        duration,
+    )
+
+    return duration
+
+
+# ============================================================
+# FONT
+# ============================================================
+
+def get_font(size, bold=False):
+    candidates = []
+
+    if bold:
+        candidates.extend([
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+        ])
+    else:
+        candidates.extend([
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        ])
+
+    candidates.extend([
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ])
+
+    for font_path in candidates:
+        path = Path(font_path)
+
+        if path.exists():
+            return ImageFont.truetype(
+                str(path),
+                size,
+            )
 
     return ImageFont.load_default()
 
 
 # ============================================================
-# TEXT WRAP
+# TEXT WRAPPING
 # ============================================================
 
-def wrap_text(
-    draw,
-    text,
-    font,
-    max_width,
-):
+def wrap_text(draw, text, font, max_width):
     words = text.split()
 
     lines = []
@@ -609,501 +565,497 @@ def wrap_text(
             font=font,
         )
 
-        width = (
-            bbox[2] -
-            bbox[0]
-        )
+        width = bbox[2] - bbox[0]
 
         if width <= max_width:
             current = test
         else:
             if current:
-                lines.append(
-                    current
-                )
+                lines.append(current)
 
             current = word
 
     if current:
-        lines.append(
-            current
-        )
+        lines.append(current)
 
     return lines
 
 
-def draw_wrapped_text(
-    draw,
-    text,
-    x,
-    y,
-    font,
-    max_width,
-    line_gap=10,
-):
-    lines = wrap_text(
-        draw,
-        text,
-        font,
-        max_width,
-    )
+def fit_headline(draw, title):
+    max_width = WIDTH - 120
 
-    current_y = y
-
-    for line in lines:
-        draw.text(
-            (
-                x,
-                current_y,
-            ),
-            line,
-            font=font,
-            fill=(255, 255, 255),
-            stroke_width=2,
-            stroke_fill=(0, 0, 0),
+    for size in range(54, 30, -2):
+        font = get_font(
+            size,
+            bold=True,
         )
 
-        bbox = draw.textbbox(
-            (
-                x,
-                current_y,
-            ),
-            line,
-            font=font,
+        lines = wrap_text(
+            draw,
+            title,
+            font,
+            max_width,
         )
 
-        current_y += (
-            bbox[3] -
-            bbox[1] +
-            line_gap
-        )
+        if len(lines) <= 4:
+            return font, lines
 
-    return current_y
-
-
-# ============================================================
-# SCENE IMAGE
-# ============================================================
-
-def create_scene_image(
-    base_image,
-    title,
-    county,
-    scene_index,
-    scene_count,
-    output_path,
-):
-    image = base_image.copy()
-
-    draw = ImageDraw.Draw(
-        image
-    )
-
-    top_height = 330
-
-    draw.rectangle(
-        (
-            0,
-            0,
-            WIDTH,
-            top_height,
-        ),
-        fill=(0, 0, 0),
-    )
-
-    brand_font = get_font(
-        42,
-        bold=True,
-    )
-
-    draw.text(
-        (
-            55,
-            45,
-        ),
-        "RIFT VALLEY WATCH",
-        font=brand_font,
-        fill=(255, 255, 255),
-    )
-
-    county_font = get_font(
+    font = get_font(
         30,
         bold=True,
     )
 
-    draw.text(
-        (
-            55,
-            112,
-        ),
-        county.upper(),
-        font=county_font,
-        fill=(225, 225, 225),
+    lines = wrap_text(
+        draw,
+        title,
+        font,
+        max_width,
     )
 
-    title_font = get_font(
-        45,
+    return font, lines[:4]
+
+
+# ============================================================
+# CREATE STATIC OVERLAY
+# ============================================================
+
+def create_overlay(county, title):
+    log("CREATING STATIC NEWS OVERLAY")
+
+    image = Image.new(
+        "RGBA",
+        (WIDTH, HEIGHT),
+        (0, 0, 0, 0),
+    )
+
+    draw = ImageDraw.Draw(image)
+
+    # --------------------------------------------------------
+    # TOP NEWS PANEL
+    # --------------------------------------------------------
+
+    top_height = 405
+
+    draw.rectangle(
+        [
+            0,
+            0,
+            WIDTH,
+            top_height,
+        ],
+        fill=(0, 0, 0, 215),
+    )
+
+    # Small accent line
+    draw.rectangle(
+        [
+            0,
+            0,
+            WIDTH,
+            8,
+        ],
+        fill=(255, 255, 255, 255),
+    )
+
+    # Brand
+    brand_font = get_font(
+        34,
         bold=True,
     )
 
-    draw_wrapped_text(
-        draw,
-        title,
-        55,
-        165,
-        title_font,
-        WIDTH - 110,
-        line_gap=7,
+    draw.text(
+        (55, 42),
+        "RIFT VALLEY WATCH",
+        font=brand_font,
+        fill=(255, 255, 255, 255),
     )
 
-    bottom_height = 210
-
-    draw.rectangle(
-        (
-            0,
-            HEIGHT - bottom_height,
-            WIDTH,
-            HEIGHT,
-        ),
-        fill=(0, 0, 0),
-    )
-
-    footer_font = get_font(
+    # County
+    county_font = get_font(
         28,
         bold=True,
     )
 
+    county_text = str(county).upper()
+
     draw.text(
-        (
-            55,
-            HEIGHT - 165,
-        ),
-        "RIFT VALLEY • KENYA",
-        font=footer_font,
-        fill=(230, 230, 230),
+        (55, 98),
+        county_text,
+        font=county_font,
+        fill=(235, 235, 235, 255),
     )
 
-    scene_font = get_font(
-        24,
+    # Divider
+    draw.rectangle(
+        [
+            55,
+            145,
+            WIDTH - 55,
+            148,
+        ],
+        fill=(255, 255, 255, 110),
+    )
+
+    # Headline
+    title = clean_title(title)
+
+    # Prevent extreme headline length
+    if len(title) > 180:
+        title = title[:177].rstrip() + "..."
+
+    headline_font, lines = fit_headline(
+        draw,
+        title,
+    )
+
+    y = 175
+
+    for line in lines:
+        draw.text(
+            (55, y),
+            line,
+            font=headline_font,
+            fill=(255, 255, 255, 255),
+        )
+
+        bbox = draw.textbbox(
+            (55, y),
+            line,
+            font=headline_font,
+        )
+
+        line_height = bbox[3] - bbox[1]
+
+        y += line_height + 8
+
+    # --------------------------------------------------------
+    # BOTTOM PANEL
+    # --------------------------------------------------------
+
+    bottom_height = 210
+    bottom_y = HEIGHT - bottom_height
+
+    draw.rectangle(
+        [
+            0,
+            bottom_y,
+            WIDTH,
+            HEIGHT,
+        ],
+        fill=(0, 0, 0, 205),
+    )
+
+    footer_font = get_font(
+        27,
         bold=True,
     )
 
-    scene_text = (
-        f"{scene_index}/{scene_count}"
-    )
-
-    bbox = draw.textbbox(
-        (
-            0,
-            0,
-        ),
-        scene_text,
-        font=scene_font,
-    )
-
     draw.text(
-        (
-            WIDTH -
-            55 -
-            (
-                bbox[2] -
-                bbox[0]
-            ),
-            HEIGHT - 75,
-        ),
-        scene_text,
-        font=scene_font,
-        fill=(200, 200, 200),
+        (55, bottom_y + 70),
+        "RIFT VALLEY • KENYA",
+        font=footer_font,
+        fill=(255, 255, 255, 245),
     )
+
+    # Small live-style divider
+    draw.rectangle(
+        [
+            55,
+            bottom_y + 125,
+            340,
+            bottom_y + 129,
+        ],
+        fill=(255, 255, 255, 150),
+    )
+
+    save_path = OVERLAY_FILE
 
     image.save(
-        output_path,
+        save_path,
+        "PNG",
+    )
+
+    if not save_path.exists():
+        raise RuntimeError(
+            "Overlay image was not created."
+        )
+
+    log(f"OVERLAY: {save_path}")
+
+    return save_path
+
+
+# ============================================================
+# IMAGE PREPARATION
+# ============================================================
+
+def prepare_source_image(source_path):
+    if not source_path.exists():
+        raise RuntimeError(
+            f"Story image not found: {source_path}"
+        )
+
+    try:
+        image = Image.open(source_path).convert("RGB")
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not open story image: {exc}"
+        )
+
+    if image.width < 200 or image.height < 200:
+        raise RuntimeError(
+            "Story image is too small."
+        )
+
+    log(
+        f"STORY IMAGE: "
+        f"{image.width}x{image.height}"
+    )
+
+    # Cover 1080x1920
+    source_ratio = image.width / image.height
+    target_ratio = WIDTH / HEIGHT
+
+    if source_ratio > target_ratio:
+        # Source too wide
+        new_height = HEIGHT
+        new_width = int(
+            new_height * source_ratio
+        )
+    else:
+        # Source too tall
+        new_width = WIDTH
+        new_height = int(
+            new_width / source_ratio
+        )
+
+    image = image.resize(
+        (new_width, new_height),
+        Image.Resampling.LANCZOS,
+    )
+
+    left = max(
+        0,
+        (new_width - WIDTH) // 2,
+    )
+
+    top = max(
+        0,
+        (new_height - HEIGHT) // 2,
+    )
+
+    image = image.crop(
+        (
+            left,
+            top,
+            left + WIDTH,
+            top + HEIGHT,
+        )
+    )
+
+    prepared = WORK_DIR / "prepared_image.jpg"
+
+    image.save(
+        prepared,
         "JPEG",
-        quality=94,
-        optimize=True,
+        quality=95,
     )
+
+    return prepared
 
 
 # ============================================================
-# AUDIO
+# CREATE CONTINUOUS MOTION VIDEO
 # ============================================================
 
-def generate_audio(narration):
-    narration = remove_source_language(
-        narration
+def create_motion_video(
+    image_path,
+    overlay_path,
+    duration,
+):
+    log("CREATING CONTINUOUS KEN BURNS VIDEO")
+    log("IMAGE COUNT: 1")
+    log("SLIDE COUNTER: REMOVED")
+    log("CONTINUOUS MOTION: ENABLED")
+
+    # Continuous, very slow zoom.
+    #
+    # The background image moves continuously.
+    # The text overlay remains completely stable.
+    #
+    # This avoids the old:
+    #   Scene 1
+    #   Scene 2
+    #   Scene 3
+    #   Scene 4
+    #   Scene 5
+    #
+    # slideshow appearance.
+
+    zoom_expression = (
+        "min("
+        "1+on*0.00012,"
+        "1.11"
+        ")"
     )
 
-    narration = clean_text(
-        narration
+    x_expression = (
+        "iw/2-(iw/zoom/2)"
     )
 
-    if not narration:
+    y_expression = (
+        "ih/2-(ih/zoom/2)"
+    )
+
+    filter_complex = (
+        "[0:v]"
+        "scale="
+        f"{WIDTH}:{HEIGHT}:"
+        "force_original_aspect_ratio=increase,"
+        f"crop={WIDTH}:{HEIGHT},"
+        "zoompan="
+        f"z='{zoom_expression}':"
+        f"x='{x_expression}':"
+        f"y='{y_expression}':"
+        "d=1:"
+        f"s={WIDTH}x{HEIGHT}:"
+        f"fps={FPS}"
+        "[bg];"
+        "[bg][1:v]"
+        "overlay="
+        "0:0:"
+        "format=auto"
+        "[v]"
+    )
+
+    command = [
+        "ffmpeg",
+        "-y",
+
+        "-loop",
+        "1",
+        "-i",
+        str(image_path),
+
+        "-loop",
+        "1",
+        "-i",
+        str(overlay_path),
+
+        "-filter_complex",
+        filter_complex,
+
+        "-map",
+        "[v]",
+
+        "-t",
+        str(duration),
+
+        "-r",
+        str(FPS),
+
+        "-c:v",
+        "libx264",
+
+        "-preset",
+        "medium",
+
+        "-crf",
+        "20",
+
+        "-pix_fmt",
+        "yuv420p",
+
+        "-movflags",
+        "+faststart",
+
+        str(TEMP_VIDEO),
+    ]
+
+    log("RUNNING FFMPEG MOTION GENERATION")
+
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        print(result.stdout, flush=True)
+        print(result.stderr, flush=True)
+
         raise RuntimeError(
-            "Narration is empty."
+            "FFmpeg failed while creating "
+            "continuous motion video."
         )
 
-    if len(narration.split()) < 50:
+    if not TEMP_VIDEO.exists():
         raise RuntimeError(
-            "Narration is too short."
+            "Temporary motion video was not created."
         )
 
-    AUDIO_DIR.mkdir(
+    if TEMP_VIDEO.stat().st_size < 100000:
+        raise RuntimeError(
+            "Temporary motion video is unexpectedly small."
+        )
+
+    log(
+        f"MOTION VIDEO CREATED: "
+        f"{TEMP_VIDEO.stat().st_size:,} bytes"
+    )
+
+    return TEMP_VIDEO
+
+
+# ============================================================
+# ADD AUDIO
+# ============================================================
+
+def combine_audio(video_path, audio_path):
+    log("ADDING NARRATION AUDIO")
+
+    OUTPUT_DIR.mkdir(
         parents=True,
         exist_ok=True,
     )
 
-    if AUDIO_FILE.exists():
-        AUDIO_FILE.unlink()
-
-    log("")
-    log(
-        "GENERATING NARRATION"
-    )
-
-    try:
-        tts = gTTS(
-            text=narration,
-            lang="en",
-            slow=False,
-        )
-
-        tts.save(
-            str(AUDIO_FILE)
-        )
-
-    except Exception as exc:
-        raise RuntimeError(
-            f"gTTS narration failed: {exc}"
-        )
-
-    if not AUDIO_FILE.exists():
-        raise RuntimeError(
-            "Narration MP3 was not created."
-        )
-
-    if AUDIO_FILE.stat().st_size < 1000:
-        raise RuntimeError(
-            "Narration MP3 is suspiciously small."
-        )
-
-    log(
-        f"AUDIO: {AUDIO_FILE}"
-    )
-
-    return AUDIO_FILE
-
-
-# ============================================================
-# DURATION
-# ============================================================
-
-def get_media_duration(path):
-    result = subprocess.run(
-        [
-            "ffprobe",
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            str(path),
-        ],
-        capture_output=True,
-        text=True,
-    )
-
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"Could not determine duration of {path}: "
-            f"{result.stderr}"
-        )
-
-    try:
-        return float(
-            result.stdout.strip()
-        )
-
-    except Exception:
-        raise RuntimeError(
-            f"Invalid duration returned for {path}"
-        )
-
-
-# ============================================================
-# SILENT VIDEO
-# ============================================================
-
-def create_silent_video(
-    scene_files,
-    duration,
-    output_path,
-):
-    output_path = Path(
-        output_path
-    )
-
-    if output_path.exists():
-        output_path.unlink()
-
-    if not scene_files:
-        raise RuntimeError(
-            "No scene images were created."
-        )
-
-    scene_duration = (
-        duration /
-        len(scene_files)
-    )
-
-    concat_file = (
-        WORK_DIR /
-        "scenes.txt"
-    )
-
-    with concat_file.open(
-        "w",
-        encoding="utf-8",
-    ) as file:
-        for scene in scene_files:
-            scene_path = (
-                Path(scene)
-                .resolve()
-            )
-
-            safe_path = str(
-                scene_path
-            ).replace(
-                "'",
-                "'\\''",
-            )
-
-            file.write(
-                f"file '{safe_path}'\n"
-            )
-
-            file.write(
-                f"duration {scene_duration:.6f}\n"
-            )
-
-        last_scene = (
-            Path(
-                scene_files[-1]
-            ).resolve()
-        )
-
-        safe_last = str(
-            last_scene
-        ).replace(
-            "'",
-            "'\\''",
-        )
-
-        file.write(
-            f"file '{safe_last}'\n"
-        )
-
-    log("")
-    log(
-        "CREATING VIDEO"
-    )
-
     command = [
         "ffmpeg",
         "-y",
-        "-f",
-        "concat",
-        "-safe",
-        "0",
-        "-i",
-        str(concat_file),
-        "-vf",
-        (
-            "scale=1080:1920:"
-            "force_original_aspect_ratio=decrease,"
-            "pad=1080:1920:"
-            "(ow-iw)/2:(oh-ih)/2"
-        ),
-        "-r",
-        "30",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-crf",
-        "21",
-        "-pix_fmt",
-        "yuv420p",
-        "-an",
-        "-movflags",
-        "+faststart",
-        str(output_path),
-    ]
 
-    result = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-    )
-
-    if result.returncode != 0:
-        log(result.stdout)
-        log(result.stderr)
-
-        raise RuntimeError(
-            "FFmpeg failed while creating silent video."
-        )
-
-    if not output_path.exists():
-        raise RuntimeError(
-            "Silent video was not created."
-        )
-
-    return output_path
-
-
-# ============================================================
-# COMBINE AUDIO
-# ============================================================
-
-def combine_video_audio(
-    video_path,
-    audio_path,
-    output_path,
-):
-    output_path = Path(
-        output_path
-    )
-
-    if output_path.exists():
-        output_path.unlink()
-
-    log("")
-    log(
-        "COMBINING VIDEO + NARRATION"
-    )
-
-    command = [
-        "ffmpeg",
-        "-y",
         "-i",
         str(video_path),
+
         "-i",
         str(audio_path),
+
         "-map",
         "0:v:0",
+
         "-map",
         "1:a:0",
+
         "-c:v",
         "copy",
+
         "-c:a",
         "aac",
+
         "-b:a",
         "128k",
+
+        "-ar",
+        "44100",
+
+        "-ac",
+        "2",
+
         "-shortest",
+
         "-movflags",
         "+faststart",
-        str(output_path),
+
+        str(OUTPUT_FILE),
     ]
 
     result = subprocess.run(
@@ -1113,408 +1065,151 @@ def combine_video_audio(
     )
 
     if result.returncode != 0:
-        log(result.stdout)
-        log(result.stderr)
+        print(result.stdout, flush=True)
+        print(result.stderr, flush=True)
 
         raise RuntimeError(
-            "FFmpeg failed while combining video and audio."
+            "FFmpeg failed while adding narration."
         )
 
-    if not output_path.exists():
+    if not OUTPUT_FILE.exists():
         raise RuntimeError(
             "Final MP4 was not created."
         )
 
-    return output_path
+    if OUTPUT_FILE.stat().st_size < 100000:
+        raise RuntimeError(
+            "Final MP4 is unexpectedly small."
+        )
+
+    return OUTPUT_FILE
 
 
 # ============================================================
-# FINAL QC
+# FINAL QUALITY CONTROL
 # ============================================================
 
-def verify_video(path):
-    path = Path(path)
+def verify_final_video(path):
+    log("")
+    log("=" * 70)
+    log("FINAL MP4 QUALITY CONTROL")
+    log("=" * 70)
 
     if not path.exists():
         raise RuntimeError(
-            f"Final MP4 does not exist: {path}"
+            "Final MP4 does not exist."
         )
 
     size = path.stat().st_size
 
     if size < 100000:
         raise RuntimeError(
-            "Final MP4 is suspiciously small."
+            f"Final MP4 too small: {size} bytes"
         )
 
-    probe = subprocess.run(
-        [
-            "ffprobe",
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration,size",
-            "-show_entries",
-            "stream=codec_type,codec_name,width,height,r_frame_rate",
-            "-of",
-            "json",
-            str(path),
-        ],
+    duration = get_media_duration(path)
+
+    # Probe dimensions
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height,codec_name",
+        "-of",
+        "default=noprint_wrappers=1",
+        str(path),
+    ]
+
+    result = subprocess.run(
+        command,
         capture_output=True,
         text=True,
     )
 
-    if probe.returncode != 0:
+    if result.returncode != 0:
         raise RuntimeError(
-            "Final MP4 failed FFprobe validation."
+            "Could not inspect final MP4."
         )
 
-    try:
-        info = json.loads(
-            probe.stdout
-        )
-    except Exception:
+    probe = result.stdout.lower()
+
+    if "width=1080" not in probe:
         raise RuntimeError(
-            "Could not parse FFprobe output."
+            "Final MP4 width is not 1080."
         )
 
-    streams = info.get(
-        "streams",
-        [],
-    )
+    if "height=1920" not in probe:
+        raise RuntimeError(
+            "Final MP4 height is not 1920."
+        )
 
-    video_streams = [
-        stream
-        for stream in streams
-        if stream.get("codec_type") == "video"
+    # Check audio stream
+    command_audio = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "a:0",
+        "-show_entries",
+        "stream=codec_name",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(path),
     ]
 
-    audio_streams = [
-        stream
-        for stream in streams
-        if stream.get("codec_type") == "audio"
-    ]
-
-    if not video_streams:
-        raise RuntimeError(
-            "Final MP4 has no video stream."
-        )
-
-    if not audio_streams:
-        raise RuntimeError(
-            "Final MP4 has no audio stream."
-        )
-
-    video = video_streams[0]
-
-    if video.get("width") != 1080:
-        raise RuntimeError(
-            f"Video width is {video.get('width')}, expected 1080."
-        )
-
-    if video.get("height") != 1920:
-        raise RuntimeError(
-            f"Video height is {video.get('height')}, expected 1920."
-        )
-
-    duration = float(
-        info.get(
-            "format",
-            {},
-        ).get(
-            "duration",
-            0,
-        )
-        or 0
+    audio_result = subprocess.run(
+        command_audio,
+        capture_output=True,
+        text=True,
     )
 
-    if duration < 5:
+    audio_codec = (
+        audio_result.stdout.strip()
+        if audio_result.returncode == 0
+        else ""
+    )
+
+    if not audio_codec:
         raise RuntimeError(
-            "Final video is shorter than 5 seconds."
+            "Final MP4 does not contain an audio stream."
         )
 
-    log("")
+    log(f"FINAL FILE: {path}")
+    log(f"SIZE: {size:,} bytes")
+    log(f"DURATION: {duration:.2f} seconds")
+    log("VIDEO: 1080x1920")
+    log("AUDIO: PRESENT")
+    log("IMAGE COUNT: 1")
+    log("MOTION: CONTINUOUS")
+    log("SLIDE COUNTER: REMOVED")
+    log("SOURCE/PUBLISHER ON SCREEN: NONE")
     log("=" * 70)
-    log("FINAL VIDEO QC")
+    log("FINAL MP4 QC PASSED")
     log("=" * 70)
-    log(
-        f"FILE: {path}"
-    )
-    log(
-        f"SIZE: {size:,} bytes"
-    )
-    log(
-        f"DURATION: {duration:.2f}s"
-    )
-    log(
-        "VIDEO: 1080x1920"
-    )
-    log(
-        "AUDIO: PRESENT"
-    )
-    log(
-        "FINAL MP4 QC PASSED"
-    )
+
+    return True
 
 
 # ============================================================
-# CLEAN WORK
+# CLEAN WORK FILES
 # ============================================================
 
-def clean_work_files():
-    if not WORK_DIR.exists():
-        return
-
-    for item in WORK_DIR.iterdir():
+def cleanup_work_files():
+    for path in [
+        TEMP_VIDEO,
+        OVERLAY_FILE,
+        WORK_DIR / "prepared_image.jpg",
+    ]:
         try:
-            if item.is_file():
-                item.unlink()
-            elif item.is_dir():
-                shutil.rmtree(item)
-        except Exception:
-            pass
-
-
-# ============================================================
-# GENERATE
-# ============================================================
-
-def generate_video(
-    story,
-    script=None,
-):
-    if script is None:
-        script = {}
-
-    prepare_directories()
-    clean_work_files()
-
-    log("")
-    log("=" * 70)
-    log("RIFT VALLEY WATCH VIDEO GENERATOR")
-    log("=" * 70)
-    log(
-        f"GENERATOR VERSION: {GENERATOR_VERSION}"
-    )
-
-    title = get_story_title(
-        story
-    )
-
-    county = get_story_county(
-        story
-    )
-
-    narration = get_narration(
-        story,
-        script,
-    )
-
-    if not title:
-        raise RuntimeError(
-            "Selected story has no title."
-        )
-
-    if not narration:
-        raise RuntimeError(
-            "Selected story has no narration."
-        )
-
-    log("")
-    log(
-        "SELECTED STORY"
-    )
-    log(
-        f"TITLE : {title}"
-    )
-    log(
-        f"COUNTY: {county}"
-    )
-
-    # --------------------------------------------------------
-    # IMAGE
-    # --------------------------------------------------------
-
-    image_path = resolve_image(
-        story,
-        script,
-    )
-
-    if not validate_image_file(
-        image_path
-    ):
-        raise RuntimeError(
-            f"Resolved image is invalid: {image_path}"
-        )
-
-    log(
-        f"ARTICLE IMAGE: {image_path}"
-    )
-
-    base_image = prepare_base_image(
-        image_path
-    )
-
-    # --------------------------------------------------------
-    # AUDIO
-    # --------------------------------------------------------
-
-    audio_path = generate_audio(
-        narration
-    )
-
-    audio_duration = get_media_duration(
-        audio_path
-    )
-
-    if audio_duration < 5:
-        raise RuntimeError(
-            "Narration audio is too short."
-        )
-
-    target_duration = min(
-        max(audio_duration, 15.0),
-        60.0,
-    )
-
-    # --------------------------------------------------------
-    # SCENES
-    # --------------------------------------------------------
-
-    scene_count = 5
-
-    scene_dir = (
-        WORK_DIR /
-        "scenes"
-    )
-
-    scene_dir.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    scene_files = []
-
-    for index in range(
-        scene_count
-    ):
-        scene_path = (
-            scene_dir /
-            f"scene_{index + 1:02d}.jpg"
-        )
-
-        zoom_factor = (
-            1.0 +
-            (0.02 * index)
-        )
-
-        scene_image = base_image.copy()
-
-        if zoom_factor > 1.0:
-            new_width = int(
-                WIDTH *
-                zoom_factor
+            if path.exists():
+                path.unlink()
+        except Exception as exc:
+            log(
+                f"WARNING: Could not remove {path}: {exc}"
             )
-
-            new_height = int(
-                HEIGHT *
-                zoom_factor
-            )
-
-            scene_image = scene_image.resize(
-                (
-                    new_width,
-                    new_height,
-                ),
-                Image.Resampling.LANCZOS,
-            )
-
-            left = (
-                new_width -
-                WIDTH
-            ) // 2
-
-            top = (
-                new_height -
-                HEIGHT
-            ) // 2
-
-            scene_image = scene_image.crop(
-                (
-                    left,
-                    top,
-                    left + WIDTH,
-                    top + HEIGHT,
-                )
-            )
-
-        create_scene_image(
-            scene_image,
-            title,
-            county,
-            index + 1,
-            scene_count,
-            scene_path,
-        )
-
-        if not validate_image_file(
-            scene_path
-        ):
-            raise RuntimeError(
-                f"Scene image failed validation: {scene_path}"
-            )
-
-        scene_files.append(
-            scene_path
-        )
-
-    # --------------------------------------------------------
-    # SILENT VIDEO
-    # --------------------------------------------------------
-
-    silent_video = (
-        WORK_DIR /
-        "silent.mp4"
-    )
-
-    create_silent_video(
-        scene_files,
-        target_duration,
-        silent_video,
-    )
-
-    # --------------------------------------------------------
-    # FINAL VIDEO
-    # --------------------------------------------------------
-
-    if OUTPUT_FILE.exists():
-        OUTPUT_FILE.unlink()
-
-    combine_video_audio(
-        silent_video,
-        audio_path,
-        OUTPUT_FILE,
-    )
-
-    # --------------------------------------------------------
-    # QC
-    # --------------------------------------------------------
-
-    verify_video(
-        OUTPUT_FILE
-    )
-
-    log("")
-    log("=" * 70)
-    log(
-        "RIFT VALLEY WATCH VIDEO GENERATED SUCCESSFULLY"
-    )
-    log("=" * 70)
-    log(
-        f"OUTPUT: {OUTPUT_FILE}"
-    )
-
-    return OUTPUT_FILE
 
 
 # ============================================================
@@ -1522,56 +1217,136 @@ def generate_video(
 # ============================================================
 
 def main():
-    prepare_directories()
-
     log("")
     log("=" * 70)
     log("STARTING RIFT VALLEY WATCH VIDEO GENERATOR")
+    log("VERSION: RVW_VIDEO_V12_CONTINUOUS")
     log("=" * 70)
 
-    if not STORY_FILE.exists():
-        raise RuntimeError(
-            f"Missing selected story: {STORY_FILE}"
-        )
+    ensure_directories()
 
-    story = load_json(
-        STORY_FILE
+    # --------------------------------------------------------
+    # LOAD STORY
+    # --------------------------------------------------------
+
+    story = load_story()
+    script = load_script()
+
+    county = story.get(
+        "county",
+        "Rift Valley",
     )
 
-    if SCRIPT_FILE.exists():
-        script = load_json(
-            SCRIPT_FILE
+    title = clean_title(
+        story.get(
+            "title",
+            "Latest Rift Valley Update",
         )
-    else:
-        script = {}
+    )
 
-    generate_video(
+    log(f"COUNTY: {county}")
+    log(f"HEADLINE: {title}")
+
+    # --------------------------------------------------------
+    # NARRATION
+    # --------------------------------------------------------
+
+    narration = get_narration(
         story,
         script,
     )
 
-    if not OUTPUT_FILE.exists():
-        raise RuntimeError(
-            "Generator finished but final MP4 does not exist."
-        )
+    log("")
+    log("NARRATION PREVIEW:")
+    log(narration[:500])
+
+    # --------------------------------------------------------
+    # AUDIO
+    # --------------------------------------------------------
+
+    audio_path = generate_audio(
+        narration,
+    )
+
+    duration = calculate_duration(
+        audio_path,
+    )
+
+    log(
+        f"TARGET VIDEO DURATION: "
+        f"{duration:.2f} seconds"
+    )
+
+    # --------------------------------------------------------
+    # IMAGE
+    # --------------------------------------------------------
+
+    image_path = prepare_source_image(
+        IMAGE_FILE,
+    )
+
+    log(
+        f"ONE ARTICLE IMAGE: {image_path}"
+    )
+
+    # --------------------------------------------------------
+    # OVERLAY
+    # --------------------------------------------------------
+
+    overlay_path = create_overlay(
+        county,
+        title,
+    )
+
+    # --------------------------------------------------------
+    # CONTINUOUS MOTION
+    # --------------------------------------------------------
+
+    motion_video = create_motion_video(
+        image_path,
+        overlay_path,
+        duration,
+    )
+
+    # --------------------------------------------------------
+    # AUDIO + VIDEO
+    # --------------------------------------------------------
+
+    final_video = combine_audio(
+        motion_video,
+        audio_path,
+    )
+
+    # --------------------------------------------------------
+    # QC
+    # --------------------------------------------------------
+
+    verify_final_video(
+        final_video,
+    )
+
+    # --------------------------------------------------------
+    # CLEANUP
+    # --------------------------------------------------------
+
+    cleanup_work_files()
 
     log("")
-    log(
-        f"FINAL MP4: {OUTPUT_FILE}"
-    )
+    log("=" * 70)
+    log("RIFT VALLEY WATCH VIDEO GENERATION COMPLETE")
+    log("=" * 70)
+    log(f"FINAL MP4: {final_video}")
+    log("=" * 70)
 
 
 if __name__ == "__main__":
     try:
         main()
-
     except Exception as exc:
         log("")
         log("=" * 70)
-        log("RIFT VALLEY WATCH FAILED")
+        log("RIFT VALLEY WATCH VIDEO GENERATION FAILED")
         log("=" * 70)
-        log(
-            f"ERROR: {exc}"
-        )
+        log(str(exc))
         log("=" * 70)
-        raise
+        sys.exit(1)
