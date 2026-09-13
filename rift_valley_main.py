@@ -2,26 +2,7 @@
 # RIFT VALLEY WATCH
 # MAIN PIPELINE
 #
-# VERSION: RIFT_VALLEY_WATCH_MAIN_REBUILT_V3
-#
-# PIPELINE:
-#   1. Run news engine
-#   2. Load selected story
-#   3. Validate story
-#   4. Run video generator
-#   5. Verify final MP4
-#
-# OUTPUT:
-#   output/rift_valley_watch_reel.mp4
-#
-# RULES:
-#   - ONE REAL STORY
-#   - ONE COUNTY PER REEL
-#   - REAL ARTICLE IMAGE REQUIRED
-#   - 1080x1920
-#   - NO SOURCE/PUBLISHER DISPLAY
-#   - NO SOURCE/PUBLISHER IN NARRATION
-#   - NO GOOGLE NEWS BOILERPLATE
+# VERSION: RIFT_VALLEY_WATCH_MAIN_REBUILT_V4
 # ============================================================
 
 import json
@@ -32,7 +13,7 @@ from pathlib import Path
 
 
 # ============================================================
-# PATH CONFIGURATION
+# PATHS
 # ============================================================
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -45,7 +26,7 @@ AUDIO_DIR = BASE_DIR / "audio"
 
 NEWS_ENGINE = BASE_DIR / "scripts" / "news_engine.py"
 
-VIDEO_GENERATOR_OPTIONS = [
+VIDEO_GENERATORS = [
     BASE_DIR / "rift_valley_video_generator.py",
     BASE_DIR / "video_generator.py",
 ]
@@ -59,7 +40,7 @@ LOCAL_IMAGE = SOURCE_DIR / "story_image.jpg"
 
 
 # ============================================================
-# TARGET COUNTIES
+# COUNTIES
 # ============================================================
 
 COUNTIES = [
@@ -86,20 +67,19 @@ def log(message):
 
 
 # ============================================================
-# DIRECTORY PREPARATION
+# DIRECTORIES
 # ============================================================
 
 def prepare_directories():
 
-    directories = [
+    for directory in [
         DATA_DIR,
         ASSETS_DIR,
         SOURCE_DIR,
         OUTPUT_DIR,
         AUDIO_DIR,
-    ]
+    ]:
 
-    for directory in directories:
         directory.mkdir(
             parents=True,
             exist_ok=True,
@@ -107,7 +87,7 @@ def prepare_directories():
 
 
 # ============================================================
-# JSON READER
+# JSON
 # ============================================================
 
 def load_json(path):
@@ -124,20 +104,306 @@ def load_json(path):
             encoding="utf-8",
         ) as handle:
 
-            value = json.load(handle)
+            data = json.load(handle)
 
-        if isinstance(value, dict):
-            return value
-
-        return {}
+        return data
 
     except Exception as exc:
 
         log(
-            f"JSON read warning: {path} -> {exc}"
+            f"Could not read {path}: {exc}"
         )
 
         return {}
+
+
+# ============================================================
+# TEXT
+# ============================================================
+
+def clean_text(value):
+
+    if value is None:
+        return ""
+
+    if isinstance(value, (dict, list)):
+        return ""
+
+    return " ".join(
+        str(value)
+        .replace("\n", " ")
+        .replace("\r", " ")
+        .split()
+    ).strip()
+
+
+# ============================================================
+# RECURSIVE SEARCH
+# ============================================================
+
+def recursive_find(
+    data,
+    keys,
+):
+
+    if isinstance(data, dict):
+
+        for key in keys:
+
+            if key in data:
+
+                value = clean_text(
+                    data.get(key)
+                )
+
+                if value:
+                    return value
+
+        for value in data.values():
+
+            found = recursive_find(
+                value,
+                keys,
+            )
+
+            if found:
+                return found
+
+    elif isinstance(data, list):
+
+        for item in data:
+
+            found = recursive_find(
+                item,
+                keys,
+            )
+
+            if found:
+                return found
+
+    return ""
+
+
+# ============================================================
+# TITLE
+# ============================================================
+
+def get_title(story):
+
+    keys = [
+        "title",
+        "headline",
+        "article_title",
+        "articleTitle",
+        "story_title",
+        "storyTitle",
+        "news_title",
+        "newsTitle",
+        "heading",
+        "subject",
+        "name",
+    ]
+
+    return recursive_find(
+        story,
+        keys,
+    )
+
+
+# ============================================================
+# SUMMARY
+# ============================================================
+
+def get_summary(story):
+
+    keys = [
+        "summary",
+        "description",
+        "content",
+        "body",
+        "text",
+        "article_text",
+        "articleText",
+        "story",
+        "details",
+    ]
+
+    return recursive_find(
+        story,
+        keys,
+    )
+
+
+# ============================================================
+# COUNTY
+# ============================================================
+
+def get_county(story):
+
+    keys = [
+        "county",
+        "county_name",
+        "countyName",
+        "location",
+        "region",
+    ]
+
+    county = recursive_find(
+        story,
+        keys,
+    )
+
+    if county:
+
+        for allowed in COUNTIES:
+
+            if allowed.lower() in county.lower():
+
+                return allowed
+
+    combined = json.dumps(
+        story,
+        ensure_ascii=False,
+    ).lower()
+
+    for allowed in COUNTIES:
+
+        if allowed.lower() in combined:
+
+            return allowed
+
+    return ""
+
+
+# ============================================================
+# IMAGE URLS
+# ============================================================
+
+def get_image_urls(story):
+
+    keys = [
+        "image",
+        "image_url",
+        "imageUrl",
+        "thumbnail",
+        "thumbnail_url",
+        "thumbnailUrl",
+        "photo",
+        "photo_url",
+        "photoUrl",
+        "article_image",
+        "article_image_url",
+        "articleImage",
+        "articleImageUrl",
+        "featured_image",
+        "featured_image_url",
+        "featuredImage",
+        "featuredImageUrl",
+        "og_image",
+        "og_image_url",
+        "image_src",
+        "imageSource",
+    ]
+
+    urls = []
+
+    def scan(data):
+
+        if isinstance(data, dict):
+
+            for key in keys:
+
+                if key not in data:
+                    continue
+
+                value = data[key]
+
+                if isinstance(
+                    value,
+                    str,
+                ):
+
+                    value = value.strip()
+
+                    if value:
+                        urls.append(value)
+
+                elif isinstance(
+                    value,
+                    dict,
+                ):
+
+                    for nested_key in [
+                        "url",
+                        "src",
+                        "href",
+                    ]:
+
+                        nested = value.get(
+                            nested_key
+                        )
+
+                        if isinstance(
+                            nested,
+                            str,
+                        ):
+
+                            nested = nested.strip()
+
+                            if nested:
+                                urls.append(
+                                    nested
+                                )
+
+            for value in data.values():
+
+                scan(value)
+
+        elif isinstance(data, list):
+
+            for item in data:
+                scan(item)
+
+        elif isinstance(data, str):
+
+            value = data.strip()
+
+            if (
+                value.startswith("http://")
+                or value.startswith("https://")
+            ):
+
+                lower = value.lower()
+
+                image_extensions = [
+                    ".jpg",
+                    ".jpeg",
+                    ".png",
+                    ".webp",
+                    ".gif",
+                ]
+
+                if any(
+                    ext in lower
+                    for ext in image_extensions
+                ):
+
+                    urls.append(value)
+
+    scan(story)
+
+    result = []
+    seen = set()
+
+    for url in urls:
+
+        if url in seen:
+            continue
+
+        seen.add(url)
+        result.append(url)
+
+    return result
 
 
 # ============================================================
@@ -158,248 +424,19 @@ def load_story():
 
         return selected
 
-    fallback = load_json(
+    story = load_json(
         STORY_FILE
     )
 
-    if fallback:
+    if story:
 
         log(
             "Story file: data/story.json"
         )
 
-        return fallback
+        return story
 
     return {}
-
-
-# ============================================================
-# TEXT HELPERS
-# ============================================================
-
-def clean_text(value):
-
-    if value is None:
-        return ""
-
-    text = str(value)
-
-    text = text.replace(
-        "\n",
-        " ",
-    )
-
-    text = text.replace(
-        "\r",
-        " ",
-    )
-
-    return " ".join(
-        text.split()
-    ).strip()
-
-
-def get_title(story):
-
-    for key in [
-        "title",
-        "headline",
-        "name",
-    ]:
-
-        value = clean_text(
-            story.get(key)
-        )
-
-        if value:
-            return value
-
-    return ""
-
-
-def get_summary(story):
-
-    for key in [
-        "summary",
-        "description",
-        "content",
-        "body",
-        "text",
-    ]:
-
-        value = clean_text(
-            story.get(key)
-        )
-
-        if value:
-            return value
-
-    return ""
-
-
-def get_county(story):
-
-    county = clean_text(
-        story.get("county")
-    )
-
-    if county:
-        return county
-
-    combined = (
-        get_title(story)
-        + " "
-        + get_summary(story)
-    ).lower()
-
-    for name in COUNTIES:
-
-        if name.lower() in combined:
-            return name
-
-    return ""
-
-
-# ============================================================
-# IMAGE DISCOVERY
-# ============================================================
-
-def get_image_urls(story):
-
-    urls = []
-
-    direct_keys = [
-        "image",
-        "image_url",
-        "imageUrl",
-        "thumbnail",
-        "thumbnail_url",
-        "photo",
-        "photo_url",
-        "article_image",
-        "article_image_url",
-        "featured_image",
-        "featured_image_url",
-        "og_image",
-        "og_image_url",
-        "image_src",
-        "imageSource",
-    ]
-
-    for key in direct_keys:
-
-        value = story.get(key)
-
-        if isinstance(
-            value,
-            str,
-        ):
-
-            value = value.strip()
-
-            if value:
-                urls.append(value)
-
-        elif isinstance(
-            value,
-            dict,
-        ):
-
-            for nested_key in [
-                "url",
-                "src",
-                "image",
-                "href",
-            ]:
-
-                nested = value.get(
-                    nested_key
-                )
-
-                if isinstance(
-                    nested,
-                    str,
-                ):
-
-                    nested = nested.strip()
-
-                    if nested:
-                        urls.append(
-                            nested
-                        )
-
-    list_keys = [
-        "images",
-        "image_urls",
-        "article_images",
-        "photos",
-        "gallery",
-        "media",
-    ]
-
-    for key in list_keys:
-
-        value = story.get(key)
-
-        if not isinstance(
-            value,
-            list,
-        ):
-            continue
-
-        for item in value:
-
-            if isinstance(
-                item,
-                str,
-            ):
-
-                item = item.strip()
-
-                if item:
-                    urls.append(item)
-
-            elif isinstance(
-                item,
-                dict,
-            ):
-
-                for nested_key in [
-                    "url",
-                    "src",
-                    "image",
-                    "href",
-                ]:
-
-                    nested = item.get(
-                        nested_key
-                    )
-
-                    if isinstance(
-                        nested,
-                        str,
-                    ):
-
-                        nested = nested.strip()
-
-                        if nested:
-                            urls.append(
-                                nested
-                            )
-
-    # Remove duplicates.
-    result = []
-    seen = set()
-
-    for url in urls:
-
-        if url in seen:
-            continue
-
-        seen.add(url)
-        result.append(url)
-
-    return result
 
 
 # ============================================================
@@ -418,12 +455,6 @@ def validate_story(story):
         story
     )
 
-    if not title:
-
-        raise RuntimeError(
-            "Selected story has no headline."
-        )
-
     summary = get_summary(
         story
     )
@@ -432,17 +463,17 @@ def validate_story(story):
         story
     )
 
-    image_urls = get_image_urls(
+    images = get_image_urls(
         story
     )
 
-    local_image_valid = (
+    local_image = (
         LOCAL_IMAGE.exists()
         and LOCAL_IMAGE.stat().st_size > 10_000
     )
 
     # --------------------------------------------------------
-    # Reject obvious Google News boilerplate.
+    # Google News protection
     # --------------------------------------------------------
 
     combined = (
@@ -451,35 +482,64 @@ def validate_story(story):
         + summary
     ).lower()
 
-    forbidden_phrases = [
-        "google news",
-        "get the latest news",
-        "sign in to google",
+    forbidden = [
         "google news app",
-        "personalized news",
+        "sign in to google",
+        "get the latest news",
+        "google news",
     ]
 
-    for phrase in forbidden_phrases:
+    for phrase in forbidden:
 
         if phrase in combined:
 
             raise RuntimeError(
-                "Invalid Google News boilerplate "
-                "detected in story."
+                "Google News boilerplate detected "
+                "instead of a real story."
             )
 
     # --------------------------------------------------------
-    # Require real image information.
+    # Headline
     # --------------------------------------------------------
 
-    if not image_urls and not local_image_valid:
+    if not title:
+
+        # Print structure so the next failure is
+        # actually useful instead of another mystery.
+
+        log(
+            "STORY JSON DOES NOT CONTAIN A RECOGNIZED HEADLINE."
+        )
+
+        if isinstance(
+            story,
+            dict,
+        ):
+
+            log(
+                "Available top-level fields: "
+                + ", ".join(
+                    str(key)
+                    for key in story.keys()
+                )
+            )
 
         raise RuntimeError(
-            "No usable article image was found."
+            "Selected story has no headline."
         )
 
     # --------------------------------------------------------
-    # Print selected story.
+    # Image
+    # --------------------------------------------------------
+
+    if not images and not local_image:
+
+        raise RuntimeError(
+            "Selected story has no usable article image."
+        )
+
+    # --------------------------------------------------------
+    # Log
     # --------------------------------------------------------
 
     log(
@@ -496,10 +556,10 @@ def validate_story(story):
     )
 
     log(
-        f"IMAGE URLS: {len(image_urls)}"
+        f"IMAGE URLS: {len(images)}"
     )
 
-    if local_image_valid:
+    if local_image:
 
         log(
             "LOCAL ARTICLE IMAGE: AVAILABLE"
@@ -509,7 +569,7 @@ def validate_story(story):
 
 
 # ============================================================
-# COMMAND EXECUTION
+# COMMAND RUNNER
 # ============================================================
 
 def run_command(
@@ -524,11 +584,6 @@ def run_command(
 
     log(
         f"STARTING {label}"
-    )
-
-    log(
-        "COMMAND: "
-        + " ".join(command)
     )
 
     result = subprocess.run(
@@ -562,7 +617,7 @@ def run_command(
 
 
 # ============================================================
-# RUN NEWS ENGINE
+# NEWS ENGINE
 # ============================================================
 
 def run_news_engine():
@@ -570,7 +625,7 @@ def run_news_engine():
     if not NEWS_ENGINE.exists():
 
         log(
-            "scripts/news_engine.py not found."
+            "News engine not found."
         )
 
         log(
@@ -596,21 +651,12 @@ def run_news_engine():
             f"NEWS ENGINE WARNING: {exc}"
         )
 
-        # Existing valid story can still be used.
-        if SELECTED_STORY.exists():
+        existing = load_story()
+
+        if existing:
 
             log(
-                "Existing selected_story.json "
-                "will be used."
-            )
-
-            return
-
-        if STORY_FILE.exists():
-
-            log(
-                "Existing story.json "
-                "will be used."
+                "Existing story data will be used."
             )
 
             return
@@ -619,29 +665,23 @@ def run_news_engine():
 
 
 # ============================================================
-# FIND VIDEO GENERATOR
+# VIDEO GENERATOR
 # ============================================================
 
 def find_video_generator():
 
-    for candidate in VIDEO_GENERATOR_OPTIONS:
+    for generator in VIDEO_GENERATORS:
 
-        if candidate.exists():
+        if generator.exists():
 
-            return candidate
+            return generator
 
     raise RuntimeError(
-        "No video generator was found. "
-        "Expected rift_valley_video_generator.py "
-        "or video_generator.py."
+        "No video generator found."
     )
 
 
-# ============================================================
-# REMOVE PREVIOUS MP4
-# ============================================================
-
-def remove_previous_mp4():
+def remove_old_video():
 
     if not FINAL_MP4.exists():
         return
@@ -651,20 +691,16 @@ def remove_previous_mp4():
         FINAL_MP4.unlink()
 
         log(
-            "Removed previous final MP4."
+            "Removed previous MP4."
         )
 
     except Exception as exc:
 
         raise RuntimeError(
-            "Could not remove previous final MP4: "
+            "Could not remove previous MP4: "
             f"{exc}"
         )
 
-
-# ============================================================
-# RUN VIDEO GENERATOR
-# ============================================================
 
 def run_video_generator():
 
@@ -674,7 +710,7 @@ def run_video_generator():
         f"VIDEO GENERATOR: {generator.name}"
     )
 
-    remove_previous_mp4()
+    remove_old_video()
 
     run_command(
         [
@@ -687,26 +723,24 @@ def run_video_generator():
 
 
 # ============================================================
-# FFMPEG / FFPROBE
+# FFPROBE
 # ============================================================
 
-def probe_final_video():
-
-    command = [
-        "ffprobe",
-        "-v",
-        "error",
-        "-show_entries",
-        "stream=codec_type,codec_name,width,height,duration",
-        "-show_entries",
-        "format=duration,size",
-        "-of",
-        "json",
-        str(FINAL_MP4),
-    ]
+def probe_video():
 
     result = subprocess.run(
-        command,
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_type,codec_name,width,height,duration",
+            "-show_entries",
+            "format=duration,size",
+            "-of",
+            "json",
+            str(FINAL_MP4),
+        ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -734,7 +768,7 @@ def probe_final_video():
 
 
 # ============================================================
-# FINAL MP4 VERIFICATION
+# FINAL QC
 # ============================================================
 
 def verify_final_mp4():
@@ -749,63 +783,59 @@ def verify_final_mp4():
             "Rift Valley Watch MP4 was NOT generated."
         )
 
-    file_size = FINAL_MP4.stat().st_size
+    size = FINAL_MP4.stat().st_size
 
-    if file_size < 100_000:
+    if size < 100_000:
 
         raise RuntimeError(
             "Final MP4 is suspiciously small."
         )
 
-    probe = probe_final_video()
+    probe = probe_video()
 
     streams = probe.get(
         "streams",
         [],
     )
 
-    video_stream = None
-    audio_stream = None
+    video = None
+    audio = None
 
     for stream in streams:
 
-        stream_type = stream.get(
+        if stream.get(
             "codec_type"
-        )
+        ) == "video":
 
-        if stream_type == "video":
+            video = stream
 
-            video_stream = stream
+        elif stream.get(
+            "codec_type"
+        ) == "audio":
 
-        elif stream_type == "audio":
+            audio = stream
 
-            audio_stream = stream
-
-    if video_stream is None:
+    if video is None:
 
         raise RuntimeError(
             "Final MP4 contains no video stream."
         )
 
-    if audio_stream is None:
+    if audio is None:
 
         raise RuntimeError(
             "Final MP4 contains no audio stream."
         )
 
-    # --------------------------------------------------------
-    # Resolution
-    # --------------------------------------------------------
-
     width = int(
-        video_stream.get(
+        video.get(
             "width"
         )
         or 0
     )
 
     height = int(
-        video_stream.get(
+        video.get(
             "height"
         )
         or 0
@@ -819,14 +849,10 @@ def verify_final_mp4():
             "Expected 1080x1920."
         )
 
-    # --------------------------------------------------------
-    # Durations
-    # --------------------------------------------------------
-
     try:
 
         video_duration = float(
-            video_stream.get(
+            video.get(
                 "duration"
             )
             or 0
@@ -839,7 +865,7 @@ def verify_final_mp4():
     try:
 
         audio_duration = float(
-            audio_stream.get(
+            audio.get(
                 "duration"
             )
             or 0
@@ -849,69 +875,30 @@ def verify_final_mp4():
 
         audio_duration = 0.0
 
-    format_data = probe.get(
-        "format",
-        {},
+    difference = abs(
+        video_duration
+        - audio_duration
     )
-
-    try:
-
-        format_duration = float(
-            format_data.get(
-                "duration"
-            )
-            or 0
-        )
-
-    except Exception:
-
-        format_duration = 0.0
-
-    total_duration = max(
-        video_duration,
-        audio_duration,
-        format_duration,
-    )
-
-    if total_duration <= 0:
-
-        raise RuntimeError(
-            "Final MP4 has no valid duration."
-        )
-
-    # --------------------------------------------------------
-    # Audio/video synchronization
-    # --------------------------------------------------------
 
     if (
         video_duration > 0
         and audio_duration > 0
+        and difference > 1.5
     ):
 
-        difference = abs(
-            video_duration
-            - audio_duration
+        raise RuntimeError(
+            "Video/audio duration mismatch: "
+            f"{video_duration:.2f}s vs "
+            f"{audio_duration:.2f}s."
         )
 
-        if difference > 1.5:
-
-            raise RuntimeError(
-                "Video/audio duration mismatch: "
-                f"{video_duration:.2f}s vs "
-                f"{audio_duration:.2f}s."
-            )
-
-    # --------------------------------------------------------
-    # Final report
-    # --------------------------------------------------------
-
     size_mb = (
-        file_size
+        size
         / (1024 * 1024)
     )
 
     log(
-        "FINAL MP4 EXISTS"
+        "FINAL QC PASSED"
     )
 
     log(
@@ -936,27 +923,6 @@ def verify_final_mp4():
         f"{audio_duration:.2f}s"
     )
 
-    log(
-        f"TOTAL DURATION: "
-        f"{total_duration:.2f}s"
-    )
-
-    log(
-        "VIDEO STREAM: PASS"
-    )
-
-    log(
-        "AUDIO STREAM: PASS"
-    )
-
-    log(
-        "RESOLUTION: PASS"
-    )
-
-    log(
-        "FINAL QC: PASS"
-    )
-
     return True
 
 
@@ -967,37 +933,21 @@ def verify_final_mp4():
 def main():
 
     print("")
-
-    print(
-        "=" * 70
-    )
-
-    print(
-        "RIFT VALLEY WATCH"
-    )
-
-    print(
-        "MAIN PIPELINE"
-    )
-
-    print(
-        "=" * 70
-    )
-
-    # --------------------------------------------------------
-    # Prepare directories.
-    # --------------------------------------------------------
+    print("=" * 70)
+    print("RIFT VALLEY WATCH")
+    print("MAIN PIPELINE")
+    print("=" * 70)
 
     prepare_directories()
 
     # --------------------------------------------------------
-    # Run news engine.
+    # 1. NEWS
     # --------------------------------------------------------
 
     run_news_engine()
 
     # --------------------------------------------------------
-    # Load story.
+    # 2. LOAD STORY
     # --------------------------------------------------------
 
     story = load_story()
@@ -1005,12 +955,11 @@ def main():
     if not story:
 
         raise RuntimeError(
-            "No story was available after "
-            "the news-engine step."
+            "No story JSON was available."
         )
 
     # --------------------------------------------------------
-    # Validate story.
+    # 3. VALIDATE
     # --------------------------------------------------------
 
     validate_story(
@@ -1026,23 +975,12 @@ def main():
     )
 
     print("")
-
-    print(
-        "=" * 70
-    )
-
-    print(
-        "SELECTED STORY"
-    )
-
-    print(
-        "=" * 70
-    )
-
+    print("=" * 70)
+    print("SELECTED STORY")
+    print("=" * 70)
     print(
         f"HEADLINE: {title}"
     )
-
     print(
         "COUNTY: "
         + (
@@ -1051,66 +989,41 @@ def main():
             else "Unknown"
         )
     )
-
-    print(
-        "=" * 70
-    )
-
+    print("=" * 70)
     print("")
 
     # --------------------------------------------------------
-    # Generate video.
+    # 4. VIDEO
     # --------------------------------------------------------
 
     run_video_generator()
 
     # --------------------------------------------------------
-    # Verify MP4.
+    # 5. FINAL QC
     # --------------------------------------------------------
 
     verify_final_mp4()
 
-    # --------------------------------------------------------
-    # SUCCESS.
-    # --------------------------------------------------------
-
     print("")
-
-    print(
-        "=" * 70
-    )
-
-    print(
-        "RIFT VALLEY WATCH SUCCESS"
-    )
-
-    print(
-        "=" * 70
-    )
-
+    print("=" * 70)
+    print("RIFT VALLEY WATCH SUCCESS")
+    print("=" * 70)
     print(
         f"FINAL MP4: {FINAL_MP4}"
     )
-
     print(
         "1080x1920: PASS"
     )
-
     print(
-        "VIDEO STREAM: PASS"
+        "VIDEO: PASS"
     )
-
     print(
-        "AUDIO STREAM: PASS"
+        "AUDIO: PASS"
     )
-
     print(
         "FINAL QC: PASS"
     )
-
-    print(
-        "=" * 70
-    )
+    print("=" * 70)
 
     return 0
 
@@ -1130,7 +1043,6 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
 
         print("")
-
         print(
             "RIFT VALLEY WATCH CANCELLED."
         )
@@ -1140,25 +1052,12 @@ if __name__ == "__main__":
     except Exception as exc:
 
         print("")
-
-        print(
-            "=" * 70
-        )
-
-        print(
-            "RIFT VALLEY WATCH FAILED"
-        )
-
-        print(
-            "=" * 70
-        )
-
+        print("=" * 70)
+        print("RIFT VALLEY WATCH FAILED")
+        print("=" * 70)
         print(
             f"{type(exc).__name__}: {exc}"
         )
-
-        print(
-            "=" * 70
-        )
+        print("=" * 70)
 
         raise SystemExit(1)
