@@ -2,17 +2,32 @@
 # RIFT VALLEY WATCH
 # MAIN PIPELINE
 #
-# VERSION: RIFT_VALLEY_WATCH_MAIN_REBUILT_V5
+# VERSION: RIFT_VALLEY_WATCH_MAIN_REBUILT_V6
 #
-# FIX:
-# - NEWS ENGINE MAY CREATE story.json
-# - GENERATOR REQUIRES selected_story.json
-# - MAIN NOW CREATES selected_story.json AUTOMATICALLY
+# PIPELINE:
+#   NEWS ENGINE
+#        ↓
+#   story.json
+#        ↓
+#   selected_story.json
+#        ↓
+#   selected_script.json
+#        ↓
+#   VIDEO GENERATOR
+#        ↓
+#   FINAL MP4
+#
+# IMPORTANT:
+# The current video generator requires:
+#   data/selected_story.json
+#   data/selected_script.json
+#
+# This main file creates both automatically.
 # ============================================================
 
 import json
 import os
-import shutil
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -39,6 +54,7 @@ VIDEO_GENERATORS = [
 
 STORY_FILE = DATA_DIR / "story.json"
 SELECTED_STORY = DATA_DIR / "selected_story.json"
+SELECTED_SCRIPT = DATA_DIR / "selected_script.json"
 
 LOCAL_IMAGE = SOURCE_DIR / "story_image.jpg"
 
@@ -62,7 +78,7 @@ COUNTIES = [
 
 
 # ============================================================
-# LOG
+# LOGGING
 # ============================================================
 
 def log(message):
@@ -137,18 +153,25 @@ def clean_text(value):
     ):
         return ""
 
-    return " ".join(
-        str(value)
-        .replace(
-            "\n",
-            " ",
-        )
-        .replace(
-            "\r",
-            " ",
-        )
-        .split()
-    ).strip()
+    text = str(value)
+
+    text = text.replace(
+        "\n",
+        " ",
+    )
+
+    text = text.replace(
+        "\r",
+        " ",
+    )
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text,
+    )
+
+    return text.strip()
 
 
 # ============================================================
@@ -165,7 +188,7 @@ def find_value(
         dict,
     ):
 
-        # First check current level.
+        # Check current level first.
         for key in keys:
 
             if key in data:
@@ -177,7 +200,7 @@ def find_value(
                 if value:
                     return value
 
-        # Then recursively inspect nested data.
+        # Then inspect nested objects.
         for value in data.values():
 
             found = find_value(
@@ -288,7 +311,7 @@ def get_county(story):
 
 
 # ============================================================
-# IMAGE EXTRACTION
+# IMAGE URL EXTRACTION
 # ============================================================
 
 def get_image_urls(story):
@@ -380,39 +403,8 @@ def get_image_urls(story):
         ):
 
             for item in data:
+
                 scan(item)
-
-        elif isinstance(
-            data,
-            str,
-        ):
-
-            value = data.strip()
-
-            if (
-                value.startswith(
-                    "http://"
-                )
-                or value.startswith(
-                    "https://"
-                )
-            ):
-
-                lower = value.lower()
-
-                if any(
-                    extension in lower
-                    for extension in [
-                        ".jpg",
-                        ".jpeg",
-                        ".png",
-                        ".webp",
-                    ]
-                ):
-
-                    urls.append(
-                        value
-                    )
 
     scan(story)
 
@@ -425,14 +417,13 @@ def get_image_urls(story):
             continue
 
         seen.add(url)
-
         result.append(url)
 
     return result
 
 
 # ============================================================
-# VALIDATE STORY
+# STORY VALIDATION
 # ============================================================
 
 def validate_story(story):
@@ -470,6 +461,10 @@ def validate_story(story):
         and LOCAL_IMAGE.stat().st_size > 10_000
     )
 
+    # --------------------------------------------------------
+    # Reject Google News boilerplate.
+    # --------------------------------------------------------
+
     combined = (
         title
         + " "
@@ -488,9 +483,12 @@ def validate_story(story):
         if phrase in combined:
 
             raise RuntimeError(
-                "Google News boilerplate detected "
-                "instead of a real story."
+                "Google News boilerplate detected."
             )
+
+    # --------------------------------------------------------
+    # Real image required.
+    # --------------------------------------------------------
 
     if not images and not local_image_valid:
 
@@ -526,7 +524,7 @@ def validate_story(story):
 
 
 # ============================================================
-# RUN COMMAND
+# COMMAND RUNNER
 # ============================================================
 
 def run_command(
@@ -604,10 +602,12 @@ def run_news_engine():
             f"NEWS ENGINE WARNING: {exc}"
         )
 
-        if (
-            STORY_FILE.exists()
-            or SELECTED_STORY.exists()
-        ):
+        existing = (
+            SELECTED_STORY.exists()
+            or STORY_FILE.exists()
+        )
+
+        if existing:
 
             log(
                 "Existing story data will be used."
@@ -620,17 +620,6 @@ def run_news_engine():
 
 # ============================================================
 # CREATE SELECTED STORY
-#
-# THIS IS THE IMPORTANT FIX.
-#
-# The current generator refuses to run unless:
-#
-# data/selected_story.json
-#
-# exists.
-#
-# If the news engine only produces story.json,
-# copy that story into selected_story.json.
 # ============================================================
 
 def create_selected_story():
@@ -641,12 +630,12 @@ def create_selected_story():
 
     if selected:
 
-        log(
-            "selected_story.json already exists."
-        )
-
         validate_story(
             selected
+        )
+
+        log(
+            "selected_story.json already exists."
         )
 
         return selected
@@ -658,18 +647,12 @@ def create_selected_story():
     if not story:
 
         raise RuntimeError(
-            "News engine did not create "
-            "data/story.json and "
-            "data/selected_story.json "
-            "does not exist."
+            "No story.json was produced."
         )
 
     validate_story(
         story
     )
-
-    # Write the exact story structure
-    # expected by the generator.
 
     with SELECTED_STORY.open(
         "w",
@@ -684,11 +667,8 @@ def create_selected_story():
         )
 
     log(
-        "Created data/selected_story.json "
-        "from data/story.json."
+        "Created data/selected_story.json."
     )
-
-    # Confirm the file can be read back.
 
     confirmed = load_json(
         SELECTED_STORY
@@ -697,8 +677,8 @@ def create_selected_story():
     if not confirmed:
 
         raise RuntimeError(
-            "Failed to create "
-            "data/selected_story.json."
+            "selected_story.json could not "
+            "be created."
         )
 
     validate_story(
@@ -709,7 +689,279 @@ def create_selected_story():
 
 
 # ============================================================
-# VIDEO GENERATOR
+# BUILD NARRATION
+#
+# This fixes:
+#
+# "selected_script.json not found.
+#  Using story narration."
+#
+# The generator will now receive an explicit
+# narration field.
+# ============================================================
+
+def build_narration(story):
+
+    title = get_title(
+        story
+    )
+
+    summary = get_summary(
+        story
+    )
+
+    county = get_county(
+        story
+    )
+
+    # --------------------------------------------------------
+    # Use existing narration if the news engine already
+    # supplied one.
+    # --------------------------------------------------------
+
+    existing = find_value(
+        story,
+        [
+            "narration",
+            "voiceover",
+            "voice_over",
+            "script",
+            "narration_text",
+            "narrationText",
+        ],
+    )
+
+    if existing:
+
+        narration = existing
+
+    else:
+
+        # ----------------------------------------------------
+        # Build clean narration from the selected story.
+        #
+        # Do NOT mention source/publisher.
+        # ----------------------------------------------------
+
+        if summary:
+
+            narration = (
+                f"{title}. "
+                f"Here is what is happening in "
+                f"{county if county else 'the Rift Valley'}. "
+                f"{summary}"
+            )
+
+        else:
+
+            narration = (
+                f"{title}. "
+                f"This is the latest development "
+                f"from "
+                f"{county if county else 'the Rift Valley'}."
+            )
+
+    # --------------------------------------------------------
+    # Remove source/publisher references from narration.
+    # --------------------------------------------------------
+
+    publisher_terms = [
+        "people daily",
+        "citizen tv",
+        "citizen digital",
+        "the star",
+        "standard media",
+        "nation media",
+        "kenya news agency",
+        "kna",
+        "facebook",
+        "twitter",
+        "x.com",
+        "google news",
+    ]
+
+    for term in publisher_terms:
+
+        narration = re.sub(
+            re.escape(term),
+            "",
+            narration,
+            flags=re.IGNORECASE,
+        )
+
+    # --------------------------------------------------------
+    # Remove URL-like content.
+    # --------------------------------------------------------
+
+    narration = re.sub(
+        r"https?://\S+",
+        "",
+        narration,
+        flags=re.IGNORECASE,
+    )
+
+    # --------------------------------------------------------
+    # Clean punctuation/spacing.
+    # --------------------------------------------------------
+
+    narration = re.sub(
+        r"\s+",
+        " ",
+        narration,
+    ).strip()
+
+    narration = re.sub(
+        r"\s+([,.!?])",
+        r"\1",
+        narration,
+    )
+
+    if len(narration) < 20:
+
+        raise RuntimeError(
+            "Could not build usable narration."
+        )
+
+    return narration
+
+
+# ============================================================
+# CREATE SELECTED SCRIPT
+# ============================================================
+
+def create_selected_script(
+    story,
+):
+
+    # --------------------------------------------------------
+    # If an existing selected_script.json is already valid,
+    # preserve it.
+    # --------------------------------------------------------
+
+    existing = load_json(
+        SELECTED_SCRIPT
+    )
+
+    if existing:
+
+        existing_narration = find_value(
+            existing,
+            [
+                "narration",
+                "voiceover",
+                "voice_over",
+                "narration_text",
+                "narrationText",
+                "script",
+                "text",
+            ],
+        )
+
+        if existing_narration:
+
+            log(
+                "selected_script.json already exists."
+            )
+
+            return existing
+
+    # --------------------------------------------------------
+    # Build fresh narration.
+    # --------------------------------------------------------
+
+    narration = build_narration(
+        story
+    )
+
+    title = get_title(
+        story
+    )
+
+    county = get_county(
+        story
+    )
+
+    # --------------------------------------------------------
+    # Write multiple compatible field names.
+    #
+    # This makes the script compatible with the
+    # current generator regardless of which narration
+    # key its get_narration() function reads.
+    # --------------------------------------------------------
+
+    script = {
+        "title": title,
+        "headline": title,
+        "county": county,
+        "narration": narration,
+        "voiceover": narration,
+        "voice_over": narration,
+        "narration_text": narration,
+        "text": narration,
+        "script": narration,
+    }
+
+    with SELECTED_SCRIPT.open(
+        "w",
+        encoding="utf-8",
+    ) as handle:
+
+        json.dump(
+            script,
+            handle,
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    log(
+        "Created data/selected_script.json."
+    )
+
+    log(
+        f"NARRATION WORDS: "
+        f"{len(narration.split())}"
+    )
+
+    # --------------------------------------------------------
+    # Confirm.
+    # --------------------------------------------------------
+
+    confirmed = load_json(
+        SELECTED_SCRIPT
+    )
+
+    if not confirmed:
+
+        raise RuntimeError(
+            "selected_script.json was not "
+            "created successfully."
+        )
+
+    confirmed_narration = find_value(
+        confirmed,
+        [
+            "narration",
+            "voiceover",
+            "voice_over",
+            "narration_text",
+            "narrationText",
+            "text",
+            "script",
+        ],
+    )
+
+    if not confirmed_narration:
+
+        raise RuntimeError(
+            "selected_script.json contains "
+            "no usable narration."
+        )
+
+    return confirmed
+
+
+# ============================================================
+# FIND VIDEO GENERATOR
 # ============================================================
 
 def find_video_generator():
@@ -724,6 +976,10 @@ def find_video_generator():
         "No video generator found."
     )
 
+
+# ============================================================
+# REMOVE OLD MP4
+# ============================================================
 
 def remove_old_mp4():
 
@@ -746,6 +1002,10 @@ def remove_old_mp4():
         )
 
 
+# ============================================================
+# RUN VIDEO GENERATOR
+# ============================================================
+
 def run_video_generator():
 
     generator = find_video_generator()
@@ -754,12 +1014,16 @@ def run_video_generator():
         f"GENERATOR: {generator.name}"
     )
 
-    # The generator requires selected_story.json.
     if not SELECTED_STORY.exists():
 
         raise RuntimeError(
-            "selected_story.json is missing "
-            "before video generation."
+            "selected_story.json is missing."
+        )
+
+    if not SELECTED_SCRIPT.exists():
+
+        raise RuntimeError(
+            "selected_script.json is missing."
         )
 
     remove_old_mp4()
@@ -820,7 +1084,7 @@ def probe_video():
 
 
 # ============================================================
-# FINAL QC
+# FINAL MP4 QC
 # ============================================================
 
 def verify_final_mp4():
@@ -1000,19 +1264,27 @@ def main():
     prepare_directories()
 
     # --------------------------------------------------------
-    # STEP 1
+    # STEP 1 — NEWS ENGINE
     # --------------------------------------------------------
 
     run_news_engine()
 
     # --------------------------------------------------------
-    # STEP 2
+    # STEP 2 — SELECT STORY
     # --------------------------------------------------------
 
     story = create_selected_story()
 
     # --------------------------------------------------------
-    # STEP 3
+    # STEP 3 — CREATE NARRATION SCRIPT
+    # --------------------------------------------------------
+
+    script = create_selected_script(
+        story
+    )
+
+    # --------------------------------------------------------
+    # STEP 4 — DISPLAY STORY
     # --------------------------------------------------------
 
     title = get_title(
@@ -1021,6 +1293,18 @@ def main():
 
     county = get_county(
         story
+    )
+
+    narration = find_value(
+        script,
+        [
+            "narration",
+            "voiceover",
+            "voice_over",
+            "narration_text",
+            "text",
+            "script",
+        ],
     )
 
     print("")
@@ -1051,19 +1335,24 @@ def main():
     )
 
     print(
+        f"NARRATION WORDS: "
+        f"{len(narration.split())}"
+    )
+
+    print(
         "=" * 70
     )
 
     print("")
 
     # --------------------------------------------------------
-    # STEP 4
+    # STEP 5 — VIDEO
     # --------------------------------------------------------
 
     run_video_generator()
 
     # --------------------------------------------------------
-    # STEP 5
+    # STEP 6 — FINAL QC
     # --------------------------------------------------------
 
     verify_final_mp4()
