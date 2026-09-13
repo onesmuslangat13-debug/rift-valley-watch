@@ -3,6 +3,7 @@ import json
 import re
 import subprocess
 import sys
+import shutil
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -10,7 +11,7 @@ from PIL import Image, ImageDraw, ImageFont
 # ============================================================
 # RIFT VALLEY WATCH
 # VIDEO GENERATOR
-# VERSION: RVW_VIDEO_V13_CONTINUOUS
+# VERSION: RVW_VIDEO_V14_AUDIO_STABLE
 # ============================================================
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -33,6 +34,7 @@ OVERLAY_FILE = WORK_DIR / "overlay.png"
 PREPARED_IMAGE = WORK_DIR / "prepared_image.jpg"
 
 AUDIO_FILE = AUDIO_DIR / "narration.mp3"
+TEMP_AUDIO = AUDIO_DIR / "narration_temp.mp3"
 
 WIDTH = 1080
 HEIGHT = 1920
@@ -58,30 +60,21 @@ def log(message):
 # ============================================================
 
 def ensure_directories():
-    OUTPUT_DIR.mkdir(
-        parents=True,
-        exist_ok=True
-    )
+    for directory in [
+        OUTPUT_DIR,
+        DATA_DIR,
+        ASSET_DIR,
+        WORK_DIR,
+        AUDIO_DIR,
+    ]:
+        directory.mkdir(
+            parents=True,
+            exist_ok=True
+        )
 
-    DATA_DIR.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-    ASSET_DIR.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-    WORK_DIR.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-    AUDIO_DIR.mkdir(
-        parents=True,
-        exist_ok=True
-    )
+    log(f"BASE DIR: {BASE_DIR}")
+    log(f"AUDIO DIR: {AUDIO_DIR}")
+    log(f"AUDIO FILE: {AUDIO_FILE}")
 
 
 # ============================================================
@@ -438,94 +431,217 @@ def get_narration(story, script):
                 f"reported in {county}."
             )
 
-    return narration
+    return narration.strip()
 
 
 # ============================================================
-# AUDIO FILE
+# AUDIO UTILITIES
 # ============================================================
 
-def find_existing_audio():
-    candidates = [
+def remove_old_audio():
+    for path in [
         AUDIO_FILE,
-        WORK_DIR / "narration.mp3",
-        BASE_DIR / "audio" / "narration.mp3",
+        TEMP_AUDIO,
+    ]:
+        try:
+            if path.exists():
+                path.unlink()
+                log(
+                    f"REMOVED OLD AUDIO: {path}"
+                )
+        except Exception as exc:
+            raise RuntimeError(
+                f"Could not remove old audio {path}: {exc}"
+            )
+
+
+def check_command(command_name):
+    path = shutil.which(command_name)
+
+    if not path:
+        raise RuntimeError(
+            f"Required command not found: {command_name}"
+        )
+
+    log(
+        f"{command_name.upper()}: {path}"
+    )
+
+    return path
+
+
+def validate_audio_file(path):
+    if not path.exists():
+        raise RuntimeError(
+            f"Narration MP3 does not exist: {path}"
+        )
+
+    size = path.stat().st_size
+
+    log(
+        f"NARRATION SIZE: {size:,} bytes"
+    )
+
+    if size < 1000:
+        raise RuntimeError(
+            f"Narration MP3 is too small: {size} bytes"
+        )
+
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "a:0",
+        "-show_entries",
+        "stream=codec_name",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(path)
     ]
 
-    for path in candidates:
-        if path.exists():
-            try:
-                if path.stat().st_size > 1000:
-                    return path
-            except Exception:
-                pass
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True
+    )
 
-    return None
+    if result.returncode != 0:
+        raise RuntimeError(
+            "ffprobe could not read narration MP3.\n"
+            + result.stderr
+        )
 
+    codec = result.stdout.strip()
+
+    if not codec:
+        raise RuntimeError(
+            "Narration MP3 contains no audio stream."
+        )
+
+    log(
+        f"NARRATION CODEC: {codec}"
+    )
+
+    return True
+
+
+# ============================================================
+# GENERATE AUDIO
+# ============================================================
 
 def generate_audio(narration):
-    existing = find_existing_audio()
-
-    if existing:
-        log(
-            f"USING EXISTING NARRATION: {existing}"
-        )
-
-        # Always copy narration into the standard
-        # location expected by GitHub Actions.
-        if existing != AUDIO_FILE:
-            AUDIO_FILE.parent.mkdir(
-                parents=True,
-                exist_ok=True
-            )
-
-            AUDIO_FILE.write_bytes(
-                existing.read_bytes()
-            )
-
-            log(
-                f"COPIED NARRATION TO: {AUDIO_FILE}"
-            )
-
-        return AUDIO_FILE
-
+    log("")
+    log("=" * 70)
     log("GENERATING NARRATION AUDIO")
+    log("=" * 70)
 
-    try:
-        from gtts import gTTS
-    except ImportError:
+    if not narration.strip():
         raise RuntimeError(
-            "gTTS is not installed."
+            "Narration text is empty."
         )
 
-    AUDIO_FILE.parent.mkdir(
+    log(
+        f"NARRATION CHARACTERS: {len(narration)}"
+    )
+
+    log(
+        f"NARRATION WORDS: {len(narration.split())}"
+    )
+
+    log(
+        "TTS ENGINE: gTTS"
+    )
+
+    remove_old_audio()
+
+    AUDIO_DIR.mkdir(
         parents=True,
         exist_ok=True
     )
 
-    tts = gTTS(
-        text=narration,
-        lang="en",
-        slow=False
-    )
-
-    tts.save(
-        str(AUDIO_FILE)
-    )
-
-    if not AUDIO_FILE.exists():
+    try:
+        from gtts import gTTS
+    except Exception as exc:
         raise RuntimeError(
-            "Narration MP3 was not generated."
+            "gTTS could not be imported. "
+            "Install it with: pip install gTTS\n"
+            f"Import error: {exc}"
         )
 
-    if AUDIO_FILE.stat().st_size < 1000:
-        raise RuntimeError(
-            "Narration MP3 is too small."
+    try:
+        tts = gTTS(
+            text=narration,
+            lang="en",
+            slow=False,
+            lang_check=True
         )
+
+        log(
+            "gTTS OBJECT CREATED"
+        )
+
+        tts.save(
+            str(TEMP_AUDIO)
+        )
+
+        log(
+            f"gTTS SAVE COMPLETED: {TEMP_AUDIO}"
+        )
+
+    except Exception as exc:
+        log("")
+        log("=" * 70)
+        log("G TTS FAILED")
+        log("=" * 70)
+        log(
+            f"ERROR TYPE: {type(exc).__name__}"
+        )
+        log(
+            f"ERROR MESSAGE: {exc}"
+        )
+        log("=" * 70)
+
+        raise RuntimeError(
+            "gTTS failed to generate narration audio. "
+            "Check GitHub Actions internet access and "
+            "confirm that the gTTS package is installed."
+        )
+
+    if not TEMP_AUDIO.exists():
+        raise RuntimeError(
+            "gTTS completed without creating narration_temp.mp3."
+        )
+
+    if TEMP_AUDIO.stat().st_size < 1000:
+        raise RuntimeError(
+            "gTTS created an invalid or empty MP3."
+        )
+
+    # Validate temporary MP3 before moving it.
+    validate_audio_file(
+        TEMP_AUDIO
+    )
+
+    try:
+        TEMP_AUDIO.replace(
+            AUDIO_FILE
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not move generated audio into "
+            f"{AUDIO_FILE}: {exc}"
+        )
+
+    validate_audio_file(
+        AUDIO_FILE
+    )
 
     log(
-        f"NARRATION CREATED: {AUDIO_FILE}"
+        f"NARRATION CREATED SUCCESSFULLY: {AUDIO_FILE}"
     )
+
+    log("=" * 70)
 
     return AUDIO_FILE
 
@@ -1049,8 +1165,6 @@ def create_motion_video(
         "CONTINUOUS MOTION: ENABLED"
     )
 
-    # Slow continuous zoom.
-    # Text overlay stays fixed.
     zoom_expression = (
         "min(1+on*0.00012,1.11)"
     )
@@ -1177,6 +1291,11 @@ def combine_audio(
     log(
         "ADDING NARRATION AUDIO"
     )
+
+    if not audio_path.exists():
+        raise RuntimeError(
+            f"Audio file missing before muxing: {audio_path}"
+        )
 
     command = [
         "ffmpeg",
@@ -1357,7 +1476,7 @@ def verify_final_video(path):
     )
 
     log(
-        "AUDIO: PRESENT"
+        f"AUDIO CODEC: {audio_result.stdout.strip()}"
     )
 
     log(
@@ -1390,6 +1509,7 @@ def cleanup_work_files():
         TEMP_VIDEO,
         OVERLAY_FILE,
         PREPARED_IMAGE,
+        TEMP_AUDIO,
     ]:
         try:
             if path.exists():
@@ -1408,10 +1528,13 @@ def main():
     log("")
     log("=" * 70)
     log("STARTING RIFT VALLEY WATCH VIDEO GENERATOR")
-    log("VERSION: RVW_VIDEO_V13_CONTINUOUS")
+    log("VERSION: RVW_VIDEO_V14_AUDIO_STABLE")
     log("=" * 70)
 
     ensure_directories()
+
+    check_command("ffmpeg")
+    check_command("ffprobe")
 
     story = load_story()
     script = load_script()
@@ -1448,8 +1571,13 @@ def main():
     log("")
     log("NARRATION PREVIEW:")
     log(
-        narration[:500]
+        narration[:700]
     )
+
+    if len(narration.split()) < 8:
+        raise RuntimeError(
+            "Narration is too short."
+        )
 
     # --------------------------------------------------------
     # AUDIO
@@ -1526,9 +1654,15 @@ def main():
     log("=" * 70)
     log("RIFT VALLEY WATCH VIDEO GENERATION COMPLETE")
     log("=" * 70)
+
     log(
         f"FINAL MP4: {final_video}"
     )
+
+    log(
+        f"NARRATION MP3: {audio_path}"
+    )
+
     log("=" * 70)
 
 
@@ -1541,7 +1675,12 @@ if __name__ == "__main__":
         log("=" * 70)
         log("RIFT VALLEY WATCH VIDEO GENERATION FAILED")
         log("=" * 70)
-        log(str(exc))
+        log(
+            f"ERROR TYPE: {type(exc).__name__}"
+        )
+        log(
+            f"ERROR: {exc}"
+        )
         log("=" * 70)
 
         sys.exit(1)
