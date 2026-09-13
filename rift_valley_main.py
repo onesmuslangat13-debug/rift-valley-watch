@@ -19,7 +19,7 @@ from PIL import Image
 # MAIN STORY SELECTION ENGINE
 # ============================================================
 
-VERSION = "RVW_MAIN_V16_STORY_SELECTION_STABLE"
+VERSION = "RVW_MAIN_V17_STABLE"
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -38,6 +38,18 @@ FINAL_IMAGE = SOURCE_DIR / "story_image.jpg"
 FINAL_VIDEO = OUTPUT_DIR / "rift_valley_watch_reel.mp4"
 
 GENERATOR_FILE = BASE_DIR / "rift_valley_video_generator.py"
+
+REQUEST_TIMEOUT = 25
+IMAGE_TIMEOUT = 25
+
+MIN_ARTICLE_WORDS = 35
+MIN_SCRIPT_WORDS = 45
+MAX_SCRIPT_WORDS = 145
+
+MAX_CANDIDATES_PER_SOURCE = 25
+MAX_TOTAL_CANDIDATES = 120
+
+MAX_IMAGE_BYTES = 12 * 1024 * 1024
 
 
 # ============================================================
@@ -83,20 +95,8 @@ SESSION.headers.update(
 
 
 # ============================================================
-# CONFIGURATION
+# COUNTIES
 # ============================================================
-
-REQUEST_TIMEOUT = 25
-
-MIN_ARTICLE_WORDS = 35
-MIN_SCRIPT_WORDS = 45
-MAX_SCRIPT_WORDS = 145
-
-MAX_CANDIDATES_PER_SOURCE = 25
-MAX_TOTAL_CANDIDATES = 120
-
-IMAGE_TIMEOUT = 25
-MAX_IMAGE_BYTES = 12 * 1024 * 1024
 
 COUNTIES = [
     "Bomet",
@@ -157,11 +157,10 @@ COUNTY_ALIASES = {
     "elgeyo-marakwet": [
         "elgeyo",
         "marakwet",
-        "itens",
+        "iten",
         "keiyo",
         "kapsowar",
         "tambach",
-        "moiben?",
     ],
     "west pokot": [
         "west pokot",
@@ -181,6 +180,10 @@ COUNTY_ALIASES = {
     ],
 }
 
+
+# ============================================================
+# APPROVED SOURCES
+# ============================================================
 
 APPROVED_PUBLISHERS = [
     {
@@ -226,6 +229,10 @@ APPROVED_PUBLISHERS = [
 ]
 
 
+# ============================================================
+# BLOCKED DOMAINS
+# ============================================================
+
 BLOCKED_DOMAINS = {
     "facebook.com",
     "www.facebook.com",
@@ -250,6 +257,10 @@ BLOCKED_DOMAINS = {
 }
 
 
+# ============================================================
+# TERMS
+# ============================================================
+
 RUTO_TERMS = [
     "william ruto",
     "president ruto",
@@ -259,7 +270,6 @@ RUTO_TERMS = [
     "presidency",
     "presidential",
 ]
-
 
 DEVELOPMENT_TERMS = [
     "road",
@@ -290,7 +300,6 @@ DEVELOPMENT_TERMS = [
     "investment",
 ]
 
-
 POLITICAL_TERMS = [
     "election",
     "2027",
@@ -307,7 +316,6 @@ POLITICAL_TERMS = [
     "politics",
     "political",
 ]
-
 
 URGENT_TERMS = [
     "breaking",
@@ -332,7 +340,6 @@ URGENT_TERMS = [
     "rescue",
 ]
 
-
 LOW_VALUE_TERMS = [
     "opinion",
     "editorial",
@@ -348,7 +355,7 @@ LOW_VALUE_TERMS = [
 
 
 # ============================================================
-# BASIC HELPERS
+# TEXT HELPERS
 # ============================================================
 
 def clean_text(value):
@@ -374,6 +381,63 @@ def word_count(text):
         )
     )
 
+
+def text_key(text):
+    text = clean_text(text).lower()
+
+    text = re.sub(
+        r"[^a-z0-9\s]",
+        "",
+        text,
+    )
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text,
+    )
+
+    return text.strip()
+
+
+def sentence_key(sentence):
+    return text_key(sentence)
+
+
+def split_sentences(text):
+    text = clean_text(text)
+
+    if not text:
+        return []
+
+    parts = re.split(
+        r"(?<=[.!?])\s+",
+        text,
+    )
+
+    return [
+        clean_text(part)
+        for part in parts
+        if clean_text(part)
+    ]
+
+
+def normalize_title(title):
+    title = clean_text(title)
+
+    title = re.sub(
+        r"\s*[-|]\s*(Citizen Digital|The Star|KBC|Nation Africa)\s*$",
+        "",
+        title,
+        flags=re.IGNORECASE,
+    )
+
+    return title.strip()
+
+
+# ============================================================
+# URL HELPERS
+# ============================================================
 
 def normalize_url(url):
     if not url:
@@ -434,74 +498,6 @@ def is_approved_url(url):
             return True
 
     return False
-
-
-def publisher_for_url(url):
-    domain = domain_of(url)
-
-    for publisher in APPROVED_PUBLISHERS:
-        approved_domain = publisher["domain"]
-
-        if (
-            domain == approved_domain
-            or domain.endswith("." + approved_domain)
-        ):
-            return publisher
-
-    return None
-
-
-def normalize_title(title):
-    title = clean_text(title)
-
-    title = re.sub(
-        r"\s*[-|]\s*(Citizen Digital|The Star|KBC|Nation Africa)\s*$",
-        "",
-        title,
-        flags=re.IGNORECASE,
-    )
-
-    return title.strip()
-
-
-def text_key(text):
-    text = clean_text(text).lower()
-
-    text = re.sub(
-        r"[^a-z0-9\s]",
-        "",
-        text,
-    )
-
-    text = re.sub(
-        r"\s+",
-        " ",
-        text,
-    )
-
-    return text.strip()
-
-
-def sentence_key(sentence):
-    return text_key(sentence)
-
-
-def split_sentences(text):
-    text = clean_text(text)
-
-    if not text:
-        return []
-
-    parts = re.split(
-        r"(?<=[.!?])\s+",
-        text,
-    )
-
-    return [
-        clean_text(part)
-        for part in parts
-        if clean_text(part)
-    ]
 
 
 # ============================================================
@@ -586,15 +582,17 @@ def history_contains(article, history):
     identifier = story_identifier(article)
 
     for item in history:
-        if isinstance(item, dict):
-            if item.get("id") == identifier:
-                return True
+        if not isinstance(item, dict):
+            continue
 
-            if (
-                item.get("url")
-                and item.get("url") == article.get("url")
-            ):
-                return True
+        if item.get("id") == identifier:
+            return True
+
+        if (
+            item.get("url")
+            and item.get("url") == article.get("url")
+        ):
+            return True
 
     return False
 
@@ -628,16 +626,14 @@ def add_to_history(article):
         },
     )
 
-    history = history[:100]
-
     save_json(
         HISTORY_FILE,
-        history,
+        history[:100],
     )
 
 
 # ============================================================
-# FETCHING
+# FETCH
 # ============================================================
 
 def fetch_url(url):
@@ -665,7 +661,34 @@ def fetch_url(url):
 
 
 # ============================================================
-# IMAGE HELPERS
+# COUNTY DETECTION
+# ============================================================
+
+def detect_county(text):
+    text_lower = clean_text(text).lower()
+
+    best_county = ""
+    best_hits = 0
+
+    for county, aliases in COUNTY_ALIASES.items():
+        hits = 0
+
+        for alias in aliases:
+            if alias.lower() in text_lower:
+                hits += 1
+
+        if hits > best_hits:
+            best_hits = hits
+            best_county = county
+
+    if best_county:
+        return best_county.title()
+
+    return ""
+
+
+# ============================================================
+# IMAGE DISCOVERY
 # ============================================================
 
 def valid_image_url(url):
@@ -699,10 +722,7 @@ def image_candidates_from_html(
 
     candidates = []
 
-    # OpenGraph
-    for meta in soup.find_all(
-        "meta",
-    ):
+    for meta in soup.find_all("meta"):
         prop = (
             meta.get("property")
             or meta.get("name")
@@ -730,10 +750,7 @@ def image_candidates_from_html(
                 )
             )
 
-    # Link image metadata
-    for link in soup.find_all(
-        "link",
-    ):
+    for link in soup.find_all("link"):
         rel = " ".join(
             link.get("rel", [])
         ).lower()
@@ -745,10 +762,7 @@ def image_candidates_from_html(
 
         if (
             href
-            and (
-                "image_src" in rel
-                or "image" in rel
-            )
+            and "image_src" in rel
         ):
             candidates.append(
                 urljoin(
@@ -757,10 +771,7 @@ def image_candidates_from_html(
                 )
             )
 
-    # Images
-    for img in soup.find_all(
-        "img",
-    ):
+    for img in soup.find_all("img"):
         values = [
             img.get("src"),
             img.get("data-src"),
@@ -768,9 +779,7 @@ def image_candidates_from_html(
             img.get("data-original"),
         ]
 
-        srcset = img.get(
-            "srcset",
-        )
+        srcset = img.get("srcset")
 
         if srcset:
             first = srcset.split(",")[0].strip()
@@ -792,13 +801,10 @@ def image_candidates_from_html(
             )
 
     unique = []
-
     seen = set()
 
     for candidate in candidates:
-        candidate = normalize_url(
-            candidate
-        )
+        candidate = normalize_url(candidate)
 
         if not valid_image_url(candidate):
             continue
@@ -851,16 +857,13 @@ def download_image(
         ):
             return False
 
-        total = 0
-
         temporary = Path(
             str(destination) + ".tmp"
         )
 
-        with temporary.open(
-            "wb"
-        ) as handle:
+        total = 0
 
+        with temporary.open("wb") as handle:
             for chunk in response.iter_content(
                 chunk_size=65536
             ):
@@ -891,9 +894,7 @@ def download_image(
 
             return False
 
-        temporary.replace(
-            destination
-        )
+        temporary.replace(destination)
 
         return True
 
@@ -926,7 +927,6 @@ def download_article_image(
     if not urls:
         return False
 
-    # Remove old image first
     FINAL_IMAGE.unlink(
         missing_ok=True
     )
@@ -973,49 +973,15 @@ def download_article_image(
 
 
 # ============================================================
-# COUNTY DETECTION
-# ============================================================
-
-def detect_county(text):
-    text_lower = clean_text(
-        text
-    ).lower()
-
-    best_county = ""
-
-    best_hits = 0
-
-    for county, aliases in COUNTY_ALIASES.items():
-        hits = 0
-
-        for alias in aliases:
-            if alias.lower() in text_lower:
-                hits += 1
-
-        if hits > best_hits:
-            best_hits = hits
-            best_county = county
-
-    if best_county:
-        return best_county.title()
-
-    return ""
-
-
-# ============================================================
 # ARTICLE EXTRACTION
 # ============================================================
 
-def extract_article_text(
-    soup,
-):
+def extract_article_text(soup):
     paragraphs = []
 
     article_container = (
         soup.find("article")
-        or soup.find(
-            "main"
-        )
+        or soup.find("main")
         or soup
     )
 
@@ -1041,33 +1007,22 @@ def extract_article_text(
 
         paragraphs.append(text)
 
-    # Remove duplicates
     result = []
-
     seen = set()
 
     for paragraph in paragraphs:
-        key = text_key(
-            paragraph
-        )
+        key = text_key(paragraph)
 
         if key in seen:
             continue
 
         seen.add(key)
+        result.append(paragraph)
 
-        result.append(
-            paragraph
-        )
-
-    return " ".join(
-        result
-    )
+    return " ".join(result)
 
 
-def extract_meta_description(
-    soup,
-):
+def extract_meta_description(soup):
     for name in [
         "description",
         "og:description",
@@ -1102,14 +1057,10 @@ def extract_meta_description(
     return ""
 
 
-def extract_published_date(
-    soup,
-):
+def extract_published_date(soup):
     candidates = []
 
-    for meta in soup.find_all(
-        "meta"
-    ):
+    for meta in soup.find_all("meta"):
         key = (
             meta.get("property")
             or meta.get("name")
@@ -1134,13 +1085,9 @@ def extract_published_date(
                 "date",
             ]
         ):
-            candidates.append(
-                value
-            )
+            candidates.append(value)
 
-    time_tag = soup.find(
-        "time"
-    )
+    time_tag = soup.find("time")
 
     if time_tag:
         candidates.append(
@@ -1177,9 +1124,7 @@ def parse_article(
 
     final_url = response.url
 
-    if not is_approved_url(
-        final_url
-    ):
+    if not is_approved_url(final_url):
         return None
 
     soup = BeautifulSoup(
@@ -1203,9 +1148,7 @@ def parse_article(
         )
 
     if not title:
-        title_tag = soup.find(
-            "h1"
-        )
+        title_tag = soup.find("h1")
 
         if title_tag:
             title = clean_text(
@@ -1223,22 +1166,14 @@ def parse_article(
             )
         )
 
-    title = normalize_title(
-        title
-    )
+    title = normalize_title(title)
 
     if not title:
         return None
 
-    article_text = extract_article_text(
-        soup
-    )
+    article_text = extract_article_text(soup)
 
-    meta_description = (
-        extract_meta_description(
-            soup
-        )
-    )
+    meta_description = extract_meta_description(soup)
 
     combined_text = clean_text(
         title
@@ -1248,17 +1183,11 @@ def parse_article(
         + article_text
     )
 
-    if word_count(
-        article_text
-    ) < MIN_ARTICLE_WORDS:
-        if word_count(
-            combined_text
-        ) < MIN_ARTICLE_WORDS:
+    if word_count(article_text) < MIN_ARTICLE_WORDS:
+        if word_count(combined_text) < MIN_ARTICLE_WORDS:
             return None
 
-    county = detect_county(
-        combined_text
-    )
+    county = detect_county(combined_text)
 
     if not county:
         return None
@@ -1268,7 +1197,7 @@ def parse_article(
         final_url,
     )
 
-    article = {
+    return {
         "title": title,
         "url": final_url,
         "publisher": publisher.get(
@@ -1280,15 +1209,11 @@ def parse_article(
             "",
         ),
         "county": county,
-        "published": extract_published_date(
-            soup
-        ),
+        "published": extract_published_date(soup),
         "description": meta_description,
         "text": article_text,
         "image_urls": image_urls,
     }
-
-    return article
 
 
 # ============================================================
@@ -1308,9 +1233,7 @@ def looks_like_article_link(
         .lower()
     )
 
-    text = clean_text(
-        anchor_text
-    ).lower()
+    text = clean_text(anchor_text).lower()
 
     if len(text) < 15:
         return False
@@ -1346,12 +1269,8 @@ def looks_like_article_link(
     return True
 
 
-def collect_links_from_page(
-    page_url,
-):
-    response = fetch_url(
-        page_url
-    )
+def collect_links_from_page(page_url):
+    response = fetch_url(page_url)
 
     if response is None:
         return []
@@ -1387,9 +1306,7 @@ def collect_links_from_page(
             href,
         )
 
-        absolute = absolute.split(
-            "#"
-        )[0]
+        absolute = absolute.split("#")[0]
 
         if not looks_like_article_link(
             absolute,
@@ -1405,7 +1322,6 @@ def collect_links_from_page(
         )
 
     unique = []
-
     seen = set()
 
     for item in links:
@@ -1415,35 +1331,27 @@ def collect_links_from_page(
             continue
 
         seen.add(url)
-
         unique.append(item)
 
     return unique
 
 
 # ============================================================
-# RSS COLLECTION
+# RSS
 # ============================================================
 
-def collect_rss_candidates(
-    publisher,
-):
+def collect_rss_candidates(publisher):
     candidates = []
 
     rss_urls = [
-        publisher["base_url"]
-        + "feed/",
-        publisher["base_url"]
-        + "feed",
-        publisher["base_url"]
-        + "rss",
+        publisher["base_url"] + "feed/",
+        publisher["base_url"] + "feed",
+        publisher["base_url"] + "rss",
     ]
 
     for rss_url in rss_urls:
         try:
-            feed = feedparser.parse(
-                rss_url
-            )
+            feed = feedparser.parse(rss_url)
 
             if not feed.entries:
                 continue
@@ -1463,15 +1371,10 @@ def collect_rss_candidates(
                     )
                 )
 
-                if not link:
+                if not link or not title:
                     continue
 
-                if not is_approved_url(
-                    link
-                ):
-                    continue
-
-                if not title:
+                if not is_approved_url(link):
                     continue
 
                 candidates.append(
@@ -1486,44 +1389,36 @@ def collect_rss_candidates(
 
         except Exception as exc:
             print(
-                f"[RSS] {publisher['name']} "
-                f"failed: {exc}"
+                f"[RSS] {publisher['name']} failed: {exc}"
             )
 
     return candidates
 
 
 # ============================================================
-# CANDIDATE DISCOVERY
+# DISCOVERY
 # ============================================================
 
 def discover_candidate_urls():
     all_candidates = []
-
     seen = set()
 
     for publisher in APPROVED_PUBLISHERS:
         print()
-        print(
-            "=" * 70
-        )
+        print("=" * 70)
         print(
             f"COLLECTING: {publisher['name']}"
         )
-        print(
-            "=" * 70
-        )
+        print("=" * 70)
 
         source_candidates = []
 
-        # RSS first
         source_candidates.extend(
             collect_rss_candidates(
                 publisher
             )
         )
 
-        # Website sections
         for section in publisher["sections"]:
             if len(source_candidates) >= MAX_CANDIDATES_PER_SOURCE:
                 break
@@ -1534,9 +1429,7 @@ def discover_candidate_urls():
                 )
 
                 source_candidates.extend(
-                    links[
-                        :MAX_CANDIDATES_PER_SOURCE
-                    ]
+                    links[:MAX_CANDIDATES_PER_SOURCE]
                 )
 
             except Exception as exc:
@@ -1546,4 +1439,673 @@ def discover_candidate_urls():
 
         local_seen = set()
 
-        for candidate in source_candidates
+        # IMPORTANT: colon is present here.
+        for candidate in source_candidates:
+            url = candidate.get(
+                "url",
+                "",
+            )
+
+            if not url:
+                continue
+
+            if url in local_seen:
+                continue
+
+            local_seen.add(url)
+
+            if url in seen:
+                continue
+
+            seen.add(url)
+
+            all_candidates.append(
+                {
+                    "url": url,
+                    "anchor_text": candidate.get(
+                        "anchor_text",
+                        "",
+                    ),
+                    "publisher": publisher,
+                }
+            )
+
+            if len(all_candidates) >= MAX_TOTAL_CANDIDATES:
+                break
+
+        if len(all_candidates) >= MAX_TOTAL_CANDIDATES:
+            break
+
+    print()
+    print(
+        f"[DISCOVERY] Candidate URLs found: "
+        f"{len(all_candidates)}"
+    )
+
+    return all_candidates
+
+
+# ============================================================
+# RELEVANCE
+# ============================================================
+
+def relevance_score(article):
+    title = clean_text(
+        article.get(
+            "title",
+            "",
+        )
+    )
+
+    text = clean_text(
+        article.get(
+            "text",
+            "",
+        )
+    )
+
+    county = clean_text(
+        article.get(
+            "county",
+            "",
+        )
+    )
+
+    combined = (
+        title
+        + " "
+        + text
+    ).lower()
+
+    score = 0
+
+    if county:
+        score += 35
+
+    for item in COUNTIES:
+        if item.lower() in combined:
+            score += 10
+
+    for term in RUTO_TERMS:
+        if term in combined:
+            score += 15
+
+    development_hits = sum(
+        1
+        for term in DEVELOPMENT_TERMS
+        if term in combined
+    )
+
+    score += min(
+        development_hits * 4,
+        24,
+    )
+
+    political_hits = sum(
+        1
+        for term in POLITICAL_TERMS
+        if term in combined
+    )
+
+    score += min(
+        political_hits * 3,
+        18,
+    )
+
+    urgent_hits = sum(
+        1
+        for term in URGENT_TERMS
+        if term in combined
+    )
+
+    score += min(
+        urgent_hits * 5,
+        25,
+    )
+
+    title_lower = title.lower()
+
+    for term in (
+        RUTO_TERMS
+        + URGENT_TERMS
+        + DEVELOPMENT_TERMS
+    ):
+        if term in title_lower:
+            score += 7
+
+    article_words = word_count(text)
+
+    if article_words >= 150:
+        score += 10
+    elif article_words >= 100:
+        score += 7
+    elif article_words >= 60:
+        score += 4
+
+    if article.get("image_urls"):
+        score += 15
+
+    for term in LOW_VALUE_TERMS:
+        if term in title_lower:
+            score -= 50
+
+    if len(title) < 30:
+        score -= 15
+
+    return score
+
+
+def is_relevant_story(article):
+    title = clean_text(
+        article.get(
+            "title",
+            "",
+        )
+    )
+
+    text = clean_text(
+        article.get(
+            "text",
+            "",
+        )
+    )
+
+    if not title:
+        return False
+
+    if not article.get("url"):
+        return False
+
+    if not is_approved_url(
+        article.get(
+            "url",
+            "",
+        )
+    ):
+        return False
+
+    if word_count(text) < MIN_ARTICLE_WORDS:
+        return False
+
+    county = article.get(
+        "county",
+        "",
+    )
+
+    if not county:
+        return False
+
+    combined = (
+        title
+        + " "
+        + text
+    ).lower()
+
+    county_match = False
+
+    for aliases in COUNTY_ALIASES.values():
+        for alias in aliases:
+            if alias.lower() in combined:
+                county_match = True
+                break
+
+        if county_match:
+            break
+
+    ruto_match = any(
+        term in combined
+        for term in RUTO_TERMS
+    )
+
+    if not county_match and not ruto_match:
+        return False
+
+    title_lower = title.lower()
+
+    for term in LOW_VALUE_TERMS:
+        if term in title_lower:
+            return False
+
+    return True
+
+
+# ============================================================
+# NARRATION
+# ============================================================
+
+def clean_for_narration(text):
+    text = clean_text(text)
+
+    text = re.sub(
+        r"\b(read more|click here|subscribe|share this story)\b",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    text = re.sub(
+        r"https?://\S+",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    text = re.sub(
+        r"@\w+",
+        "",
+        text,
+    )
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text,
+    )
+
+    return text.strip()
+
+
+def first_useful_sentences(
+    article,
+    max_sentences=8,
+):
+    title = clean_for_narration(
+        article.get(
+            "title",
+            "",
+        )
+    )
+
+    description = clean_for_narration(
+        article.get(
+            "description",
+            "",
+        )
+    )
+
+    article_text = clean_for_narration(
+        article.get(
+            "text",
+            "",
+        )
+    )
+
+    sentences = []
+
+    if title:
+        sentences.append(
+            title.rstrip(".!?") + "."
+        )
+
+    for source in [
+        description,
+        article_text,
+    ]:
+        if not source:
+            continue
+
+        for sentence in split_sentences(source):
+            sentence = clean_for_narration(
+                sentence
+            )
+
+            if word_count(sentence) < 5:
+                continue
+
+            key = sentence_key(sentence)
+
+            if not key:
+                continue
+
+            if any(
+                sentence_key(existing) == key
+                for existing in sentences
+            ):
+                continue
+
+            sentences.append(sentence)
+
+            if len(sentences) >= max_sentences:
+                return sentences
+
+    return sentences
+
+
+def build_narration(article):
+    title = clean_for_narration(
+        article.get(
+            "title",
+            "",
+        )
+    )
+
+    county = clean_for_narration(
+        article.get(
+            "county",
+            "",
+        )
+    )
+
+    sentences = first_useful_sentences(
+        article,
+        max_sentences=10,
+    )
+
+    if not sentences:
+        raise RuntimeError(
+            "Could not build narration."
+        )
+
+    body = []
+
+    for sentence in sentences:
+        sentence = clean_for_narration(
+            sentence
+        )
+
+        if not sentence:
+            continue
+
+        if (
+            title
+            and sentence_key(sentence)
+            == sentence_key(title + ".")
+        ):
+            if not body:
+                body.append(sentence)
+
+            continue
+
+        body.append(sentence)
+
+    script = " ".join(body)
+
+    script = clean_for_narration(script)
+
+    if (
+        county
+        and county.lower()
+        not in script.lower()[:180]
+    ):
+        script = (
+            f"In {county}, "
+            + script
+        )
+
+    words = script.split()
+
+    if len(words) > MAX_SCRIPT_WORDS:
+        trimmed = []
+        count = 0
+
+        for sentence in split_sentences(script):
+            sentence_words = sentence.split()
+
+            if (
+                count
+                + len(sentence_words)
+                > MAX_SCRIPT_WORDS
+            ):
+                break
+
+            trimmed.append(sentence)
+            count += len(sentence_words)
+
+        script = " ".join(trimmed)
+
+    if word_count(script) < MIN_SCRIPT_WORDS:
+        additional = clean_for_narration(
+            article.get(
+                "text",
+                "",
+            )
+        )
+
+        existing_keys = {
+            sentence_key(sentence)
+            for sentence in split_sentences(script)
+        }
+
+        for sentence in split_sentences(additional):
+            if sentence_key(sentence) in existing_keys:
+                continue
+
+            candidate = clean_text(
+                script
+                + " "
+                + sentence
+            )
+
+            if word_count(candidate) > MAX_SCRIPT_WORDS:
+                break
+
+            script = candidate
+
+            if word_count(script) >= MIN_SCRIPT_WORDS:
+                break
+
+    return clean_text(script)
+
+
+# ============================================================
+# STORY TYPE
+# ============================================================
+
+def determine_story_type(article):
+    combined = (
+        clean_text(
+            article.get(
+                "title",
+                "",
+            )
+        )
+        + " "
+        + clean_text(
+            article.get(
+                "text",
+                "",
+            )
+        )
+    ).lower()
+
+    if any(
+        term in combined
+        for term in [
+            "accident",
+            "crash",
+            "fire",
+            "flood",
+            "killed",
+            "dead",
+            "missing",
+            "arrested",
+            "arrest",
+            "rescue",
+            "evacuated",
+        ]
+    ):
+        return "Breaking News"
+
+    if any(
+        term in combined
+        for term in RUTO_TERMS
+    ):
+        return "National & Regional Affairs"
+
+    if any(
+        term in combined
+        for term in DEVELOPMENT_TERMS
+    ):
+        return "Development"
+
+    if any(
+        term in combined
+        for term in POLITICAL_TERMS
+    ):
+        return "Politics & Public Affairs"
+
+    return "Rift Valley News"
+
+
+# ============================================================
+# VALIDATION
+# ============================================================
+
+def validate(article, script):
+    if not article.get("title"):
+        raise RuntimeError(
+            "Story title is missing."
+        )
+
+    if not article.get("url"):
+        raise RuntimeError(
+            "Story URL is missing."
+        )
+
+    if not article.get("story_type"):
+        raise RuntimeError(
+            "Story type is missing."
+        )
+
+    if word_count(script) < 45:
+        raise RuntimeError(
+            "Narration contains fewer than 45 words."
+        )
+
+    if not FINAL_IMAGE.exists():
+        raise RuntimeError(
+            "Final article image does not exist."
+        )
+
+    try:
+        image = Image.open(
+            FINAL_IMAGE
+        )
+
+        image.verify()
+
+    except Exception as exc:
+        raise RuntimeError(
+            f"Final image is invalid: {exc}"
+        )
+
+    script_lower = script.lower()
+
+    forbidden_attribution_patterns = [
+        r"\baccording to nation africa\b",
+        r"\baccording to daily nation\b",
+        r"\bnation africa reports\b",
+        r"\bdaily nation reports\b",
+        r"\breported by nation africa\b",
+        r"\breported by daily nation\b",
+
+        r"\baccording to citizen digital\b",
+        r"\bcitizen digital reports\b",
+        r"\breported by citizen digital\b",
+
+        r"\baccording to the star\b",
+        r"\bthe star reports\b",
+        r"\breported by the star\b",
+
+        r"\baccording to kbc\b",
+        r"\bkbc reports\b",
+        r"\breported by kbc\b",
+
+        r"\baccording to people daily\b",
+        r"\bpeople daily reports\b",
+        r"\breported by people daily\b",
+
+        r"\baccording to standard media\b",
+        r"\bstandard media reports\b",
+        r"\breported by standard media\b",
+
+        r"\baccording to capital news\b",
+        r"\bcapital news reports\b",
+        r"\breported by capital news\b",
+
+        r"\baccording to ntv\b",
+        r"\bntv reports\b",
+        r"\breported by ntv\b",
+
+        r"\baccording to tv47\b",
+        r"\btv47 reports\b",
+        r"\breported by tv47\b",
+    ]
+
+    for pattern in forbidden_attribution_patterns:
+        if re.search(
+            pattern,
+            script_lower,
+            flags=re.IGNORECASE,
+        ):
+            raise RuntimeError(
+                "Publisher attribution detected "
+                "in narration."
+            )
+
+    sentences = split_sentences(script)
+
+    seen = set()
+
+    for sentence in sentences:
+        key = sentence_key(sentence)
+
+        if not key:
+            continue
+
+        if key in seen:
+            raise RuntimeError(
+                "Repeated sentence detected."
+            )
+
+        seen.add(key)
+
+    print(
+        "[VALIDATION] Story and narration passed."
+    )
+
+
+# ============================================================
+# PROCESS CANDIDATE
+# ============================================================
+
+def process_candidate(candidate):
+    url = candidate.get(
+        "url",
+        "",
+    )
+
+    publisher = candidate.get(
+        "publisher",
+        {},
+    )
+
+    print()
+    print("-" * 70)
+    print(
+        f"[CANDIDATE] {url}"
+    )
+    print("-" * 70)
+
+    if not is_approved_url(url):
+        print(
+            "[SKIP] Domain not approved."
+        )
+        return None
+
+    response = fetch_url(url)
+
+    if response is None:
+        print(
+            "[SKIP] Article could not be fetched."
+        )
+        return None
+
+    article = parse_article(
+        response.url,
+        publisher,
+    )
+
+    if not article:
+        print(
+            "[SKIP] Could not parse article
