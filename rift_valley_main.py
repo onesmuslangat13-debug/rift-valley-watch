@@ -2107,5 +2107,7 @@ def process_candidate(candidate):
     )
 
     if not article:
-        print(
-            "[SKIP] Could not parse article
+    print(
+        "[SKIP] Could not parse article."
+    )
+    continue
