@@ -24,12 +24,17 @@ SOURCE_DIR = ROOT / "assets" / "source"
 
 SELECTED_STORY = DATA_DIR / "selected_story.json"
 SELECTED_SCRIPT = DATA_DIR / "selected_script.json"
+STORY_HISTORY = DATA_DIR / "story_history.json"
 
 VIDEO_GENERATOR = ROOT / "rift_valley_video_generator.py"
 
 FINAL_VIDEO = OUTPUT_DIR / "rift_valley_watch_reel.mp4"
 FINAL_IMAGE = SOURCE_DIR / "story_image.jpg"
 
+
+# ==============================================================
+# RIFT VALLEY COUNTIES
+# ==============================================================
 
 COUNTIES = {
     "Bomet": [
@@ -85,6 +90,10 @@ COUNTIES = {
     ],
 }
 
+
+# ==============================================================
+# APPROVED PUBLISHER PAGES
+# ==============================================================
 
 PUBLISHER_PAGES = [
     "https://citizen.digital/",
@@ -170,9 +179,28 @@ SOURCE_NAMES = [
 ]
 
 
+# ==============================================================
+# STORY HISTORY SETTINGS
+# ==============================================================
+
+# Number of recent stories that should be protected from reuse.
+RECENT_HISTORY_LIMIT = 12
+
+# Maximum number of history records kept permanently.
+MAX_HISTORY_RECORDS = 100
+
+
+# ==============================================================
+# LOGGING
+# ==============================================================
+
 def log(text=""):
     print(text, flush=True)
 
+
+# ==============================================================
+# BASIC CLEANING
+# ==============================================================
 
 def clean(value):
 
@@ -322,6 +350,10 @@ def clean_title(title):
     return clean(title)
 
 
+# ==============================================================
+# TEXT SIMILARITY
+# ==============================================================
+
 def normalize_sentence(text):
 
     text = remove_junk(text).lower()
@@ -384,7 +416,6 @@ def dedupe_sentences(
 ):
 
     result = []
-
     seen = set()
 
     for sentence in sentences:
@@ -419,18 +450,16 @@ def dedupe_sentences(
             continue
 
         seen.add(key)
-
-        result.append(
-            sentence
-        )
+        result.append(sentence)
 
     return result
 
 
-def save_json(
-    path,
-    data,
-):
+# ==============================================================
+# JSON
+# ==============================================================
+
+def save_json(path, data):
 
     path.parent.mkdir(
         parents=True,
@@ -449,6 +478,314 @@ def save_json(
             ensure_ascii=False,
         )
 
+
+def load_json(path, default):
+
+    if not path.exists():
+        return default
+
+    try:
+
+        with path.open(
+            "r",
+            encoding="utf-8",
+        ) as f:
+
+            data = json.load(f)
+
+        return data
+
+    except Exception as exc:
+
+        log(
+            f"WARNING: Could not read "
+            f"{path}: {exc}"
+        )
+
+        return default
+
+
+# ==============================================================
+# STORY HISTORY
+# ==============================================================
+
+def load_history():
+
+    data = load_json(
+        STORY_HISTORY,
+        [],
+    )
+
+    if not isinstance(data, list):
+        return []
+
+    cleaned = []
+
+    for item in data:
+
+        if not isinstance(item, dict):
+            continue
+
+        url = clean(
+            item.get("url", "")
+        )
+
+        title = clean(
+            item.get("title", "")
+        )
+
+        if not url and not title:
+            continue
+
+        cleaned.append(
+            {
+                "url": url,
+                "title": title,
+                "county": clean(
+                    item.get(
+                        "county",
+                        "",
+                    )
+                ),
+                "image_md5": clean(
+                    item.get(
+                        "image_md5",
+                        "",
+                    )
+                ),
+                "selected_at": clean(
+                    item.get(
+                        "selected_at",
+                        "",
+                    )
+                ),
+            }
+        )
+
+    return cleaned[-MAX_HISTORY_RECORDS:]
+
+
+def save_history(history):
+
+    history = history[
+        -MAX_HISTORY_RECORDS:
+    ]
+
+    save_json(
+        STORY_HISTORY,
+        history,
+    )
+
+
+def add_to_history(article):
+
+    history = load_history()
+
+    url = clean(
+        article.get(
+            "url",
+            "",
+        )
+    )
+
+    title = clean_title(
+        article.get(
+            "title",
+            "",
+        )
+    )
+
+    county = clean(
+        article.get(
+            "county",
+            "",
+        )
+    )
+
+    image_md5 = clean(
+        article.get(
+            "image",
+            {},
+        ).get(
+            "md5",
+            "",
+        )
+        if isinstance(
+            article.get("image"),
+            dict,
+        )
+        else ""
+    )
+
+    # Remove an existing identical record
+    # before adding the new one.
+    filtered = []
+
+    for item in history:
+
+        if (
+            url
+            and item.get("url") == url
+        ):
+
+            continue
+
+        if (
+            title
+            and item.get("title") == title
+        ):
+
+            continue
+
+        filtered.append(item)
+
+    filtered.append(
+        {
+            "url": url,
+            "title": title,
+            "county": county,
+            "image_md5": image_md5,
+            "selected_at": datetime.now(
+                timezone.utc
+            ).isoformat(),
+        }
+    )
+
+    save_history(filtered)
+
+    log(
+        "HISTORY UPDATED: "
+        f"{len(filtered)} records stored."
+    )
+
+
+def history_keys(history):
+
+    urls = set()
+    titles = set()
+    images = set()
+
+    for item in history:
+
+        url = clean(
+            item.get("url", "")
+        )
+
+        title = normalize_sentence(
+            item.get("title", "")
+        )
+
+        image = clean(
+            item.get(
+                "image_md5",
+                "",
+            )
+        )
+
+        if url:
+            urls.add(url)
+
+        if title:
+            titles.add(title)
+
+        if image:
+            images.add(image)
+
+    return urls, titles, images
+
+
+def is_recently_used(
+    article,
+    history,
+    recent_limit=RECENT_HISTORY_LIMIT,
+):
+
+    recent = history[
+        -recent_limit:
+    ]
+
+    article_url = clean(
+        article.get(
+            "url",
+            "",
+        )
+    )
+
+    article_title = normalize_sentence(
+        article.get(
+            "title",
+            "",
+        )
+    )
+
+    article_image = clean(
+        article.get(
+            "image",
+            {},
+        ).get(
+            "md5",
+            "",
+        )
+        if isinstance(
+            article.get("image"),
+            dict,
+        )
+        else ""
+    )
+
+    for item in recent:
+
+        old_url = clean(
+            item.get(
+                "url",
+                "",
+            )
+        )
+
+        old_title = normalize_sentence(
+            item.get(
+                "title",
+                "",
+            )
+        )
+
+        old_image = clean(
+            item.get(
+                "image_md5",
+                "",
+            )
+        )
+
+        if (
+            article_url
+            and old_url
+            and article_url == old_url
+        ):
+
+            return True
+
+        if (
+            article_title
+            and old_title
+            and article_title == old_title
+        ):
+
+            return True
+
+        if (
+            article_image
+            and old_image
+            and article_image == old_image
+        ):
+
+            return True
+
+    return False
+
+
+# ==============================================================
+# URL / DOMAIN
+# ==============================================================
 
 def domain(url):
 
@@ -502,6 +839,10 @@ def approved(url):
     )
 
 
+# ==============================================================
+# COUNTY DETECTION
+# ==============================================================
+
 def county_from_text(text):
 
     text = clean(text).lower()
@@ -533,6 +874,10 @@ def county_from_text(text):
 
     return best
 
+
+# ==============================================================
+# HTTP
+# ==============================================================
 
 def fetch(
     url,
@@ -577,9 +922,11 @@ def fetch(
         return None
 
 
-def discover_links(
-    page_url,
-):
+# ==============================================================
+# DISCOVER ARTICLE LINKS
+# ==============================================================
+
+def discover_links(page_url):
 
     response = fetch(
         page_url
@@ -654,6 +1001,10 @@ def discover_links(
     return result
 
 
+# ==============================================================
+# IMAGE DISCOVERY
+# ==============================================================
+
 def add_image(
     result,
     seen,
@@ -694,9 +1045,7 @@ def add_image(
 
         seen.add(value)
 
-        result.append(
-            value
-        )
+        result.append(value)
 
 
 def image_candidates(
@@ -763,7 +1112,6 @@ def image_candidates(
             ):
 
                 if key in value:
-
                     scan(
                         value[key]
                     )
@@ -836,6 +1184,10 @@ def image_candidates(
     return result
 
 
+# ==============================================================
+# IMAGE DOWNLOAD
+# ==============================================================
+
 def download_image(
     url,
     referer=None,
@@ -852,18 +1204,13 @@ def download_image(
     )
 
     headers["Accept"] = (
-        "image/avif,"
-        "image/webp,"
-        "image/apng,"
-        "image/*,"
+        "image/avif,image/webp,"
+        "image/apng,image/*,"
         "*/*;q=0.8"
     )
 
     if referer:
-
-        headers["Referer"] = (
-            referer
-        )
+        headers["Referer"] = referer
 
     try:
 
@@ -937,6 +1284,10 @@ def download_image(
 
         return None
 
+
+# ==============================================================
+# ARTICLE EXTRACTION
+# ==============================================================
 
 def extract_article(url):
 
@@ -1060,10 +1411,7 @@ def extract_article(url):
                 )
             )
 
-            if len(
-                text
-            ) < 35:
-
+            if len(text) < 35:
                 continue
 
             low = text.lower()
@@ -1081,14 +1429,10 @@ def extract_article(url):
                 item in low
                 for item in excluded
             ):
-
                 continue
 
             if text not in paragraphs:
-
-                paragraphs.append(
-                    text
-                )
+                paragraphs.append(text)
 
     body = clean(
         " ".join(
@@ -1206,6 +1550,10 @@ def extract_article(url):
     }
 
 
+# ==============================================================
+# ORIGINAL-STYLE NARRATION BUILD
+# ==============================================================
+
 def build_script(article):
 
     title = clean_title(
@@ -1244,7 +1592,6 @@ def build_script(article):
                 title,
             ) >= 0.82
         ):
-
             continue
 
         if any(
@@ -1254,19 +1601,17 @@ def build_script(article):
             ) >= 0.72
             for old in selected
         ):
-
             continue
 
-        selected.append(
-            sentence
-        )
+        selected.append(sentence)
 
-        if len(
+        word_count = len(
             " ".join(
                 selected
             ).split()
-        ) >= 105:
+        )
 
+        if word_count >= 105:
             break
 
     narration = " ".join(
@@ -1292,6 +1637,10 @@ def build_script(article):
     )
 
 
+# ==============================================================
+# SAVE IMAGE
+# ==============================================================
+
 def save_image(info):
 
     SOURCE_DIR.mkdir(
@@ -1300,7 +1649,6 @@ def save_image(info):
     )
 
     if FINAL_IMAGE.exists():
-
         FINAL_IMAGE.unlink()
 
     info["image"].convert(
@@ -1315,6 +1663,10 @@ def save_image(info):
     return FINAL_IMAGE
 
 
+# ==============================================================
+# STORY SELECTION
+# ==============================================================
+
 def select_best(candidates):
 
     if not candidates:
@@ -1323,6 +1675,10 @@ def select_best(candidates):
             "No real Rift Valley article "
             "with a usable image was found."
         )
+
+    # ----------------------------------------------------------
+    # Remove duplicate images within this run.
+    # ----------------------------------------------------------
 
     unique = []
     hashes = set()
@@ -1340,9 +1696,7 @@ def select_best(candidates):
             image_hash
         )
 
-        unique.append(
-            item
-        )
+        unique.append(item)
 
     if not unique:
 
@@ -1351,13 +1705,228 @@ def select_best(candidates):
             "was found."
         )
 
-    unique.sort(
+    # ----------------------------------------------------------
+    # Load permanent history.
+    # ----------------------------------------------------------
+
+    history = load_history()
+
+    recent = history[
+        -RECENT_HISTORY_LIMIT:
+    ]
+
+    used_urls, used_titles, used_images = (
+        history_keys(history)
+    )
+
+    log("")
+    log(
+        "STORY HISTORY: "
+        f"{len(history)} records"
+    )
+
+    log(
+        "RECENT STORY PROTECTION: "
+        f"last {len(recent)} stories"
+    )
+
+    # ----------------------------------------------------------
+    # First priority:
+    # completely new stories never used before.
+    # ----------------------------------------------------------
+
+    never_used = []
+
+    for item in unique:
+
+        item_url = clean(
+            item.get(
+                "url",
+                "",
+            )
+        )
+
+        item_title = normalize_sentence(
+            item.get(
+                "title",
+                "",
+            )
+        )
+
+        item_image = clean(
+            item.get(
+                "image",
+                {},
+            ).get(
+                "md5",
+                "",
+            )
+            if isinstance(
+                item.get("image"),
+                dict,
+            )
+            else ""
+        )
+
+        already_used = (
+            (
+                item_url
+                and item_url in used_urls
+            )
+            or
+            (
+                item_title
+                and item_title in used_titles
+            )
+            or
+            (
+                item_image
+                and item_image in used_images
+            )
+        )
+
+        if not already_used:
+            never_used.append(item)
+
+    # ----------------------------------------------------------
+    # Sort newest/new candidates by score.
+    # ----------------------------------------------------------
+
+    never_used.sort(
+        key=lambda x: (
+            x["score"],
+            len(
+                x.get(
+                    "body",
+                    "",
+                ).split()
+            ),
+        ),
+        reverse=True,
+    )
+
+    if never_used:
+
+        selected = never_used[0]
+
+        log(
+            "SELECTION MODE: "
+            "NEW STORY"
+        )
+
+        log(
+            "SELECTED NEW STORY: "
+            f"{selected['county']} | "
+            f"{selected['title']} | "
+            f"SCORE {selected['score']}"
+        )
+
+        return selected
+
+    # ----------------------------------------------------------
+    # If every available story has been used before,
+    # protect the most recent stories and choose the best
+    # older story.
+    # ----------------------------------------------------------
+
+    older_candidates = [
+        item
+        for item in unique
+        if not is_recently_used(
+            item,
+            history,
+            RECENT_HISTORY_LIMIT,
+        )
+    ]
+
+    older_candidates.sort(
+        key=lambda x: (
+            x["score"],
+            len(
+                x.get(
+                    "body",
+                    "",
+                ).split()
+            ),
+        ),
+        reverse=True,
+    )
+
+    if older_candidates:
+
+        selected = older_candidates[0]
+
+        log(
+            "SELECTION MODE: "
+            "OLDER STORY AFTER HISTORY FILTER"
+        )
+
+        log(
+            "SELECTED STORY: "
+            f"{selected['county']} | "
+            f"{selected['title']} | "
+            f"SCORE {selected['score']}"
+        )
+
+        return selected
+
+    # ----------------------------------------------------------
+    # Absolute fallback:
+    # if every available candidate is within the recent
+    # protection window, choose the highest scoring story
+    # that is NOT the immediately previous story.
+    # ----------------------------------------------------------
+
+    previous_url = ""
+
+    if history:
+
+        previous_url = clean(
+            history[-1].get(
+                "url",
+                "",
+            )
+        )
+
+    fallback = [
+        item
+        for item in unique
+        if clean(
+            item.get(
+                "url",
+                "",
+            )
+        ) != previous_url
+    ]
+
+    if not fallback:
+        fallback = unique
+
+    fallback.sort(
         key=lambda x: x["score"],
         reverse=True,
     )
 
-    return unique[0]
+    selected = fallback[0]
 
+    log(
+        "SELECTION MODE: "
+        "FALLBACK"
+    )
+
+    log(
+        "SELECTED STORY: "
+        f"{selected['county']} | "
+        f"{selected['title']} | "
+        f"SCORE {selected['score']}"
+    )
+
+    return selected
+
+
+# ==============================================================
+# WRITE SELECTED STORY
+# ==============================================================
 
 def write_files(article):
 
@@ -1425,6 +1994,10 @@ def write_files(article):
 
     return story
 
+
+# ==============================================================
+# VALIDATION
+# ==============================================================
 
 def validate(story):
 
@@ -1523,9 +2096,16 @@ def validate(story):
             )
 
 
+# ==============================================================
+# DISCOVER STORIES
+# ==============================================================
+
 def discover():
 
     candidates = []
+
+    # Keep URLs unique across all publishers.
+    seen_article_urls = set()
 
     for page in PUBLISHER_PAGES:
 
@@ -1542,6 +2122,9 @@ def discover():
             f"LOCAL LINKS: {len(links)}"
         )
 
+        # Put links that already mention a Rift Valley
+        # county near the front, while still allowing
+        # article-page extraction to discover counties.
         links.sort(
             key=lambda x: (
                 1 if x["county"] else 0,
@@ -1550,11 +2133,30 @@ def discover():
             reverse=True,
         )
 
-        for item in links[:60]:
+        checked = 0
+
+        for item in links[:80]:
+
+            url = clean(
+                item.get(
+                    "url",
+                    "",
+                )
+            )
+
+            if not url:
+                continue
+
+            if url in seen_article_urls:
+                continue
+
+            seen_article_urls.add(url)
 
             article = extract_article(
-                item["url"]
+                url
             )
+
+            checked += 1
 
             if article:
 
@@ -1565,199 +2167,35 @@ def discover():
                 log(
                     "ACCEPTED: "
                     f"{article['county']} | "
-                    f"{article['title']}"
+                    f"{article['title']} | "
+                    f"SCORE {article['score']}"
                 )
-
-                if len(
-                    candidates
-                ) >= 20:
-
-                    return candidates
 
             time.sleep(
                 0.15
             )
 
+            # Collect enough candidates to give
+            # the history filter real choice.
+            if len(
+                candidates
+            ) >= 30:
+
+                return candidates
+
+        log(
+            f"ARTICLES CHECKED: {checked}"
+        )
+
     return candidates
 
+
+# ==============================================================
+# CLEAN TEMPORARY GENERATED FILES
+# ==============================================================
 
 def clean_previous():
 
     for directory in (
         DATA_DIR,
-        OUTPUT_DIR,
-        SOURCE_DIR,
-    ):
-
-        directory.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
-    for path in (
-        SELECTED_STORY,
-        SELECTED_SCRIPT,
-        FINAL_IMAGE,
-        FINAL_VIDEO,
-    ):
-
-        if path.exists():
-
-            path.unlink()
-
-
-def run_generator():
-
-    if not VIDEO_GENERATOR.exists():
-
-        raise RuntimeError(
-            "rift_valley_video_generator.py "
-            "not found."
-        )
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-u",
-            str(VIDEO_GENERATOR),
-        ],
-        cwd=str(ROOT),
-    )
-
-    if result.returncode != 0:
-
-        raise RuntimeError(
-            "Video generator failed "
-            f"with exit code "
-            f"{result.returncode}"
-        )
-
-
-def verify():
-
-    if (
-        not FINAL_VIDEO.exists()
-        or FINAL_VIDEO.stat().st_size < 100000
-    ):
-
-        raise RuntimeError(
-            "Final Rift Valley Watch MP4 "
-            "was not generated correctly."
-        )
-
-    result = subprocess.run(
-        [
-            "ffprobe",
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            str(FINAL_VIDEO),
-        ],
-        capture_output=True,
-        text=True,
-    )
-
-    if result.returncode != 0:
-
-        raise RuntimeError(
-            "Final MP4 failed FFprobe validation."
-        )
-
-    video_duration = float(
-        result.stdout.strip()
-    )
-
-    if video_duration < 5:
-
-        raise RuntimeError(
-            "Final MP4 is too short."
-        )
-
-    log(
-        "FINAL VIDEO VERIFIED: "
-        f"{FINAL_VIDEO} | "
-        f"{FINAL_VIDEO.stat().st_size / 1048576:.2f} MB | "
-        f"{video_duration:.2f}s"
-    )
-
-
-def main():
-
-    log("=" * 70)
-
-    log(
-        "STARTING RIFT VALLEY WATCH"
-    )
-
-    log(
-        "VERSION: "
-        "RVW_MAIN_V13_CLEAN_SCRIPT"
-    )
-
-    log("=" * 70)
-
-    clean_previous()
-
-    candidates = discover()
-
-    log(
-        f"VALID STORIES FOUND: "
-        f"{len(candidates)}"
-    )
-
-    selected = select_best(
-        candidates
-    )
-
-    log(
-        "SELECTED: "
-        f"{selected['county']} | "
-        f"{selected['title']} | "
-        f"SCORE {selected['score']}"
-    )
-
-    story = write_files(
-        selected
-    )
-
-    log(
-        "CLEAN HEADLINE: "
-        f"{story['title']}"
-    )
-
-    log(
-        "NARRATION WORDS: "
-        f"{len(story['script'].split())}"
-    )
-
-    log(
-        "NARRATION CLEANUP: "
-        "Advertisement markers removed; "
-        "truncation markers removed; "
-        "duplicates removed"
-    )
-
-    save_json(
-        SELECTED_SCRIPT,
-        {
-            "title": story["title"],
-            "county": story["county"],
-            "narration": story["script"],
-        },
-    )
-
-    run_generator()
-
-    verify()
-
-    log(
-        "RIFT VALLEY WATCH COMPLETED"
-    )
-
-
-if __name__ == "__main__":
-
-    main()
+       
