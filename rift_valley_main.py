@@ -1811,4 +1811,4 @@ def verify_final_video(path):
         text=True,
     )
 
-    if result.returncode != 
+    if result.returncode != 0:
