@@ -19,7 +19,7 @@ from PIL import Image
 # MAIN STORY SELECTION ENGINE
 # ============================================================
 
-VERSION = "RVW_MAIN_V18_SYNTAX_FIXED"
+VERSION = "RVW_MAIN_V19_NARRATION_LENGTH_FIXED"
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -43,7 +43,11 @@ REQUEST_TIMEOUT = 25
 IMAGE_TIMEOUT = 25
 
 MIN_ARTICLE_WORDS = 35
-MIN_SCRIPT_WORDS = 45
+
+# The video generator requires a stronger narration than the
+# previous main engine was guaranteeing.
+MIN_SCRIPT_WORDS = 80
+TARGET_SCRIPT_WORDS = 100
 MAX_SCRIPT_WORDS = 145
 
 MAX_CANDIDATES_PER_SOURCE = 25
@@ -1706,7 +1710,7 @@ def clean_for_narration(text):
 
 def first_useful_sentences(
     article,
-    max_sentences=8,
+    max_sentences=16,
 ):
     title = clean_for_narration(
         article.get(
@@ -1770,6 +1774,31 @@ def first_useful_sentences(
     return sentences
 
 
+def trim_script_to_max_words(script):
+    if word_count(script) <= MAX_SCRIPT_WORDS:
+        return clean_text(script)
+
+    trimmed = []
+    count = 0
+
+    for sentence in split_sentences(script):
+        sentence_words = sentence.split()
+
+        if (
+            count
+            + len(sentence_words)
+            > MAX_SCRIPT_WORDS
+        ):
+            break
+
+        trimmed.append(sentence)
+        count += len(sentence_words)
+
+    return clean_text(
+        " ".join(trimmed)
+    )
+
+
 def build_narration(article):
     title = clean_for_narration(
         article.get(
@@ -1785,9 +1814,23 @@ def build_narration(article):
         )
     )
 
+    description = clean_for_narration(
+        article.get(
+            "description",
+            "",
+        )
+    )
+
+    article_text = clean_for_narration(
+        article.get(
+            "text",
+            "",
+        )
+    )
+
     sentences = first_useful_sentences(
         article,
-        max_sentences=10,
+        max_sentences=16,
     )
 
     if not sentences:
@@ -1796,6 +1839,7 @@ def build_narration(article):
         )
 
     body = []
+    existing_keys = set()
 
     for sentence in sentences:
         sentence = clean_for_narration(
@@ -1805,16 +1849,15 @@ def build_narration(article):
         if not sentence:
             continue
 
-        if (
-            title
-            and sentence_key(sentence)
-            == sentence_key(title + ".")
-        ):
-            if not body:
-                body.append(sentence)
+        key = sentence_key(sentence)
 
+        if not key:
             continue
 
+        if key in existing_keys:
+            continue
+
+        existing_keys.add(key)
         body.append(sentence)
 
     script = " ".join(body)
@@ -1831,42 +1874,79 @@ def build_narration(article):
             + script
         )
 
-    words = script.split()
+    script = trim_script_to_max_words(
+        script
+    )
 
-    if len(words) > MAX_SCRIPT_WORDS:
-        trimmed = []
-        count = 0
+    # Keep adding unused article sentences until
+    # the narration reaches the stronger minimum.
+    if word_count(script) < MIN_SCRIPT_WORDS:
+        all_sources = [
+            description,
+            article_text,
+        ]
 
-        for sentence in split_sentences(script):
-            sentence_words = sentence.split()
+        for source in all_sources:
+            for sentence in split_sentences(source):
+                sentence = clean_for_narration(
+                    sentence
+                )
+
+                if word_count(sentence) < 5:
+                    continue
+
+                key = sentence_key(sentence)
+
+                if not key:
+                    continue
+
+                if key in existing_keys:
+                    continue
+
+                candidate = clean_text(
+                    script
+                    + " "
+                    + sentence
+                )
+
+                if (
+                    word_count(candidate)
+                    > MAX_SCRIPT_WORDS
+                ):
+                    continue
+
+                script = candidate
+                existing_keys.add(key)
+
+                if (
+                    word_count(script)
+                    >= MIN_SCRIPT_WORDS
+                ):
+                    break
 
             if (
-                count
-                + len(sentence_words)
-                > MAX_SCRIPT_WORDS
+                word_count(script)
+                >= MIN_SCRIPT_WORDS
             ):
                 break
 
-            trimmed.append(sentence)
-            count += len(sentence_words)
-
-        script = " ".join(trimmed)
-
-    if word_count(script) < MIN_SCRIPT_WORDS:
-        additional = clean_for_narration(
-            article.get(
-                "text",
-                "",
+    # If we have not yet reached the target, continue using
+    # every remaining useful sentence available in the article.
+    if word_count(script) < TARGET_SCRIPT_WORDS:
+        for sentence in split_sentences(article_text):
+            sentence = clean_for_narration(
+                sentence
             )
-        )
 
-        existing_keys = {
-            sentence_key(sentence)
-            for sentence in split_sentences(script)
-        }
+            if word_count(sentence) < 5:
+                continue
 
-        for sentence in split_sentences(additional):
-            if sentence_key(sentence) in existing_keys:
+            key = sentence_key(sentence)
+
+            if not key:
+                continue
+
+            if key in existing_keys:
                 continue
 
             candidate = clean_text(
@@ -1875,13 +1955,37 @@ def build_narration(article):
                 + sentence
             )
 
-            if word_count(candidate) > MAX_SCRIPT_WORDS:
+            if (
+                word_count(candidate)
+                > MAX_SCRIPT_WORDS
+            ):
                 break
 
             script = candidate
+            existing_keys.add(key)
 
-            if word_count(script) >= MIN_SCRIPT_WORDS:
+            if (
+                word_count(script)
+                >= TARGET_SCRIPT_WORDS
+            ):
                 break
+
+    script = trim_script_to_max_words(
+        script
+    )
+
+    final_words = word_count(script)
+
+    print(
+        f"[NARRATION] Final narration length: "
+        f"{final_words} words"
+    )
+
+    if final_words < MIN_SCRIPT_WORDS:
+        raise RuntimeError(
+            "Narration could not reach the required "
+            f"{MIN_SCRIPT_WORDS}-word minimum."
+        )
 
     return clean_text(script)
 
@@ -1966,9 +2070,20 @@ def validate(article, script):
             "Story type is missing."
         )
 
-    if word_count(script) < 45:
+    script_words = word_count(script)
+
+    if script_words < MIN_SCRIPT_WORDS:
         raise RuntimeError(
-            "Narration contains fewer than 45 words."
+            "Narration contains only "
+            f"{script_words} words. "
+            f"Minimum required is "
+            f"{MIN_SCRIPT_WORDS}."
+        )
+
+    if script_words > MAX_SCRIPT_WORDS:
+        raise RuntimeError(
+            "Narration exceeds the maximum "
+            f"{MAX_SCRIPT_WORDS} words."
         )
 
     if not FINAL_IMAGE.exists():
@@ -2065,6 +2180,11 @@ def validate(article, script):
 
     print(
         "[VALIDATION] Story and narration passed."
+    )
+
+    print(
+        f"[VALIDATION] Narration words: "
+        f"{script_words}"
     )
 
 
@@ -2377,6 +2497,7 @@ def select_story():
                 "[SKIP] Candidate already appears "
                 "in history."
             )
+            continue
 
         try:
             article = parse_article(
@@ -2554,9 +2675,17 @@ def select_story():
                 refreshed
             )
 
-            if word_count(script) < MIN_SCRIPT_WORDS:
+            script_words = word_count(script)
+
+            print(
+                f"[NARRATION] Final candidate contains "
+                f"{script_words} words."
+            )
+
+            if script_words < MIN_SCRIPT_WORDS:
                 print(
-                    "[SKIP] Final narration is too short."
+                    "[SKIP] Final narration is too short "
+                    f"({script_words} words)."
                 )
                 continue
 
@@ -2590,10 +2719,6 @@ def select_story():
             refreshed["script"] = script
 
             save_selected_story(
-                refreshed
-            )
-
-            add_to_history(
                 refreshed
             )
 
@@ -2710,10 +2835,37 @@ def verify_selected_files():
         "",
     )
 
-    if word_count(script) < MIN_SCRIPT_WORDS:
+    script_words = word_count(script)
+
+    print(
+        f"[VERIFY] Narration words: "
+        f"{script_words}"
+    )
+
+    if script_words < MIN_SCRIPT_WORDS:
         raise RuntimeError(
-            "Selected narration is too short."
+            "Selected narration is too short. "
+            f"Found {script_words} words; "
+            f"minimum required is "
+            f"{MIN_SCRIPT_WORDS}."
         )
+
+    if script_words > MAX_SCRIPT_WORDS:
+        raise RuntimeError(
+            "Selected narration is too long. "
+            f"Found {script_words} words; "
+            f"maximum allowed is "
+            f"{MAX_SCRIPT_WORDS}."
+        )
+
+    print()
+    print(
+        "[VERIFY] Narration:"
+    )
+    print(
+        script
+    )
+    print()
 
     try:
         with Image.open(
@@ -2740,7 +2892,7 @@ def verify_selected_files():
 
     print(
         f"[VERIFY] Script words: "
-        f"{word_count(script)}"
+        f"{script_words}"
     )
 
     print(
@@ -2764,6 +2916,49 @@ def run_video_generator():
         "[VIDEO] Starting video generator."
     )
     print("=" * 70)
+
+    print(
+        f"[VIDEO] Required narration minimum: "
+        f"{MIN_SCRIPT_WORDS} words"
+    )
+
+    script_data = load_json(
+        SCRIPT_FILE,
+        default=None,
+    )
+
+    if not isinstance(
+        script_data,
+        dict,
+    ):
+        raise RuntimeError(
+            "selected_script.json could not be loaded "
+            "before video generation."
+        )
+
+    script = script_data.get(
+        "script",
+        "",
+    )
+
+    script_words = word_count(script)
+
+    print(
+        f"[VIDEO] Narration supplied to generator: "
+        f"{script_words} words"
+    )
+
+    if script_words < MIN_SCRIPT_WORDS:
+        raise RuntimeError(
+            "Video generation blocked because narration "
+            f"contains only {script_words} words."
+        )
+
+    if script_words > MAX_SCRIPT_WORDS:
+        raise RuntimeError(
+            "Video generation blocked because narration "
+            f"contains {script_words} words."
+        )
 
     command = [
         sys.executable,
@@ -2871,6 +3066,18 @@ def main():
         f"VIDEO FILE: {FINAL_VIDEO}"
     )
 
+    print(
+        f"MIN SCRIPT WORDS: {MIN_SCRIPT_WORDS}"
+    )
+
+    print(
+        f"TARGET SCRIPT WORDS: {TARGET_SCRIPT_WORDS}"
+    )
+
+    print(
+        f"MAX SCRIPT WORDS: {MAX_SCRIPT_WORDS}"
+    )
+
     print("=" * 70)
 
     try:
@@ -2892,6 +3099,12 @@ def main():
                 "Final MP4 does not exist after "
                 "video generation."
             )
+
+        # Only mark the story as used AFTER the
+        # video has actually been generated successfully.
+        add_to_history(
+            selected
+        )
 
         print()
         print("=" * 70)
@@ -2916,12 +3129,22 @@ def main():
         )
 
         print(
+            f"WORDS: "
+            f"{word_count(selected.get('script', ''))}"
+        )
+
+        print(
             f"MP4: {FINAL_VIDEO}"
         )
 
         print(
             f"SIZE: "
             f"{FINAL_VIDEO.stat().st_size:,} bytes"
+        )
+
+        print(
+            "[HISTORY] Story added to history "
+            "after successful MP4 generation."
         )
 
         print("=" * 70)
