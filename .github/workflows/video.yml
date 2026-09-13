@@ -13,45 +13,115 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ============================================================
-      # CHECKOUT
-      # ============================================================
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # ============================================================
-      # PYTHON
-      # ============================================================
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # ============================================================
-      # FFMPEG
-      # ============================================================
       - name: Install FFmpeg
         run: |
+          set -e
           sudo apt-get update
           sudo apt-get install -y ffmpeg
 
-      # ============================================================
-      # PYTHON PACKAGES
-      # ============================================================
+          echo "FFmpeg:"
+          ffmpeg -version | head -n 1
+
+          echo "FFprobe:"
+          ffprobe -version | head -n 1
+
       - name: Install Python packages
         run: |
-          python -m pip install --upgrade pip
-          pip install requests feedparser beautifulsoup4 gTTS Pillow moviepy numpy
+          set -e
 
-      # ============================================================
-      # CLEAN OLD GENERATED FILES
-      # ============================================================
+          python -m pip install --upgrade pip
+
+          python -m pip install \
+            requests \
+            feedparser \
+            beautifulsoup4 \
+            gTTS \
+            Pillow \
+            moviepy \
+            numpy
+
+          echo ""
+          echo "============================================================"
+          echo "VERIFYING PYTHON"
+          echo "============================================================"
+
+          python --version
+
+          python -c "import requests; print('requests: OK')"
+          python -c "import feedparser; print('feedparser: OK')"
+          python -c "import bs4; print('beautifulsoup4: OK')"
+          python -c "import gtts; print('gTTS: OK')"
+          python -c "from PIL import Image; print('Pillow: OK')"
+          python -c "import moviepy; print('moviepy: OK')"
+          python -c "import numpy; print('numpy: OK')"
+
+          echo ""
+          echo "ALL PYTHON PACKAGES VERIFIED"
+
+      - name: Test gTTS
+        run: |
+          set -e
+
+          echo "============================================================"
+          echo "TESTING NARRATION SERVICE"
+          echo "============================================================"
+
+          mkdir -p audio
+
+          python - <<'PY'
+          from gtts import gTTS
+          from pathlib import Path
+
+          output = Path("audio/gtts_test.mp3")
+
+          print("Testing gTTS...")
+
+          tts = gTTS(
+              text="Rift Valley Watch narration test.",
+              lang="en",
+              slow=False
+          )
+
+          tts.save(str(output))
+
+          if not output.exists():
+              raise RuntimeError("gTTS did not create the MP3 file.")
+
+          size = output.stat().st_size
+
+          print("Test MP3 created.")
+          print("Size:", size, "bytes")
+
+          if size < 1000:
+              raise RuntimeError("gTTS test MP3 is too small.")
+
+          print("gTTS TEST SUCCESSFUL")
+          PY
+
+          rm -f audio/gtts_test.mp3
+
       - name: Clean previous generated files
         run: |
+          set -e
+
+          echo "============================================================"
+          echo "CLEANING PREVIOUS FILES"
+          echo "============================================================"
+
           rm -f output/rift_valley_watch_reel.mp4
           rm -f audio/narration.mp3
+          rm -f audio/narration_temp.mp3
           rm -f assets/video_work/narration.mp3
           rm -f assets/source/story_image.jpg
           rm -f data/selected_story.json
@@ -63,79 +133,194 @@ jobs:
           mkdir -p assets/video_work
           mkdir -p data
 
-      # ============================================================
-      # GENERATE THE RIFT VALLEY WATCH VIDEO
-      # ============================================================
+          echo "Clean-up complete."
+
+      - name: Verify project files
+        run: |
+          set -e
+
+          echo "============================================================"
+          echo "VERIFYING PROJECT"
+          echo "============================================================"
+
+          test -f rift_valley_main.py || {
+            echo "ERROR: rift_valley_main.py not found."
+            exit 1
+          }
+
+          test -f rift_valley_video_generator.py || {
+            echo "ERROR: rift_valley_video_generator.py not found."
+            exit 1
+          }
+
+          echo "rift_valley_main.py:"
+          ls -lh rift_valley_main.py
+
+          echo ""
+          echo "rift_valley_video_generator.py:"
+          ls -lh rift_valley_video_generator.py
+
+          echo ""
+          echo "Checking Python syntax..."
+
+          python -m py_compile rift_valley_main.py
+          python -m py_compile rift_valley_video_generator.py
+
+          echo ""
+          echo "PYTHON SYNTAX CHECK PASSED"
+
       - name: Generate Rift Valley Watch video
         run: |
+          set -e
+
+          echo ""
+          echo "============================================================"
+          echo "STARTING RIFT VALLEY WATCH"
+          echo "============================================================"
+
           python -u rift_valley_main.py
 
-      # ============================================================
-      # VERIFY NARRATION
-      # ============================================================
+          echo ""
+          echo "============================================================"
+          echo "MAIN GENERATOR FINISHED"
+          echo "============================================================"
+
+      - name: Verify selected story
+        run: |
+          set -e
+
+          echo "============================================================"
+          echo "VERIFYING STORY"
+          echo "============================================================"
+
+          if [ ! -f data/selected_story.json ]; then
+            echo "ERROR: selected_story.json was not generated."
+            exit 1
+          fi
+
+          echo ""
+          echo "SELECTED STORY:"
+          cat data/selected_story.json
+
+          echo ""
+          echo "STORY VERIFICATION PASSED"
+
+      - name: Verify selected script
+        run: |
+          set -e
+
+          echo "============================================================"
+          echo "VERIFYING SCRIPT"
+          echo "============================================================"
+
+          if [ ! -f data/selected_script.json ]; then
+            echo "ERROR: selected_script.json was not generated."
+            exit 1
+          fi
+
+          echo ""
+          echo "SELECTED SCRIPT:"
+          cat data/selected_script.json
+
+          echo ""
+          echo "SCRIPT VERIFICATION PASSED"
+
       - name: Verify narration
         run: |
+          set -e
+
           echo "============================================================"
           echo "VERIFYING NARRATION"
           echo "============================================================"
 
-          if [ -f "audio/narration.mp3" ]; then
+          AUDIO_FILE=""
+
+          if [ -f audio/narration.mp3 ]; then
             AUDIO_FILE="audio/narration.mp3"
-          elif [ -f "assets/video_work/narration.mp3" ]; then
+          elif [ -f assets/video_work/narration.mp3 ]; then
             AUDIO_FILE="assets/video_work/narration.mp3"
-          else
-            echo "ERROR: Narration MP3 was not generated."
+          fi
+
+          if [ -z "$AUDIO_FILE" ]; then
             echo ""
-            echo "Available audio files:"
-            find . -type f \( -name "*.mp3" -o -name "*.wav" -o -name "*.m4a" \) -print || true
+            echo "ERROR: Narration MP3 was NOT generated."
+            echo ""
+            echo "All MP3/audio files found:"
+            find . -type f \
+              \( -name "*.mp3" -o -name "*.wav" -o -name "*.m4a" \) \
+              -print || true
+
+            echo ""
+            echo "Audio directory:"
+            ls -lah audio || true
+
+            echo ""
+            echo "Video work directory:"
+            ls -lah assets/video_work || true
+
             exit 1
           fi
 
           AUDIO_SIZE=$(stat -c%s "$AUDIO_FILE")
 
-          echo "Narration found:"
+          echo "Narration:"
           echo "$AUDIO_FILE"
-          echo "Size: $AUDIO_SIZE bytes"
+
+          echo "Size:"
+          echo "$AUDIO_SIZE bytes"
 
           if [ "$AUDIO_SIZE" -lt 1000 ]; then
-            echo "ERROR: Narration file is too small."
+            echo "ERROR: Narration MP3 is too small."
             exit 1
           fi
 
-          echo "Narration verification successful."
+          echo ""
+          echo "Narration FFprobe:"
 
-      # ============================================================
-      # VERIFY STORY IMAGE
-      # ============================================================
+          ffprobe -v error \
+            -show_entries format=duration,size \
+            -show_entries stream=codec_name,codec_type,sample_rate,channels \
+            -of default=noprint_wrappers=1 \
+            "$AUDIO_FILE"
+
+          echo ""
+          echo "NARRATION VERIFICATION PASSED"
+
       - name: Verify story image
         run: |
+          set -e
+
           echo "============================================================"
           echo "VERIFYING STORY IMAGE"
           echo "============================================================"
 
-          if [ ! -f "assets/source/story_image.jpg" ]; then
-            echo "ERROR: Story image was not generated."
+          if [ ! -f assets/source/story_image.jpg ]; then
+            echo "ERROR: Story image was NOT generated."
             exit 1
           fi
 
-          IMAGE_SIZE=$(stat -c%s "assets/source/story_image.jpg")
+          IMAGE_SIZE=$(stat -c%s assets/source/story_image.jpg)
 
-          echo "Story image:"
+          echo "Image:"
           echo "assets/source/story_image.jpg"
-          echo "Size: $IMAGE_SIZE bytes"
+
+          echo "Size:"
+          echo "$IMAGE_SIZE bytes"
 
           if [ "$IMAGE_SIZE" -lt 10000 ]; then
-            echo "ERROR: Story image is suspiciously small."
+            echo "ERROR: Story image is too small."
             exit 1
           fi
 
-          echo "Story image verification successful."
+          file assets/source/story_image.jpg
 
-      # ============================================================
-      # VERIFY FINAL MP4
-      # ============================================================
+          echo ""
+          echo "STORY IMAGE VERIFICATION PASSED"
+
       - name: Verify final MP4
         run: |
+          set -e
+
           echo "============================================================"
           echo "VERIFYING FINAL MP4"
           echo "============================================================"
@@ -143,6 +328,7 @@ jobs:
           FILE="output/rift_valley_watch_reel.mp4"
 
           if [ ! -f "$FILE" ]; then
+            echo ""
             echo "ERROR: Rift Valley Watch MP4 was NOT generated."
             echo ""
             echo "Available MP4 files:"
@@ -154,7 +340,9 @@ jobs:
 
           echo "MP4:"
           echo "$FILE"
-          echo "Size: $FILE_SIZE bytes"
+
+          echo "Size:"
+          echo "$FILE_SIZE bytes"
 
           if [ "$FILE_SIZE" -lt 100000 ]; then
             echo "ERROR: MP4 is too small."
@@ -162,10 +350,11 @@ jobs:
           fi
 
           echo ""
-          echo "FFprobe information:"
+          echo "FFprobe:"
+          
           ffprobe -v error \
             -show_entries format=duration,size \
-            -show_entries stream=codec_type,width,height \
+            -show_entries stream=codec_type,codec_name,width,height \
             -of default=noprint_wrappers=1 \
             "$FILE"
 
@@ -192,11 +381,24 @@ jobs:
             -of csv=p=0 \
             "$FILE")
 
+          VIDEO_CODEC=$(ffprobe -v error \
+            -select_streams v:0 \
+            -show_entries stream=codec_name \
+            -of csv=p=0 \
+            "$FILE")
+
+          AUDIO_CODEC=$(ffprobe -v error \
+            -select_streams a:0 \
+            -show_entries stream=codec_name \
+            -of csv=p=0 \
+            "$FILE")
+
           echo ""
           echo "Width: $WIDTH"
           echo "Height: $HEIGHT"
           echo "Duration: $DURATION seconds"
-          echo "Audio: $HAS_AUDIO"
+          echo "Video codec: $VIDEO_CODEC"
+          echo "Audio codec: $AUDIO_CODEC"
 
           if [ "$WIDTH" != "1080" ]; then
             echo "ERROR: Video width is not 1080."
@@ -214,12 +416,12 @@ jobs:
           fi
 
           echo ""
-          echo "FINAL MP4 VERIFICATION SUCCESSFUL."
+          echo "============================================================"
+          echo "FINAL MP4 VERIFICATION PASSED"
+          echo "============================================================"
 
-      # ============================================================
-      # SHOW GENERATED FILES
-      # ============================================================
       - name: Show generated files
+        if: always()
         run: |
           echo "============================================================"
           echo "GENERATED FILES"
@@ -238,12 +440,13 @@ jobs:
           find assets/source -maxdepth 2 -type f -print -exec ls -lh {} \; || true
 
           echo ""
+          echo "VIDEO WORK:"
+          find assets/video_work -maxdepth 2 -type f -print -exec ls -lh {} \; || true
+
+          echo ""
           echo "DATA:"
           find data -maxdepth 2 -type f -print -exec ls -lh {} \; || true
 
-      # ============================================================
-      # UPLOAD MP4 AS GITHUB ACTIONS ARTIFACT
-      # ============================================================
       - name: Upload generated MP4
         uses: actions/upload-artifact@v4
         with:
@@ -252,11 +455,10 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      # ============================================================
-      # COMMIT MP4 TO REPOSITORY
-      # ============================================================
-      - name: Commit generated MP4 to repository
+      - name: Commit generated MP4
         run: |
+          set -e
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
@@ -269,9 +471,6 @@ jobs:
             git push
           fi
 
-      # ============================================================
-      # FINAL SUCCESS MESSAGE
-      # ============================================================
       - name: Final status
         run: |
           echo ""
@@ -284,13 +483,5 @@ jobs:
           echo ""
           echo "GitHub Actions artifact:"
           echo "rift-valley-watch-video"
-          echo ""
-          echo "The MP4 is now available in TWO places:"
-          echo ""
-          echo "1. Repository:"
-          echo "   output/rift_valley_watch_reel.mp4"
-          echo ""
-          echo "2. Actions:"
-          echo "   Artifacts -> rift-valley-watch-video"
           echo ""
           echo "============================================================"
