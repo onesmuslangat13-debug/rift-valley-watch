@@ -1,919 +1,785 @@
-import json
+# ============================================================
+# RIFT VALLEY WATCH
+# VIDEO GENERATOR
+#
+# VERSION: RIFT_VALLEY_WATCH_GENERATOR_CLEAN_V2
+#
+# RULES:
+# - NO SOURCE/PUBLISHER ON SCREEN
+# - NO SOURCE/PUBLISHER IN NARRATION
+# - NO [PHOTOS]
+# - NO / PCS OR PHOTO-CREDIT ARTIFACTS
+# - NO "VERIFIED REPORT"
+# - NO FAKE PHOTO COUNTER
+# - ONE REAL IMAGE = ONE CONTINUOUS KEN BURNS SCENE
+# - 2-5 REAL DISTINCT IMAGES = REAL PHOTO SLIDESHOW
+# - 1080x1920 MP4
+# - gTTS narration
+# - FFmpeg encoding
+# ============================================================
+
 import os
 import re
-import sys
+import json
 import time
+import math
 import hashlib
-import urllib.parse
-from datetime import datetime, timezone
+import subprocess
 from pathlib import Path
+from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from gtts import gTTS
 
 
 # ============================================================
-# RIFT VALLEY WATCH
-# AUTOMATIC MULTI-COUNTY NEWS ENGINE
+# CONFIGURATION
 # ============================================================
 
-ROOT = Path(__file__).resolve().parent
+GENERATOR_VERSION = "RIFT_VALLEY_WATCH_GENERATOR_CLEAN_V2"
 
-DATA_DIR = ROOT / "data"
-ASSET_DIR = ROOT / "assets"
-SOURCE_DIR = ASSET_DIR / "source"
+BASE_DIR = Path(__file__).resolve().parent
 
-STORY_FILE = DATA_DIR / "story.json"
-SCRIPT_FILE = DATA_DIR / "script.json"
-SELECTED_STORY_FILE = DATA_DIR / "selected_story.json"
-SELECTED_SCRIPT_FILE = DATA_DIR / "selected_script.json"
+DATA_DIR = BASE_DIR / "data"
+ASSETS_DIR = BASE_DIR / "assets"
+SOURCE_DIR = ASSETS_DIR / "source"
+AUDIO_DIR = BASE_DIR / "audio"
+OUTPUT_DIR = BASE_DIR / "output"
+TEMP_DIR = BASE_DIR / "temp_rift_valley"
 
-IMAGE_FILE = SOURCE_DIR / "story_image.jpg"
+STORY_FILE = DATA_DIR / "selected_story.json"
+SCRIPT_FILE = DATA_DIR / "selected_script.json"
 
-COUNTIES = [
-    "Bomet",
-    "Kericho",
-    "Nakuru",
-    "Nandi",
-    "Uasin Gishu",
-    "Elgeyo-Marakwet",
-    "West Pokot",
-    "Narok",
-]
+# Additional fallbacks
+STORY_FALLBACK = DATA_DIR / "story.json"
+SCRIPT_FALLBACK = DATA_DIR / "script.json"
 
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/153.0 Safari/537.36"
-)
+LOCAL_SOURCE_IMAGE = SOURCE_DIR / "story_image.jpg"
 
-SESSION = requests.Session()
-SESSION.headers.update(
-    {
-        "User-Agent": USER_AGENT,
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept": (
-            "text/html,application/xhtml+xml,"
-            "application/xml;q=0.9,image/avif,image/webp,"
-            "image/apng,*/*;q=0.8"
-        ),
-    }
-)
+OUTPUT_FILE = OUTPUT_DIR / "rift_valley_watch_reel.mp4"
+AUDIO_FILE = AUDIO_DIR / "narration.mp3"
 
-BAD_TERMS = [
-    "google news",
-    "facebook",
-    "sign in",
-    "subscribe",
-    "advertisement",
-    "cookie policy",
-    "privacy policy",
-    "terms of service",
-    "youtube",
-    "instagram",
-    "tiktok",
-]
+VIDEO_WIDTH = 1080
+VIDEO_HEIGHT = 1920
 
-POSITIVE_TERMS = [
-    "county",
-    "government",
-    "project",
-    "development",
-    "road",
-    "hospital",
-    "school",
-    "water",
-    "market",
-    "budget",
-    "construction",
-    "official",
-    "launch",
-    "inspection",
-    "statement",
-    "governor",
-    "deputy president",
-    "minister",
-    "mp",
-    "senator",
-    "ward",
-    "constituency",
-    "kenya",
-]
+FPS = 30
 
-IMAGE_BAD_TERMS = [
-    "logo",
-    "icon",
-    "avatar",
-    "favicon",
-    "sprite",
-    "placeholder",
-    "default",
-    "banner",
-    "advert",
-    "facebook",
-    "google",
-    "twitter",
-    "x.com",
-    "youtube",
-]
+MAX_IMAGES = 5
+
+REQUEST_TIMEOUT = 25
+
+VIDEO_CODEC = "libx264"
+AUDIO_CODEC = "aac"
+
+VIDEO_BITRATE = "5M"
+AUDIO_BITRATE = "128k"
+
+BRAND = "RIFT VALLEY WATCH"
+
+BOTTOM_BRAND = "RIFT VALLEY • KENYA"
+
+
+# ============================================================
+# DIRECTORY SETUP
+# ============================================================
+
+for directory in [
+    DATA_DIR,
+    ASSETS_DIR,
+    SOURCE_DIR,
+    AUDIO_DIR,
+    OUTPUT_DIR,
+    TEMP_DIR,
+]:
+    directory.mkdir(parents=True, exist_ok=True)
 
 
 # ============================================================
 # LOGGING
 # ============================================================
 
-def log(message=""):
-    print(message, flush=True)
+def log(message):
+    print(f"[RIFT VALLEY WATCH] {message}", flush=True)
 
 
 # ============================================================
-# DIRECTORIES
+# JSON HELPERS
 # ============================================================
 
-def prepare_directories():
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    ASSET_DIR.mkdir(parents=True, exist_ok=True)
-    SOURCE_DIR.mkdir(parents=True, exist_ok=True)
+def load_json(path):
+    path = Path(path)
+
+    if not path.exists():
+        return {}
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        if isinstance(data, dict):
+            return data
+
+        return {}
+
+    except Exception as exc:
+        log(f"Could not read {path}: {exc}")
+        return {}
+
+
+def first_existing_json(*paths):
+    for path in paths:
+        if Path(path).exists():
+            data = load_json(path)
+            if data:
+                return data
+
+    return {}
 
 
 # ============================================================
-# TEXT
+# TEXT SANITIZATION
 # ============================================================
 
-def clean_text(value):
-    if value is None:
+SOURCE_PATTERNS = [
+    r"\bsource\s*:\s*[^.]+",
+    r"\bsource\s*[-–—]\s*[^.]+",
+    r"\bpublished\s+by\s+[^.]+",
+    r"\breported\s+by\s+[^.]+",
+    r"\baccording\s+to\s+[^.]+",
+    r"\bcredit\s*:\s*[^.]+",
+    r"\bphoto\s+credit\s*:\s*[^.]+",
+    r"\bimage\s+credit\s*:\s*[^.]+",
+    r"\bimage\s+courtesy\s+of\s+[^.]+",
+    r"\bcourtesy\s+of\s+[^.]+",
+]
+
+PHOTO_ARTIFACT_PATTERNS = [
+    r"\[\s*photos?\s*\]",
+    r"\[\s*photo\s*\]",
+    r"\[\s*gallery\s*\]",
+    r"\[\s*images?\s*\]",
+    r"\(\s*photos?\s*\)",
+    r"\bphotos?\s*:",
+    r"\bimages?\s*:",
+]
+
+CREDIT_FRAGMENT_PATTERNS = [
+    r"/\s*PCS\b",
+    r"\bPCS\s*[-–—:]",
+    r"\bPresidential Communications Service\b",
+    r"\bPhoto\s+by\s+[^.]+",
+    r"\bPhotos?\s+by\s+[^.]+",
+    r"\bCourtesy\s*:\s*[^.]+",
+]
+
+SCRAPING_PATTERNS = [
+    r"\bgoogle\s+news\b",
+    r"\bgoogle\s+news\s+app\b",
+    r"\bfacebook\.com\b",
+    r"\btwitter\.com\b",
+    r"\bx\.com\b",
+    r"\bsubscribe\s+to\s+our\s+newsletter\b",
+    r"\bread\s+more\b",
+    r"\bclick\s+here\b",
+]
+
+
+def clean_whitespace(text):
+    if not text:
         return ""
 
-    value = str(value)
-    value = re.sub(r"\s+", " ", value)
+    text = str(text)
 
-    return value.strip()
+    text = text.replace("\u00a0", " ")
+    text = text.replace("\r", " ")
+    text = text.replace("\n", " ")
 
+    text = re.sub(r"\s+", " ", text)
 
-def shorten(text, maximum=500):
-    text = clean_text(text)
-
-    if len(text) <= maximum:
-        return text
-
-    text = text[:maximum]
-
-    if " " in text:
-        text = text.rsplit(" ", 1)[0]
-
-    return text.rstrip(" ,.;:-") + "..."
+    return text.strip()
 
 
-def valid_text(value, minimum=20):
-    value = clean_text(value)
+def remove_artifacts(text):
+    if not text:
+        return ""
 
-    if len(value) < minimum:
-        return False
+    text = str(text)
 
-    lowered = value.lower()
+    # Remove square-bracket editorial tags.
+    for pattern in PHOTO_ARTIFACT_PATTERNS:
+        text = re.sub(pattern, " ", text, flags=re.I)
 
-    bad_count = sum(
-        1 for term in BAD_TERMS
-        if term in lowered
+    # Remove source/publisher attribution.
+    for pattern in SOURCE_PATTERNS:
+        text = re.sub(pattern, " ", text, flags=re.I)
+
+    # Remove image/photo credits.
+    for pattern in CREDIT_FRAGMENT_PATTERNS:
+        text = re.sub(pattern, " ", text, flags=re.I)
+
+    # Remove obvious scraping artifacts.
+    for pattern in SCRAPING_PATTERNS:
+        text = re.sub(pattern, " ", text, flags=re.I)
+
+    # Remove leading/trailing separators.
+    text = re.sub(r"\s*/\s*", " ", text)
+
+    text = re.sub(r"\s*[-–—:]\s*$", "", text)
+
+    # Remove duplicate punctuation.
+    text = re.sub(r"\.{2,}", ".", text)
+    text = re.sub(r",\s*,+", ", ", text)
+
+    text = clean_whitespace(text)
+
+    return text.strip(" -–—:;,.\"'")
+
+
+def clean_title(title):
+    title = remove_artifacts(title)
+
+    # Remove common headline prefixes.
+    title = re.sub(
+        r"^(breaking\s*:?\s*)",
+        "",
+        title,
+        flags=re.I,
     )
 
-    return bad_count < 2
+    title = re.sub(
+        r"^(latest\s*:?\s*)",
+        "",
+        title,
+        flags=re.I,
+    )
+
+    title = clean_whitespace(title)
+
+    return title.strip(" -–—:;,.\"'")
 
 
-def normalize_url(url, base_url=""):
-    url = clean_text(url)
+# ============================================================
+# SENTENCE PROCESSING
+# ============================================================
 
+def split_sentences(text):
+    text = remove_artifacts(text)
+
+    if not text:
+        return []
+
+    # Protect common abbreviations.
+    protected = text
+
+    protected = re.sub(
+        r"\b(Mr|Mrs|Ms|Dr|Prof|Hon|Eng|St|No)\.",
+        r"\1<PERIOD>",
+        protected,
+        flags=re.I,
+    )
+
+    parts = re.split(
+        r"(?<=[.!?])\s+",
+        protected,
+    )
+
+    result = []
+
+    for part in parts:
+        part = part.replace("<PERIOD>", ".")
+        part = clean_whitespace(part)
+
+        if not part:
+            continue
+
+        if len(part) < 3:
+            continue
+
+        result.append(part)
+
+    return result
+
+
+def complete_sentences_only(text):
+    """
+    Keeps only complete sentences.
+    Prevents fixed-character truncation from creating broken narration.
+    """
+
+    text = remove_artifacts(text)
+
+    if not text:
+        return ""
+
+    sentences = split_sentences(text)
+
+    if not sentences:
+        return ""
+
+    complete = []
+
+    for sentence in sentences:
+        sentence = sentence.strip()
+
+        if not sentence:
+            continue
+
+        if sentence[-1] not in ".!?":
+            continue
+
+        complete.append(sentence)
+
+    return " ".join(complete)
+
+
+def sentence_aware_trim(text, max_words=95):
+    """
+    Trim only at a complete sentence.
+    Never cuts a sentence halfway.
+    """
+
+    text = remove_artifacts(text)
+
+    sentences = split_sentences(text)
+
+    if not sentences:
+        return ""
+
+    selected = []
+    count = 0
+
+    for sentence in sentences:
+        words = sentence.split()
+        word_count = len(words)
+
+        if count + word_count > max_words:
+            break
+
+        selected.append(sentence)
+        count += word_count
+
+    return " ".join(selected).strip()
+
+
+# ============================================================
+# STORY EXTRACTION
+# ============================================================
+
+def get_story():
+    story = first_existing_json(
+        STORY_FILE,
+        SCRIPT_FILE,
+        STORY_FALLBACK,
+        SCRIPT_FALLBACK,
+    )
+
+    if not story:
+        raise RuntimeError(
+            "No story JSON was found."
+        )
+
+    return story
+
+
+def get_value(data, *keys):
+    if not isinstance(data, dict):
+        return ""
+
+    for key in keys:
+        value = data.get(key)
+
+        if value is None:
+            continue
+
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+        if isinstance(value, (int, float)):
+            return str(value)
+
+    return ""
+
+
+def extract_title(story):
+    title = get_value(
+        story,
+        "title",
+        "headline",
+        "story_title",
+        "name",
+    )
+
+    return clean_title(title)
+
+
+def extract_county(story):
+    county = get_value(
+        story,
+        "county",
+        "county_name",
+        "location",
+        "region",
+    )
+
+    county = remove_artifacts(county)
+
+    return county.strip()
+
+
+def extract_summary(story):
+    summary = get_value(
+        story,
+        "summary",
+        "description",
+        "excerpt",
+        "story_summary",
+        "content",
+        "body",
+        "text",
+    )
+
+    return remove_artifacts(summary)
+
+
+# ============================================================
+# NARRATION
+# ============================================================
+
+def build_narration(story):
+    title = extract_title(story)
+    county = extract_county(story)
+    summary = extract_summary(story)
+
+    # Clean summary to complete sentences only.
+    summary_clean = complete_sentences_only(summary)
+
+    # Keep narration short enough for a reel.
+    summary_clean = sentence_aware_trim(
+        summary_clean,
+        max_words=78,
+    )
+
+    pieces = []
+
+    if title:
+        pieces.append(title.rstrip(".!?") + ".")
+
+    if county and county.lower() not in title.lower():
+        pieces.append(
+            f"This report concerns {county} County."
+        )
+
+    if summary_clean:
+        pieces.append(summary_clean)
+
+    narration = " ".join(pieces)
+
+    narration = remove_artifacts(narration)
+
+    # Final sentence-aware safety.
+    narration = complete_sentences_only(narration)
+
+    # If still too long, trim at a sentence.
+    narration = sentence_aware_trim(
+        narration,
+        max_words=100,
+    )
+
+    # Absolute fallback.
+    if not narration:
+        if title:
+            narration = title.rstrip(".!?") + "."
+        else:
+            narration = (
+                "A developing story from Kenya's Rift Valley."
+            )
+
+    narration = remove_artifacts(narration)
+
+    return narration.strip()
+
+
+# ============================================================
+# FONT HELPERS
+# ============================================================
+
+def find_font(size, bold=False):
+    candidates = []
+
+    if bold:
+        candidates.extend([
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+        ])
+    else:
+        candidates.extend([
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        ])
+
+    candidates.extend([
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ])
+
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            try:
+                return ImageFont.truetype(
+                    candidate,
+                    size=size,
+                )
+            except Exception:
+                pass
+
+    return ImageFont.load_default()
+
+
+# ============================================================
+# IMAGE UTILITIES
+# ============================================================
+
+def sha256_file(path):
+    try:
+        h = hashlib.sha256()
+
+        with open(path, "rb") as f:
+            while True:
+                chunk = f.read(1024 * 1024)
+
+                if not chunk:
+                    break
+
+                h.update(chunk)
+
+        return h.hexdigest()
+
+    except Exception:
+        return ""
+
+
+def image_is_valid(path):
+    path = Path(path)
+
+    if not path.exists():
+        return False
+
+    if path.stat().st_size < 10_000:
+        return False
+
+    try:
+        with Image.open(path) as img:
+            img.verify()
+
+        with Image.open(path) as img:
+            width, height = img.size
+
+            if width < 300 or height < 200:
+                return False
+
+        return True
+
+    except Exception:
+        return False
+
+
+def normalize_image_url(url):
     if not url:
         return ""
+
+    url = str(url).strip()
 
     if url.startswith("//"):
         url = "https:" + url
 
-    if base_url:
-        url = urllib.parse.urljoin(base_url, url)
-
-    if not url.startswith(("http://", "https://")):
-        return ""
-
     return url
 
 
-# ============================================================
-# HTTP
-# ============================================================
-
-def fetch_response(url, timeout=25):
-    return SESSION.get(
-        url,
-        timeout=timeout,
-        allow_redirects=True,
-    )
-
-
-def fetch_html(url, timeout=25):
-    response = fetch_response(url, timeout)
-
-    response.raise_for_status()
-
-    content_type = response.headers.get(
-        "Content-Type",
-        "",
-    ).lower()
-
-    if (
-        "text/html" not in content_type
-        and "application/xhtml" not in content_type
-        and not response.text
-    ):
-        raise RuntimeError(
-            "Publisher did not return an HTML page."
-        )
-
-    return response.text, response.url
-
-
-# ============================================================
-# SEARCH
-# ============================================================
-
-def build_queries():
-    queries = []
-
-    for county in COUNTIES:
-        queries.extend(
-            [
-                f'"{county}" Kenya latest news',
-                f'"{county} County" latest development',
-                f'"{county} County Government" news',
-                f'"{county}" Kenya project',
-                f'"{county}" Kenya road hospital development',
-            ]
-        )
-
-    return queries
-
-
-def search_google(query):
-    url = (
-        "https://www.google.com/search?"
-        + urllib.parse.urlencode(
-            {
-                "q": query,
-                "tbm": "nws",
-                "num": 10,
-            }
-        )
-    )
-
-    try:
-        html, _ = fetch_html(url)
-    except Exception as exc:
-        log(f"Google search failed: {exc}")
-        return []
-
-    soup = BeautifulSoup(html, "html.parser")
-
-    results = []
-
-    for container in soup.select(
-        "div.SoaBEf, article, div.Gx5Zad"
-    ):
-        links = container.find_all(
-            "a",
-            href=True,
-        )
-
-        if not links:
-            continue
-
-        link = None
-
-        for candidate in links:
-            href = candidate.get("href", "")
-
-            if (
-                href.startswith("http://")
-                or href.startswith("https://")
-            ):
-                link = candidate
-                break
-
-        if not link:
-            continue
-
-        href = normalize_url(
-            link.get("href")
-        )
-
-        if not href:
-            continue
-
-        title_node = container.find(
-            ["h3", "h4"]
-        )
-
-        title = clean_text(
-            title_node.get_text(
-                " ",
-                strip=True,
-            )
-            if title_node
-            else link.get_text(
-                " ",
-                strip=True,
-            )
-        )
-
-        text = clean_text(
-            container.get_text(
-                " ",
-                strip=True,
-            )
-        )
-
-        if not title:
-            continue
-
-        if len(title) < 10:
-            continue
-
-        results.append(
-            {
-                "title": title,
-                "url": href,
-                "summary": text,
-                "search_query": query,
-            }
-        )
-
-    return results
-
-
-def search_bing(query):
-    url = (
-        "https://www.bing.com/news/search?"
-        + urllib.parse.urlencode(
-            {
-                "q": query,
-            }
-        )
-    )
-
-    try:
-        html, _ = fetch_html(url)
-    except Exception as exc:
-        log(f"Bing search failed: {exc}")
-        return []
-
-    soup = BeautifulSoup(html, "html.parser")
-
-    results = []
-
-    selectors = [
-        "div.news-card",
-        "div.news-card-body",
-        "div.t_s",
-        "article",
-    ]
-
-    containers = []
-
-    for selector in selectors:
-        containers.extend(
-            soup.select(selector)
-        )
-
-    for container in containers:
-        link = container.find(
-            "a",
-            href=True,
-        )
-
-        if not link:
-            continue
-
-        href = normalize_url(
-            link.get("href")
-        )
-
-        if not href:
-            continue
-
-        title_node = (
-            container.find("h2")
-            or container.find("h3")
-            or link
-        )
-
-        title = clean_text(
-            title_node.get_text(
-                " ",
-                strip=True,
-            )
-        )
-
-        summary = clean_text(
-            container.get_text(
-                " ",
-                strip=True,
-            )
-        )
-
-        if not title or len(title) < 10:
-            continue
-
-        results.append(
-            {
-                "title": title,
-                "url": href,
-                "summary": summary,
-                "search_query": query,
-            }
-        )
-
-    return results
-
-
-def collect_candidates():
-    log("")
-    log("============================================================")
-    log("SEARCHING CURRENT COUNTY NEWS")
-    log("============================================================")
-
-    all_candidates = []
-
-    queries = build_queries()
-
-    for number, query in enumerate(
-        queries,
-        1,
-    ):
-        log(
-            f"[{number}/{len(queries)}] {query}"
-        )
-
-        google_results = search_google(query)
-
-        all_candidates.extend(
-            google_results
-        )
-
-        bing_results = search_bing(query)
-
-        all_candidates.extend(
-            bing_results
-        )
-
-        time.sleep(0.3)
-
-    unique = {}
-
-    for candidate in all_candidates:
-        url = candidate.get(
-            "url",
-            "",
-        )
-
-        if not url:
-            continue
-
-        parsed = urllib.parse.urlparse(url)
-
-        domain = parsed.netloc.lower()
-
-        if (
-            "google." in domain
-            or "bing.com" in domain
-        ):
-            continue
-
-        key = hashlib.sha256(
-            url.split("#")[0].encode(
-                "utf-8"
-            )
-        ).hexdigest()
-
-        if key not in unique:
-            unique[key] = candidate
-
-    candidates = list(
-        unique.values()
-    )
-
-    log("")
-    log(
-        f"Unique candidate stories found: "
-        f"{len(candidates)}"
-    )
-
-    return candidates
-
-
-# ============================================================
-# COUNTY DETECTION
-# ============================================================
-
-def detect_county(text):
-    lowered = clean_text(text).lower()
-
-    matches = []
-
-    for county in COUNTIES:
-        if county.lower() in lowered:
-            matches.append(county)
-
-    if not matches:
-        return ""
-
-    return matches[0] + " County"
-
-
-# ============================================================
-# ARTICLE TEXT
-# ============================================================
-
-def extract_article_text(soup):
-    selectors = [
-        "[itemprop='articleBody']",
-        "article",
-        "main",
-        ".article-body",
-        ".article-content",
-        ".entry-content",
-        ".post-content",
-        ".story-content",
-        ".single-post-content",
-        ".td-post-content",
-        ".content-area",
-    ]
-
-    blocks = []
-
-    for selector in selectors:
-        for node in soup.select(selector):
-            text = clean_text(
-                node.get_text(
-                    " ",
-                    strip=True,
-                )
-            )
-
-            if len(text) >= 200:
-                blocks.append(text)
-
-    if blocks:
-        return max(
-            blocks,
-            key=len,
-        )
-
-    paragraphs = []
-
-    for paragraph in soup.find_all("p"):
-        text = clean_text(
-            paragraph.get_text(
-                " ",
-                strip=True,
-            )
-        )
-
-        if len(text) >= 40:
-            paragraphs.append(text)
-
-    return " ".join(
-        paragraphs
-    )
-
-
-# ============================================================
-# SOURCE NAME
-# ============================================================
-
-def get_source_name(soup, url):
-    selectors = [
-        (
-            "meta",
-            {"property": "og:site_name"},
-        ),
-        (
-            "meta",
-            {"name": "application-name"},
-        ),
-        (
-            "meta",
-            {"name": "publisher"},
-        ),
-    ]
-
-    for tag_name, attrs in selectors:
-        tag = soup.find(
-            tag_name,
-            attrs=attrs,
-        )
-
-        if tag:
-            value = clean_text(
-                tag.get("content")
-            )
-
-            if (
-                value
-                and len(value) < 100
-                and "google" not in value.lower()
-            ):
-                return value
-
-    for selector in [
-        "header .site-title",
-        ".site-title",
-        ".site-name",
-        ".publisher",
-        ".brand",
-    ]:
-        node = soup.select_one(
-            selector
-        )
-
-        if node:
-            value = clean_text(
-                node.get_text(
-                    " ",
-                    strip=True,
-                )
-            )
-
-            if value and len(value) < 100:
-                return value
-
-    domain = urllib.parse.urlparse(
-        url
-    ).netloc.lower()
-
-    domain = domain.replace(
-        "www.",
-        "",
-    )
-
-    return domain
-
-
-# ============================================================
-# IMAGE CANDIDATES
-# ============================================================
-
-def add_image_candidate(
-    candidates,
-    value,
-    base_url,
-):
+def is_image_url(value):
     if not value:
-        return
+        return False
 
-    value = clean_text(value)
+    value = str(value).strip()
 
-    if value.startswith("data:"):
-        return
+    if value.startswith("http://") or value.startswith("https://"):
+        return True
 
-    absolute = normalize_url(
-        value,
-        base_url,
-    )
-
-    if not absolute:
-        return
-
-    lowered = absolute.lower()
-
-    if any(
-        term in lowered
-        for term in IMAGE_BAD_TERMS
-    ):
-        return
-
-    if absolute not in candidates:
-        candidates.append(
-            absolute
-        )
+    return False
 
 
-def extract_image_candidates(
-    soup,
-    base_url,
-):
+# ============================================================
+# IMAGE CANDIDATE EXTRACTION
+# ============================================================
+
+IMAGE_KEYS = [
+    "images",
+    "image_urls",
+    "image_url",
+    "article_images",
+    "photos",
+    "photo_urls",
+    "gallery",
+    "gallery_images",
+    "media",
+    "media_urls",
+    "image",
+    "photo",
+    "thumbnail",
+    "thumbnail_url",
+]
+
+
+def recursively_find_images(value, found=None):
+    if found is None:
+        found = []
+
+    if value is None:
+        return found
+
+    if isinstance(value, str):
+        value = value.strip()
+
+        if is_image_url(value):
+            found.append(value)
+
+        elif (
+            value.lower().endswith(
+                (
+                    ".jpg",
+                    ".jpeg",
+                    ".png",
+                    ".webp",
+                    ".bmp",
+                )
+            )
+        ):
+            found.append(value)
+
+        return found
+
+    if isinstance(value, list):
+        for item in value:
+            recursively_find_images(item, found)
+
+        return found
+
+    if isinstance(value, tuple):
+        for item in value:
+            recursively_find_images(item, found)
+
+        return found
+
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_lower = str(key).lower()
+
+            if (
+                key_lower in IMAGE_KEYS
+                or "image" in key_lower
+                or "photo" in key_lower
+                or "gallery" in key_lower
+            ):
+                recursively_find_images(
+                    item,
+                    found,
+                )
+
+        return found
+
+    return found
+
+
+def extract_image_candidates(story):
     candidates = []
 
-    # --------------------------------------------------------
-    # Highest priority: publisher metadata
-    # --------------------------------------------------------
-
-    for attrs in [
-        {"property": "og:image"},
-        {"property": "og:image:url"},
-        {"property": "og:image:secure_url"},
-        {"name": "twitter:image"},
-        {"name": "twitter:image:src"},
-        {"property": "twitter:image"},
-    ]:
-        for tag in soup.find_all(
-            "meta",
-            attrs=attrs,
-        ):
-            add_image_candidate(
-                candidates,
-                tag.get("content"),
-                base_url,
-            )
-
-    # --------------------------------------------------------
-    # JSON-LD structured data
-    # --------------------------------------------------------
-
-    for script in soup.find_all(
-        "script",
-        attrs={
-            "type": "application/ld+json"
-        },
-    ):
-        raw = script.string or script.get_text(
-            " ",
-            strip=True,
+    # Highest priority: local recovered source image.
+    if LOCAL_SOURCE_IMAGE.exists():
+        candidates.append(
+            str(LOCAL_SOURCE_IMAGE)
         )
 
-        if not raw:
+    # Search JSON for image URLs and paths.
+    json_candidates = recursively_find_images(
+        story
+    )
+
+    candidates.extend(json_candidates)
+
+    # Look in common asset locations.
+    possible_dirs = [
+        SOURCE_DIR,
+        ASSETS_DIR,
+        DATA_DIR,
+    ]
+
+    for directory in possible_dirs:
+        if not directory.exists():
             continue
 
-        try:
-            data = json.loads(raw)
-        except Exception:
+        for path in sorted(directory.glob("*")):
+            if path.suffix.lower() in [
+                ".jpg",
+                ".jpeg",
+                ".png",
+                ".webp",
+                ".bmp",
+            ]:
+                candidates.append(str(path))
+
+    # Deduplicate.
+    final = []
+    seen = set()
+
+    for candidate in candidates:
+        candidate = str(candidate).strip()
+
+        if not candidate:
             continue
 
-        objects = []
+        key = candidate.lower()
 
-        if isinstance(data, list):
-            objects.extend(data)
+        if key in seen:
+            continue
 
-        elif isinstance(data, dict):
-            objects.append(data)
+        seen.add(key)
+        final.append(candidate)
 
-            graph = data.get(
-                "@graph"
-            )
-
-            if isinstance(
-                graph,
-                list,
-            ):
-                objects.extend(
-                    graph
-                )
-
-        for obj in objects:
-            if not isinstance(
-                obj,
-                dict,
-            ):
-                continue
-
-            image = obj.get(
-                "image"
-            )
-
-            if isinstance(
-                image,
-                str,
-            ):
-                add_image_candidate(
-                    candidates,
-                    image,
-                    base_url,
-                )
-
-            elif isinstance(
-                image,
-                list,
-            ):
-                for item in image:
-                    if isinstance(
-                        item,
-                        str,
-                    ):
-                        add_image_candidate(
-                            candidates,
-                            item,
-                            base_url,
-                        )
-
-            elif isinstance(
-                image,
-                dict,
-            ):
-                add_image_candidate(
-                    candidates,
-                    image.get("url"),
-                    base_url,
-                )
-
-    # --------------------------------------------------------
-    # Link image metadata
-    # --------------------------------------------------------
-
-    for tag in soup.find_all(
-        "link"
-    ):
-        rel = tag.get(
-            "rel",
-            [],
-        )
-
-        if isinstance(
-            rel,
-            str,
-        ):
-            rel = [rel]
-
-        rel_lower = [
-            str(x).lower()
-            for x in rel
-        ]
-
-        if (
-            "image_src" in rel_lower
-            or "image" in rel_lower
-        ):
-            add_image_candidate(
-                candidates,
-                tag.get("href"),
-                base_url,
-            )
-
-    # --------------------------------------------------------
-    # Images including lazy-load attributes
-    # --------------------------------------------------------
-
-    for image in soup.find_all(
-        "img"
-    ):
-        for attribute in [
-            "src",
-            "data-src",
-            "data-lazy-src",
-            "data-original",
-            "data-image",
-            "data-url",
-            "data-filename",
-        ]:
-            add_image_candidate(
-                candidates,
-                image.get(attribute),
-                base_url,
-            )
-
-        srcset = image.get(
-            "srcset"
-        )
-
-        if srcset:
-            for item in srcset.split(","):
-                item = item.strip()
-
-                if not item:
-                    continue
-
-                image_url = item.split(
-                    " "
-                )[0]
-
-                add_image_candidate(
-                    candidates,
-                    image_url,
-                    base_url,
-                )
-
-    return candidates
+    return final
 
 
 # ============================================================
-# IMAGE DOWNLOAD / VALIDATION
+# IMAGE DOWNLOAD
 # ============================================================
 
-def download_and_validate_image(
-    image_url,
-    article_url,
-    output_path,
-):
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) "
+        "AppleWebKit/537.36 "
+        "Chrome/120 Safari/537.36"
+    ),
+    "Accept": (
+        "image/avif,image/webp,image/apng,"
+        "image/svg+xml,image/*,*/*;q=0.8"
+    ),
+}
+
+
+def download_image(url, index):
+    url = normalize_image_url(url)
+
+    if not url:
+        return None
+
+    destination = TEMP_DIR / f"downloaded_{index}.jpg"
+
     try:
-        response = SESSION.get(
-            image_url,
-            headers={
-                "Referer": article_url,
-                "User-Agent": USER_AGENT,
-                "Accept": (
-                    "image/avif,image/webp,image/apng,"
-                    "image/svg+xml,image/*,*/*;q=0.8"
-                ),
-            },
-            timeout=30,
+        log(f"Downloading image {index}: {url}")
+
+        response = requests.get(
+            url,
+            headers=HEADERS,
+            timeout=REQUEST_TIMEOUT,
             allow_redirects=True,
         )
 
@@ -921,869 +787,1028 @@ def download_and_validate_image(
 
         content = response.content
 
-        if len(content) < 5000:
-            return False
+        if len(content) < 10_000:
+            log("Image response is too small.")
+            return None
 
-        content_type = response.headers.get(
-            "Content-Type",
-            "",
-        ).lower()
+        temporary = TEMP_DIR / f"raw_{index}"
 
-        if (
-            "image" not in content_type
-            and not image_url.lower().split("?")[0].endswith(
-                (
-                    ".jpg",
-                    ".jpeg",
-                    ".png",
-                    ".webp",
-                    ".gif",
-                )
-            )
-        ):
-            return False
-
-        temporary = SOURCE_DIR / (
-            "image_validation.tmp"
-        )
-
-        temporary.write_bytes(
-            content
-        )
+        with open(temporary, "wb") as f:
+            f.write(content)
 
         try:
-            with Image.open(
-                temporary
-            ) as image:
-                image.load()
-
-                width = image.width
-                height = image.height
-
-                if width < 300 or height < 200:
-                    return False
-
-                # Reject tiny portrait/avatar-type images.
-                if width < 500 and height < 500:
-                    return False
-
-                rgb = image.convert(
-                    "RGB"
-                )
-
-                rgb.save(
-                    output_path,
+            with Image.open(temporary) as img:
+                img = img.convert("RGB")
+                img.save(
+                    destination,
                     "JPEG",
-                    quality=94,
-                    optimize=True,
+                    quality=95,
                 )
 
-        finally:
-            temporary.unlink(
-                missing_ok=True
-            )
-
-        if (
-            output_path.exists()
-            and output_path.stat().st_size > 10000
-        ):
-            return True
-
-    except Exception as exc:
-        log(
-            f"Image failed: "
-            f"{str(exc)[:120]}"
-        )
-
-    return False
-
-
-def recover_real_image(article_url):
-    log("")
-    log("------------------------------------------------------------")
-    log("REAL IMAGE RECOVERY")
-    log("------------------------------------------------------------")
-
-    try:
-        html, final_url = fetch_html(
-            article_url,
-            timeout=30,
-        )
-    except Exception as exc:
-        log(
-            f"Article page unavailable: {exc}"
-        )
-        return ""
-
-    soup = BeautifulSoup(
-        html,
-        "html.parser",
-    )
-
-    candidates = extract_image_candidates(
-        soup,
-        final_url,
-    )
-
-    log(
-        f"Image candidates discovered: "
-        f"{len(candidates)}"
-    )
-
-    # Try all publisher images.
-    for index, image_url in enumerate(
-        candidates,
-        1,
-    ):
-        log(
-            f"Trying image "
-            f"{index}/{len(candidates)}"
-        )
-
-        if download_and_validate_image(
-            image_url,
-            final_url,
-            IMAGE_FILE,
-        ):
-            log(
-                f"REAL IMAGE FOUND: "
-                f"{image_url}"
-            )
-            log(
-                f"SAVED: {IMAGE_FILE}"
-            )
-
-            return image_url
-
-    # --------------------------------------------------------
-    # Secondary recovery:
-    # Search the article HTML for direct image URLs.
-    # --------------------------------------------------------
-
-    log(
-        "Metadata images failed. "
-        "Scanning article HTML for direct images..."
-    )
-
-    raw_urls = re.findall(
-        r'https?://[^"\'>\s]+?\.(?:jpg|jpeg|png|webp)',
-        html,
-        flags=re.IGNORECASE,
-    )
-
-    seen = set()
-
-    for image_url in raw_urls:
-        image_url = image_url.rstrip(
-            ".,);]"
-        )
-
-        if image_url in seen:
-            continue
-
-        seen.add(
-            image_url
-        )
-
-        if any(
-            term in image_url.lower()
-            for term in IMAGE_BAD_TERMS
-        ):
-            continue
-
-        if download_and_validate_image(
-            image_url,
-            final_url,
-            IMAGE_FILE,
-        ):
-            log(
-                f"REAL IMAGE FOUND FROM HTML: "
-                f"{image_url}"
-            )
-
-            return image_url
-
-    log(
-        "No usable real article image recovered."
-    )
-
-    return ""
-
-
-# ============================================================
-# DATE EXTRACTION
-# ============================================================
-
-def extract_publication_date(
-    soup,
-):
-    selectors = [
-        (
-            "meta",
-            {"property": "article:published_time"},
-        ),
-        (
-            "meta",
-            {"name": "article:published_time"},
-        ),
-        (
-            "meta",
-            {"name": "publish-date"},
-        ),
-        (
-            "meta",
-            {"name": "date"},
-        ),
-        (
-            "meta",
-            {"property": "og:updated_time"},
-        ),
-    ]
-
-    for tag_name, attrs in selectors:
-        tag = soup.find(
-            tag_name,
-            attrs=attrs,
-        )
-
-        if tag:
-            value = clean_text(
-                tag.get("content")
-            )
-
-            if value:
-                return value
-
-    for tag in soup.find_all(
-        "time"
-    ):
-        value = (
-            tag.get("datetime")
-            or tag.get_text(
-                " ",
-                strip=True,
-            )
-        )
-
-        value = clean_text(
-            value
-        )
-
-        if value:
-            return value
-
-    return datetime.now(
-        timezone.utc
-    ).date().isoformat()
-
-
-# ============================================================
-# CATEGORY
-# ============================================================
-
-def detect_category(text):
-    lowered = clean_text(
-        text
-    ).lower()
-
-    if any(
-        term in lowered
-        for term in [
-            "road",
-            "roads",
-            "construction",
-            "project",
-            "development",
-            "infrastructure",
-        ]
-    ):
-        return "DEVELOPMENT"
-
-    if any(
-        term in lowered
-        for term in [
-            "budget",
-            "finance",
-            "funding",
-            "revenue",
-            "allocation",
-        ]
-    ):
-        return "FINANCE"
-
-    if any(
-        term in lowered
-        for term in [
-            "hospital",
-            "health",
-            "clinic",
-            "medical",
-        ]
-    ):
-        return "HEALTH"
-
-    if any(
-        term in lowered
-        for term in [
-            "school",
-            "education",
-            "student",
-            "university",
-        ]
-    ):
-        return "EDUCATION"
-
-    return "COUNTY NEWS"
-
-
-# ============================================================
-# CANDIDATE SCORE
-# ============================================================
-
-def score_candidate(candidate):
-    title = clean_text(
-        candidate.get(
-            "title",
-            "",
-        )
-    ).lower()
-
-    summary = clean_text(
-        candidate.get(
-            "summary",
-            "",
-        )
-    ).lower()
-
-    text = title + " " + summary
-
-    score = 0
-
-    for county in COUNTIES:
-        if county.lower() in text:
-            score += 20
-
-    for term in POSITIVE_TERMS:
-        if term in text:
-            score += 3
-
-    # Strong preference for specific news language.
-    for term in [
-        "today",
-        "latest",
-        "announced",
-        "launched",
-        "approved",
-        "construction",
-        "project",
-        "statement",
-        "inspection",
-        "development",
-    ]:
-        if term in title:
-            score += 5
-
-    for term in BAD_TERMS:
-        if term in title:
-            score -= 100
-
-    return score
-
-
-# ============================================================
-# VERIFY ARTICLE
-# ============================================================
-
-def verify_candidate(
-    candidate,
-):
-    url = clean_text(
-        candidate.get(
-            "url",
-            "",
-        )
-    )
-
-    title = clean_text(
-        candidate.get(
-            "title",
-            "",
-        )
-    )
-
-    if not url or not title:
-        return None
-
-    if len(title) < 15:
-        return None
-
-    lowered_title = title.lower()
-
-    if any(
-        term in lowered_title
-        for term in [
-            "google news",
-            "facebook",
-            "sign in",
-        ]
-    ):
-        return None
-
-    try:
-        html, final_url = fetch_html(
-            url,
-            timeout=30,
-        )
-    except Exception as exc:
-        log(
-            f"Article fetch failed: "
-            f"{str(exc)[:150]}"
-        )
-        return None
-
-    soup = BeautifulSoup(
-        html,
-        "html.parser",
-    )
-
-    article_text = extract_article_text(
-        soup
-    )
-
-    if len(article_text) < 120:
-        log(
-            "Rejected: insufficient article text."
-        )
-        return None
-
-    combined = clean_text(
-        title
-        + " "
-        + article_text
-    )
-
-    county = detect_county(
-        combined
-    )
-
-    if not county:
-        log(
-            "Rejected: county not detected."
-        )
-        return None
-
-    lowered = combined.lower()
-
-    positive_score = sum(
-        1
-        for term in POSITIVE_TERMS
-        if term in lowered
-    )
-
-    if positive_score < 2:
-        log(
-            "Rejected: weak county-news relevance."
-        )
-        return None
-
-    source_name = get_source_name(
-        soup,
-        final_url,
-    )
-
-    # Never allow search-engine source names.
-    if any(
-        term in source_name.lower()
-        for term in [
-            "google",
-            "bing",
-            "facebook",
-        ]
-    ):
-        source_name = urllib.parse.urlparse(
-            final_url
-        ).netloc.replace(
-            "www.",
-            "",
-        )
-
-    log(
-        f"Article verified: "
-        f"{source_name}"
-    )
-
-    image_url = recover_real_image(
-        final_url
-    )
-
-    if not image_url:
-        log(
-            "Rejected: no real publisher image."
-        )
-        return None
-
-    publication_date = extract_publication_date(
-        soup
-    )
-
-    category = detect_category(
-        combined
-    )
-
-    summary = shorten(
-        article_text,
-        650,
-    )
-
-    story = {
-        "title": shorten(
-            title,
-            180,
-        ),
-        "county": county,
-        "category": category,
-        "date": publication_date,
-        "source_name": source_name,
-        "url": final_url,
-        "resolved_url": final_url,
-        "image": image_url,
-        "local_image": str(
-            IMAGE_FILE.relative_to(ROOT)
-        ).replace(
-            "\\",
-            "/",
-        ),
-        "summary": summary,
-        "verified": True,
-        "verification": {
-            "article_fetched": True,
-            "article_text_found": True,
-            "county_detected": True,
-            "real_image_found": True,
-            "publisher_source": True,
-        },
-    }
-
-    return story
-
-
-# ============================================================
-# STORY SELECTION
-# ============================================================
-
-def select_verified_story():
-    candidates = collect_candidates()
-
-    candidates.sort(
-        key=score_candidate,
-        reverse=True,
-    )
-
-    if not candidates:
-        raise RuntimeError(
-            "No news candidates were found."
-        )
-
-    # Keep trying candidates until a complete
-    # verified article + real image is found.
-    for index, candidate in enumerate(
-        candidates,
-        1,
-    ):
-        log("")
-        log(
-            "============================================================"
-        )
-        log(
-            f"VERIFYING CANDIDATE "
-            f"{index}/{len(candidates)}"
-        )
-        log(
-            f"TITLE: {candidate.get('title', '')}"
-        )
-        log(
-            f"URL: {candidate.get('url', '')}"
-        )
-        log(
-            "============================================================"
-        )
-
-        try:
-            story = verify_candidate(
-                candidate
-            )
         except Exception as exc:
-            log(
-                f"Candidate error: "
-                f"{type(exc).__name__}: {exc}"
-            )
-            story = None
+            log(f"Downloaded file is not a valid image: {exc}")
+            return None
 
-        if story:
-            log("")
-            log(
-                "============================================================"
-            )
-            log(
-                "VERIFIED STORY SELECTED"
-            )
-            log(
-                "============================================================"
-            )
-            log(
-                f"Title : {story['title']}"
-            )
-            log(
-                f"County: {story['county']}"
-            )
-            log(
-                f"Source: {story['source_name']}"
-            )
-            log(
-                f"Image : {story['image']}"
-            )
-
-            return story
-
-    raise RuntimeError(
-        "No verified county story with a real image "
-        "could be selected after checking all candidates."
-    )
-
-
-# ============================================================
-# NARRATION
-# ============================================================
-
-def build_narration(
-    story,
-):
-    title = clean_text(
-        story.get(
-            "title",
-            "",
-        )
-    )
-
-    county = clean_text(
-        story.get(
-            "county",
-            "",
-        )
-    )
-
-    summary = clean_text(
-        story.get(
-            "summary",
-            "",
-        )
-    )
-
-    source = clean_text(
-        story.get(
-            "source_name",
-            "",
-        )
-    )
-
-    return (
-        f"Here is the latest verified update "
-        f"from {county}. "
-        f"{title}. "
-        f"{summary} "
-        f"This report is based on information "
-        f"published by {source}. "
-        f"Rift Valley Watch. "
-        f"Verified county news and developments."
-    )
-
-
-# ============================================================
-# WRITE DATA
-# ============================================================
-
-def write_story_files(
-    story,
-):
-    narration = build_narration(
-        story
-    )
-
-    script = {
-        "title": story.get(
-            "title",
-            "",
-        ),
-        "county": story.get(
-            "county",
-            "",
-        ),
-        "category": story.get(
-            "category",
-            "",
-        ),
-        "source_name": story.get(
-            "source_name",
-            "",
-        ),
-        "url": story.get(
-            "url",
-            "",
-        ),
-        "image": story.get(
-            "image",
-            "",
-        ),
-        "local_image": story.get(
-            "local_image",
-            "",
-        ),
-        "narration": narration,
-    }
-
-    payloads = [
-        (
-            STORY_FILE,
-            story,
-        ),
-        (
-            SELECTED_STORY_FILE,
-            story,
-        ),
-        (
-            SCRIPT_FILE,
-            script,
-        ),
-        (
-            SELECTED_SCRIPT_FILE,
-            script,
-        ),
-    ]
-
-    for path, payload in payloads:
-        path.write_text(
-            json.dumps(
-                payload,
-                indent=2,
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
-        )
-
-        log(
-            f"Wrote: {path}"
-        )
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-def main():
-    log("")
-    log(
-        "============================================================"
-    )
-    log(
-        "RIFT VALLEY WATCH"
-    )
-    log(
-        "AUTOMATIC MULTI-COUNTY NEWS ENGINE"
-    )
-    log(
-        "============================================================"
-    )
-
-    log(
-        f"Root: {ROOT}"
-    )
-
-    log(
-        "Counties: "
-        + ", ".join(COUNTIES)
-    )
-
-    prepare_directories()
-
-    # Remove stale image so an old story image can never
-    # accidentally be presented as the new story image.
-    if IMAGE_FILE.exists():
-        IMAGE_FILE.unlink()
-
-    story = select_verified_story()
-
-    write_story_files(
-        story
-    )
-
-    log("")
-    log(
-        "============================================================"
-    )
-    log(
-        "NEWS ENGINE SUCCESSFUL"
-    )
-    log(
-        "============================================================"
-    )
-
-    log(
-        f"Selected story: {story['title']}"
-    )
-
-    log(
-        f"County: {story['county']}"
-    )
-
-    log(
-        f"Source: {story['source_name']}"
-    )
-
-    log(
-        f"Real image: {story['image']}"
-    )
-
-    log(
-        f"Local image: {story['local_image']}"
-    )
-
-    log("")
-    log(
-        "data/story.json ready."
-    )
-
-    log(
-        "data/script.json ready."
-    )
-
-    log(
-        "Video generator can now run."
-    )
-
-
-if __name__ == "__main__":
-    try:
-        main()
-
-    except KeyboardInterrupt:
-        log("")
-        log(
-            "Process interrupted."
-        )
-        sys.exit(1)
+        if image_is_valid(destination):
+            return destination
 
     except Exception as exc:
-        log("")
-        log(
-            "============================================================"
+        log(f"Image download failed: {exc}")
+
+    return None
+
+
+# ============================================================
+# IMAGE RESOLUTION
+# ============================================================
+
+def resolve_images(story):
+    candidates = extract_image_candidates(story)
+
+    log(f"Image candidates found: {len(candidates)}")
+
+    resolved = []
+    hashes = set()
+
+    index = 1
+
+    for candidate in candidates:
+        if len(resolved) >= MAX_IMAGES:
+            break
+
+        # Local file.
+        local_path = Path(candidate)
+
+        if local_path.exists():
+            if not image_is_valid(local_path):
+                continue
+
+            digest = sha256_file(local_path)
+
+            if digest and digest in hashes:
+                continue
+
+            if digest:
+                hashes.add(digest)
+
+            resolved.append(local_path)
+
+            log(
+                f"Using local image: {local_path}"
+            )
+
+            continue
+
+        # Remote URL.
+        if is_image_url(candidate):
+            downloaded = download_image(
+                candidate,
+                index,
+            )
+
+            index += 1
+
+            if downloaded is None:
+                continue
+
+            digest = sha256_file(downloaded)
+
+            if digest and digest in hashes:
+                continue
+
+            if digest:
+                hashes.add(digest)
+
+            resolved.append(downloaded)
+
+    # Strong fallback: the recovered source image.
+    if not resolved and LOCAL_SOURCE_IMAGE.exists():
+        if image_is_valid(LOCAL_SOURCE_IMAGE):
+            resolved.append(LOCAL_SOURCE_IMAGE)
+
+    if not resolved:
+        raise RuntimeError(
+            "No usable article image was found."
         )
-        log(
-            "RIFT VALLEY WATCH NEWS ENGINE FAILED"
+
+    # Ensure max five.
+    resolved = resolved[:MAX_IMAGES]
+
+    log(
+        f"Distinct usable images: {len(resolved)}"
+    )
+
+    return resolved
+
+
+# ============================================================
+# IMAGE PREPARATION
+# ============================================================
+
+def prepare_image_for_vertical(
+    image_path,
+    output_path,
+):
+    """
+    Creates a vertical 1080x1920 composition.
+
+    The original photo is NOT stretched.
+    A blurred enlarged copy forms the background.
+    The actual photo is fitted into the central area.
+    """
+
+    image_path = Path(image_path)
+    output_path = Path(output_path)
+
+    with Image.open(image_path) as original:
+        original = original.convert("RGB")
+
+        # Background.
+        bg = original.copy()
+        bg.thumbnail(
+            (
+                VIDEO_WIDTH,
+                VIDEO_HEIGHT,
+            ),
+            Image.Resampling.LANCZOS,
         )
-        log(
-            "============================================================"
+
+        # Cover entire vertical canvas.
+        bg_ratio = max(
+            VIDEO_WIDTH / bg.width,
+            VIDEO_HEIGHT / bg.height,
         )
-        log(
-            f"{type(exc).__name__}: {exc}"
+
+        bg = bg.resize(
+            (
+                int(bg.width * bg_ratio),
+                int(bg.height * bg_ratio),
+            ),
+            Image.Resampling.LANCZOS,
         )
-        sys.exit(1)
+
+        left = (bg.width - VIDEO_WIDTH) // 2
+        top = (bg.height - VIDEO_HEIGHT) // 2
+
+        bg = bg.crop(
+            (
+                left,
+                top,
+                left + VIDEO_WIDTH,
+                top + VIDEO_HEIGHT,
+            )
+        )
+
+        bg = bg.filter(
+            ImageFilter.GaussianBlur(28)
+        )
+
+        canvas = bg.copy()
+
+        # Main photo.
+        photo = original.copy()
+
+        max_width = int(VIDEO_WIDTH * 0.94)
+        max_height = int(VIDEO_HEIGHT * 0.76)
+
+        ratio = min(
+            max_width / photo.width,
+            max_height / photo.height,
+        )
+
+        new_size = (
+            max(1, int(photo.width * ratio)),
+            max(1, int(photo.height * ratio)),
+        )
+
+        photo = photo.resize(
+            new_size,
+            Image.Resampling.LANCZOS,
+        )
+
+        x = (VIDEO_WIDTH - photo.width) // 2
+        y = (VIDEO_HEIGHT - photo.height) // 2
+
+        # Slight dark frame.
+        frame = Image.new(
+            "RGB",
+            (
+                photo.width + 12,
+                photo.height + 12,
+            ),
+            (15, 15, 15),
+        )
+
+        frame.paste(
+            photo,
+            (6, 6),
+        )
+
+        canvas.paste(
+            frame,
+            (
+                x - 6,
+                y - 6,
+            ),
+        )
+
+        canvas.save(
+            output_path,
+            "JPEG",
+            quality=94,
+        )
+
+    return output_path
+
+
+# ============================================================
+# TEXT WRAPPING
+# ============================================================
+
+def wrap_text(
+    draw,
+    text,
+    font,
+    max_width,
+):
+    words = text.split()
+
+    lines = []
+    current = ""
+
+    for word in words:
+        test = (
+            word
+            if not current
+            else current + " " + word
+        )
+
+        bbox = draw.textbbox(
+            (0, 0),
+            test,
+            font=font,
+        )
+
+        width = bbox[2] - bbox[0]
+
+        if width <= max_width:
+            current = test
+        else:
+            if current:
+                lines.append(current)
+
+            current = word
+
+    if current:
+        lines.append(current)
+
+    return lines
+
+
+# ============================================================
+# OVERLAY FRAME
+# ============================================================
+
+def create_overlay(
+    output_path,
+    county,
+    title,
+    image_number=None,
+    image_total=None,
+    show_counter=False,
+):
+    """
+    Creates a transparent overlay.
+
+    IMPORTANT:
+    No source/publisher information is displayed.
+    """
+
+    overlay = Image.new(
+        "RGBA",
+        (
+            VIDEO_WIDTH,
+            VIDEO_HEIGHT,
+        ),
+        (0, 0, 0, 0),
+    )
+
+    draw = ImageDraw.Draw(
+        overlay,
+        "RGBA",
+    )
+
+    # --------------------------------------------------------
+    # TOP BRAND BAR
+    # --------------------------------------------------------
+
+    draw.rectangle(
+        (
+            0,
+            0,
+            VIDEO_WIDTH,
+            205,
+        ),
+        fill=(0, 0, 0, 225),
+    )
+
+    brand_font = find_font(
+        54,
+        bold=True,
+    )
+
+    small_font = find_font(
+        31,
+        bold=True,
+    )
+
+    title_font = find_font(
+        57,
+        bold=True,
+    )
+
+    draw.text(
+        (
+            54,
+            35,
+        ),
+        BRAND,
+        font=brand_font,
+        fill=(255, 255, 255, 255),
+    )
+
+    county_text = ""
+
+    if county:
+        county_text = (
+            county.upper()
+            + " COUNTY • KENYA"
+        )
+
+    if county_text:
+        draw.text(
+            (
+                57,
+                115,
+            ),
+            county_text,
+            font=small_font,
+            fill=(225, 225, 225, 255),
+        )
+
+    # --------------------------------------------------------
+    # HEADLINE CARD
+    # --------------------------------------------------------
+
+    if title:
+        clean_headline = clean_title(title)
+
+        lines = wrap_text(
+            draw,
+            clean_headline,
+            title_font,
+            VIDEO_WIDTH - 110,
+        )
+
+        # Keep headline to three lines maximum.
+        lines = lines[:3]
+
+        box_height = (
+            55
+            + len(lines) * 72
+            + 45
+        )
+
+        y1 = VIDEO_HEIGHT - 465
+        y2 = y1 + box_height
+
+        draw.rounded_rectangle(
+            (
+                35,
+                y1,
+                VIDEO_WIDTH - 35,
+                y2,
+            ),
+            radius=22,
+            fill=(0, 0, 0, 215),
+        )
+
+        y = y1 + 32
+
+        for line in lines:
+            draw.text(
+                (
+                    62,
+                    y,
+                ),
+                line,
+                font=title_font,
+                fill=(255, 255, 255, 255),
+            )
+
+            y += 72
+
+    # --------------------------------------------------------
+    # REAL PHOTO COUNTER ONLY
+    # --------------------------------------------------------
+
+    if (
+        show_counter
+        and image_number
+        and image_total
+        and image_total > 1
+    ):
+        counter_font = find_font(
+            30,
+            bold=True,
+        )
+
+        counter = (
+            f"{image_number}/{image_total}"
+        )
+
+        bbox = draw.textbbox(
+            (0, 0),
+            counter,
+            font=counter_font,
+        )
+
+        cw = bbox[2] - bbox[0]
+        ch = bbox[3] - bbox[1]
+
+        x = VIDEO_WIDTH - cw - 55
+        y = 238
+
+        draw.rounded_rectangle(
+            (
+                x - 18,
+                y - 12,
+                x + cw + 18,
+                y + ch + 12,
+            ),
+            radius=14,
+            fill=(0, 0, 0, 190),
+        )
+
+        draw.text(
+            (
+                x,
+                y,
+            ),
+            counter,
+            font=counter_font,
+            fill=(255, 255, 255, 255),
+        )
+
+    # --------------------------------------------------------
+    # BOTTOM BRANDING
+    # --------------------------------------------------------
+
+    footer_font = find_font(
+        28,
+        bold=True,
+    )
+
+    footer = BOTTOM_BRAND
+
+    bbox = draw.textbbox(
+        (0, 0),
+        footer,
+        font=footer_font,
+    )
+
+    fw = bbox[2] - bbox[0]
+
+    draw.rectangle(
+        (
+            0,
+            VIDEO_HEIGHT - 82,
+            VIDEO_WIDTH,
+            VIDEO_HEIGHT,
+        ),
+        fill=(0, 0, 0, 220),
+    )
+
+    draw.text(
+        (
+            (VIDEO_WIDTH - fw) // 2,
+            VIDEO_HEIGHT - 62,
+        ),
+        footer,
+        font=footer_font,
+        fill=(255, 255, 255, 255),
+    )
+
+    overlay.save(
+        output_path,
+        "PNG",
+    )
+
+    return output_path
+
+
+# ============================================================
+# AUDIO GENERATION
+# ============================================================
+
+def generate_audio(narration):
+    if not narration:
+        raise RuntimeError(
+            "No narration was generated."
+        )
+
+    if AUDIO_FILE.exists():
+        try:
+            AUDIO_FILE.unlink()
+        except Exception:
+            pass
+
+    log("Generating narration...")
+
+    log(
+        f"Narration words: "
+        f"{len(narration.split())}"
+    )
+
+    tts = gTTS(
+        text=narration,
+        lang="en",
+        slow=False,
+    )
+
+    tts.save(str(AUDIO_FILE))
+
+    if not AUDIO_FILE.exists():
+        raise RuntimeError(
+            "Narration audio was not created."
+        )
+
+    if AUDIO_FILE.stat().st_size < 10_000:
+        raise RuntimeError(
+            "Narration audio is suspiciously small."
+        )
+
+    return AUDIO_FILE
+
+
+# ============================================================
+# AUDIO DURATION
+# ============================================================
+
+def get_media_duration(path):
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(path),
+    ]
+
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Unable to determine media duration."
+        )
+
+    try:
+        return float(result.stdout.strip())
+    except Exception:
+        raise RuntimeError(
+            "Invalid media duration returned by ffprobe."
+        )
+
+
+# ============================================================
+# FFMPEG COMMAND RUNNER
+# ============================================================
+
+def run_ffmpeg(command):
+    log("Running FFmpeg...")
+
+    result = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+
+    print(
+        result.stdout,
+        flush=True,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"FFmpeg failed with exit code "
+            f"{result.returncode}"
+        )
+
+
+# ============================================================
+# SINGLE IMAGE KEN BURNS
+# ============================================================
+
+def create_single_image_video(
+    image_path,
+    overlay_path,
+    duration,
+    output_path,
+):
+    """
+    One genuine image.
+    No fake scene counter.
+    Continuous subtle Ken Burns zoom.
+    """
+
+    image_path = Path(image_path)
+    overlay_path = Path(overlay_path)
+    output_path = Path(output_path)
+
+    frames = max(
+        1,
+        int(math.ceil(duration * FPS)),
+    )
+
+    # zoompan:
+    # Starts at 1.00
+    # Slowly reaches approximately 1.08.
+    zoom_expression = (
+        "min(zoom+0.00035,1.08)"
+    )
+
+    filter_complex = (
+        f"[0:v]"
+        f"scale="
+        f"{VIDEO_WIDTH}:"
+        f"{VIDEO_HEIGHT}:"
+        f"force_original_aspect_ratio=increase,"
+        f"crop="
+        f"{VIDEO_WIDTH}:"
+        f"{VIDEO_HEIGHT},"
+        f"zoompan="
+        f"z='{zoom_expression}':"
+        f"d=1:"
+        f"x='iw/2-(iw/zoom/2)':"
+        f"y='ih/2-(ih/zoom/2)':"
+        f"s={VIDEO_WIDTH}x{VIDEO_HEIGHT}:"
+        f"fps={FPS}"
+        f"[base];"
+        f"[base][1:v]"
+        f"overlay=0:0:"
+        f"format=yuv420p"
+    )
+
+    command = [
+        "ffmpeg",
+        "-y",
+
+        "-loop",
+        "1",
+        "-i",
+        str(image_path),
+
+        "-loop",
+        "1",
+        "-i",
+        str(overlay_path),
+
+        "-filter_complex",
+        filter_complex,
+
+        "-t",
+        f"{duration:.3f}",
+
+        "-r",
+        str(FPS),
+
+        "-c:v",
+        VIDEO_CODEC,
+
+        "-preset",
+        "veryfast",
+
+        "-b:v",
+        VIDEO_BITRATE,
+
+        "-pix_fmt",
+        "yuv420p",
+
+        "-movflags",
+        "+faststart",
+
+        str(output_path),
+    ]
+
+    run_ffmpeg(command)
+
+    if not output_path.exists():
+        raise RuntimeError(
+            "Single-image video was not generated."
+        )
+
+    return output_path
+
+
+# ============================================================
+# MULTI IMAGE SLIDESHOW
+# ============================================================
+
+def create_multi_image_video(
+    images,
+    overlays,
+    duration,
+    output_path,
+):
+    """
+    Creates a real slideshow.
+
+    A counter is shown only because there are
+    genuinely different image files.
+    """
+
+    count = len(images)
+
+    if count < 2:
+        raise ValueError(
+            "Multi-image slideshow requires at least 2 images."
+        )
+
+    output_path = Path(output_path)
+
+    per_image = duration / count
+
+    input_args = []
+
+    for image in images:
+        input_args.extend([
+            "-loop",
+            "1",
+            "-t",
+            f"{per_image:.3f}",
+            "-i",
+            str(image),
+        ])
+
+    for overlay in overlays:
+        input_args.extend([
+            "-loop",
+            "1",
+            "-t",
+            f"{per_image:.3f}",
+            "-i",
+            str(overlay),
+        ])
+
+    filter_parts = []
+
+    # Image streams.
+    for i in range(count):
+        filter_parts.append(
+            f"[{i}:v]"
+            f"scale="
+            f"{VIDEO_WIDTH}:"
+            f"{VIDEO_HEIGHT}:"
+            f"force_original_aspect_ratio=increase,"
+            f"crop="
+            f"{VIDEO_WIDTH}:"
+            f"{VIDEO_HEIGHT},"
+            f"zoompan="
+            f"z='min(zoom+0.00045,1.07)':"
+            f"d=1:"
+            f"x='iw/2-(iw/zoom/2)':"
+            f"y='ih/2-(ih/zoom/2)':"
+            f"s={VIDEO_WIDTH}x{VIDEO_HEIGHT}:"
+            f"fps={FPS},"
+            f"setsar=1"
+            f"[img{i}]"
+        )
+
+    # Overlay streams.
+    for i in range(count):
+        overlay_index = count + i
+
+        filter_parts.append(
+            f"[{overlay_index}:v]"
+            f"format=rgba"
+            f"[ov{i}]"
+        )
+
+    # Combine image + overlay.
+    for i in range(count):
+        filter_parts.append(
+            f"[img{i}]"
+            f"[ov{i}]"
+            f"overlay=0:0:"
+            f"format=yuv420p"
+            f"[scene{i}]"
+        )
+
+    concat_inputs = "".join(
+        f"[scene{i}]"
+        for i in range(count)
+    )
+
+    filter_parts.append(
+        f"{concat_inputs}"
+        f"concat=n={count}:v=1:a=0:"
+        f"format=yuv420p"
+        f"[vout]"
+    )
+
+    filter_complex = ";".join(
+        filter_parts
+    )
+
+    command = [
+        "ffmpeg",
+        "-y",
+        *input_args,
+
+        "-filter_complex",
+        filter_complex,
+
+        "-t",
+        f"{duration:.3f}",
+
+        "-map",
+        "[vout]",
+
+        "-r",
+        str(FPS),
+
+        "-c:v",
+        VIDEO_CODEC,
+
+        "-preset",
+        "veryfast",
+
+        "-b:v",
+        VIDEO_BITRATE,
+
+        "-pix_fmt",
+        "yuv420p",
+
+        "-movflags",
+        "+faststart",
+
+        str(output_path),
+    ]
+
+    run_ffmpeg(command)
+
+    if not output_path.exists():
+        raise RuntimeError(
+            "Multi-image video was not generated."
+        )
+
+    return output_path
+
+
+# ============================================================
+# FINAL VIDEO + AUDIO
+# ============================================================
+
+def attach_audio(video_path, audio_path):
+    """
+    Adds narration without changing the video content.
+    """
+
+    video_path = Path(video_path)
+    audio_path = Path(audio_path)
+
+    final_path = OUTPUT_FILE
+
+    temporary_final = (
+        OUTPUT_DIR /
+        "rift_valley_watch_reel_temp.mp4"
+    )
+
+    if temporary_final.exists():
+        temporary_final.unlink()
+
+    audio_duration = get_media_duration(
+        audio_path
+    )
+
+    video_duration = get_media_duration(
+        video_path
+    )
+
+    log(
+        f"Video duration: {video_duration:.2f}s"
+    )
+
+    log(
+        f"Audio duration: {audio_duration:.2f}s"
+    )
+
+    command = [
+        "ffmpeg",
+        "-y",
+
+        "-i",
+        str(video_path),
+
+        "-i",
+        str(audio_path),
+
+        "-map",
+        "0:v:0",
+
+        "-map",
+        "1:a:0",
+
+        "-c:v",
+        "copy",
+
+        "-c:a",
+        AUDIO_CODEC,
+
+        "-b:a",
+        AUDIO_BITRATE,
+
+        "-shortest",
+
+        "-movflags",
+        "+faststart",
+
+        str(temporary_final),
+    ]
+
+    run_ffmpeg(command)
+
+    if not temporary_final.exists():
+        raise RuntimeError(
+            "Final MP4 was not created."
+        )
+
+    # Replace final file.
+    if final_path.exists():
+        final_path.unlink()
+
+    temporary_final.replace(
+        final_path
+    )
+
+    return final_path
+
+
+# ============================================================
+# FINAL QC
+# ============================================================
+
+def verify_final_video(path):
+    path = Path(path)
+
+    if not path.exists():
+        raise RuntimeError(
+            "Final MP4 does not exist."
+        )
+
+    size = path.stat().st_size
+
+    if size < 100_000:
+        raise RuntimeError(
+            "Final MP4 is suspiciously small."
+        )
+
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+
+        "-show_entries",
+        "stream="
+        "codec_type,"
+        "codec_name,"
+        "width,"
+        "height,"
+        "duration,"
+        "r_frame_rate",
+
+        "-show_entries",
+        "format="
+        "duration,"
+        "size",
+
+        "-of",
+        "json",
+
+        str(path),
+    ]
+
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode != 
