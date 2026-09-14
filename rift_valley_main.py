@@ -1,8 +1,7 @@
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from io import BytesIO
-
 import hashlib
 import html
 import json
@@ -23,16 +22,21 @@ from PIL import Image
 # MAIN CONTROLLER
 #
 # VERSION:
-# RVW_MAIN_V12_MULTI_PHOTO_JSON_STABLE
+# RVW_MAIN_V13_REALTIME_STRICT_COUNTY
 #
 # PURPOSE
-# - Discover real Rift Valley news
-# - Select one strong story
-# - Collect multiple real article photos
-# - Save selected_story.json BEFORE generator starts
-# - Save selected_script.json BEFORE generator starts
-# - Launch RVW_VIDEO_V22
-# - Verify final MP4
+# - Select ONE current article
+# - Enforce strict county isolation
+# - Reject stale stories
+# - Reject ambiguous multi-county stories
+# - Resolve REAL article photos
+# - Never use generic placeholders/logos/avatars
+# - Generate selected_story.json
+# - Generate selected_script.json
+# - Launch the existing video generator
+#
+# COMPATIBLE WITH:
+# rift_valley_video_generator.py V25
 # ============================================================
 
 
@@ -59,16 +63,28 @@ FINAL_IMAGE = SOURCE_DIR / "story_image.jpg"
 
 
 # ============================================================
-# COUNTIES
+# VERSION
 # ============================================================
 
-COUNTIES = {
+MAIN_GENERATOR_VERSION = "RVW_MAIN_V13_REALTIME_STRICT_COUNTY"
+
+
+# ============================================================
+# COUNTY CONFIGURATION
+# ============================================================
+
+COUNTY_ALIASES = {
     "Bomet": [
         "Bomet",
         "Sotik",
         "Longisa",
         "Chepalungu",
         "Konoin",
+        "Kembu",
+        "Kaplong",
+        "Koiwa",
+        "Ndanai",
+        "Sigor",
     ],
 
     "Kericho": [
@@ -76,6 +92,12 @@ COUNTIES = {
         "Litein",
         "Kipkelion",
         "Ainamoi",
+        "Belgut",
+        "Bureti",
+        "Londiani",
+        "Kabianga",
+        "Kapsoit",
+        "Kapsuser",
     ],
 
     "Nakuru": [
@@ -84,6 +106,11 @@ COUNTIES = {
         "Gilgil",
         "Molo",
         "Njoro",
+        "Bahati",
+        "Subukia",
+        "Rongai",
+        "Kuresoi",
+        "Mai Mahiu",
     ],
 
     "Nandi": [
@@ -91,6 +118,11 @@ COUNTIES = {
         "Kapsabet",
         "Mosop",
         "Aldai",
+        "Emgwen",
+        "Chesumei",
+        "Nandi Hills",
+        "Kabiyet",
+        "Kebulwet",
     ],
 
     "Uasin Gishu": [
@@ -98,6 +130,10 @@ COUNTIES = {
         "Eldoret",
         "Kesses",
         "Turbo",
+        "Moiben",
+        "Ainabkoi",
+        "Soy",
+        "Kapseret",
     ],
 
     "Elgeyo-Marakwet": [
@@ -106,6 +142,13 @@ COUNTIES = {
         "Marakwet",
         "Iten",
         "Keiyo",
+        "Keiyo South",
+        "Keiyo North",
+        "Marakwet East",
+        "Marakwet West",
+        "Kapsowar",
+        "Chebiemit",
+        "Tambach",
     ],
 
     "West Pokot": [
@@ -113,6 +156,12 @@ COUNTIES = {
         "Pokot",
         "Kapenguria",
         "Kacheliba",
+        "Sigor",
+        "Pokot South",
+        "Pokot Central",
+        "Pokot North",
+        "Alale",
+        "Chepareria",
     ],
 
     "Narok": [
@@ -120,15 +169,23 @@ COUNTIES = {
         "Kilgoris",
         "Suswa",
         "Transmara",
+        "Narok North",
+        "Narok South",
+        "Loita",
+        "Ewaso Ng'iro",
+        "Ewaso Ngiro",
     ],
 }
+
+
+COUNTIES = list(COUNTY_ALIASES.keys())
 
 
 # ============================================================
 # NEWS SOURCES
 # ============================================================
 
-PUBLISHER_PAGES = [
+SOURCE_PAGES = [
     "https://citizen.digital/",
     "https://www.the-star.co.ke/news/",
     "https://www.kbc.co.ke/",
@@ -136,40 +193,46 @@ PUBLISHER_PAGES = [
 ]
 
 
-APPROVED_DOMAINS = [
+APPROVED_DOMAINS = {
     "citizen.digital",
     "the-star.co.ke",
     "kbc.co.ke",
     "nation.africa",
-]
+}
 
 
-BLOCKED_DOMAINS = [
+BLOCKED_DOMAINS = {
     "facebook.com",
+    "www.facebook.com",
+    "m.facebook.com",
     "instagram.com",
+    "www.instagram.com",
     "twitter.com",
+    "www.twitter.com",
     "x.com",
+    "www.x.com",
     "youtube.com",
+    "www.youtube.com",
     "youtu.be",
     "tiktok.com",
+    "www.tiktok.com",
     "telegram.me",
     "t.me",
     "whatsapp.com",
     "google.com",
     "news.google.com",
-]
+}
 
 
 # ============================================================
-# BAD IMAGE TERMS
+# IMAGE FILTERS
 # ============================================================
 
-BAD_IMAGE_TERMS = [
+BAD_IMAGE_TERMS = {
     "google",
     "google-news",
     "google_news",
     "googlelogo",
-    "google-logo",
     "favicon",
     "icon",
     "logo",
@@ -191,43 +254,20 @@ BAD_IMAGE_TERMS = [
     "worldcup",
     "profile",
     "generic",
-]
-
-
-# ============================================================
-# REQUEST HEADERS
-# ============================================================
-
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (X11; Linux x86_64) "
-        "AppleWebKit/537.36 "
-        "(KHTML, like Gecko) "
-        "Chrome/131.0 Safari/537.36"
-    ),
-
-    "Accept-Language": "en-US,en;q=0.9",
-
-    "Accept": (
-        "text/html,application/xhtml+xml,"
-        "application/xml;q=0.9,"
-        "image/avif,image/webp,image/apng,"
-        "image/svg+xml,image/*,*/*;q=0.8"
-    ),
+    "dummy",
+    "blank",
+    "transparent",
+    "tracking",
+    "pixel",
 }
-
-
-SESSION = requests.Session()
-SESSION.headers.update(HEADERS)
 
 
 # ============================================================
 # SETTINGS
 # ============================================================
 
-MAX_ARTICLES_PER_SOURCE = 60
+MAX_ARTICLES_PER_SOURCE = 45
 MAX_SELECTED_CANDIDATES = 20
-
 MAX_ARTICLE_IMAGES = 8
 MAX_STORED_IMAGE_URLS = 8
 
@@ -237,52 +277,83 @@ MIN_IMAGE_WIDTH = 400
 MIN_IMAGE_HEIGHT = 250
 MIN_IMAGE_AREA = 150000
 
+# Strict freshness.
+#
+# Articles older than this are rejected.
+MAX_ARTICLE_AGE_HOURS = 48
+
+# Strong preference for the newest stories.
+EXCELLENT_FRESHNESS_HOURS = 12
+GOOD_FRESHNESS_HOURS = 24
+ACCEPTABLE_FRESHNESS_HOURS = 36
+
+# Future dates beyond this tolerance are rejected.
+FUTURE_TOLERANCE_MINUTES = 15
+
+REQUEST_TIMEOUT = 25
+IMAGE_TIMEOUT = 30
+
 VIDEO_TIMEOUT_SECONDS = 900
 
 
 # ============================================================
-# LOGGING
+# HTTP HEADERS
 # ============================================================
 
-def log(text=""):
-    print(text, flush=True)
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) "
+        "AppleWebKit/537.36 "
+        "(KHTML, like Gecko) "
+        "Chrome/138.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-KE,en-US;q=0.9,en;q=0.8",
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;"
+        "q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
+    ),
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+}
+
+
+IMAGE_HEADERS = {
+    "User-Agent": HEADERS["User-Agent"],
+    "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+    "Referer": "https://www.google.com/",
+}
 
 
 # ============================================================
-# TEXT CLEANING
+# UTILITY FUNCTIONS
 # ============================================================
 
 def clean(value):
     if value is None:
         return ""
 
-    if isinstance(value, (dict, list)):
-        return ""
+    value = html.unescape(str(value))
 
     value = unicodedata.normalize(
         "NFKC",
-        str(value),
-    )
-
-    value = html.unescape(value)
-
-    value = value.replace(
-        "\xa0",
-        " ",
-    )
-
-    value = re.sub(
-        r"\s+",
-        " ",
         value,
     )
+
+    value = value.replace("\xa0", " ")
+    value = re.sub(r"\s+", " ", value)
 
     return value.strip()
 
 
-# ============================================================
-# JSON
-# ============================================================
+def normalize_for_match(value):
+    value = clean(value).lower()
+
+    value = value.replace("’", "'")
+    value = value.replace("–", "-")
+    value = value.replace("—", "-")
+
+    return value
+
 
 def save_json(path, data):
     path.parent.mkdir(
@@ -290,41 +361,33 @@ def save_json(path, data):
         exist_ok=True,
     )
 
-    temp_path = path.with_suffix(
+    temporary = path.with_suffix(
         path.suffix + ".tmp"
     )
 
-    with temp_path.open(
+    with temporary.open(
         "w",
         encoding="utf-8",
-    ) as f:
-
+    ) as handle:
         json.dump(
             data,
-            f,
+            handle,
             indent=2,
             ensure_ascii=False,
         )
 
-        f.flush()
+    temporary.replace(path)
 
-    temp_path.replace(path)
-
-
-# ============================================================
-# DOMAIN
-# ============================================================
 
 def domain(url):
     try:
+        hostname = urlparse(url).hostname or ""
+        hostname = hostname.lower().strip()
 
-        return (
-            urlparse(url)
-            .netloc
-            .lower()
-            .split(":")[0]
-            .removeprefix("www.")
-        )
+        if hostname.startswith("www."):
+            hostname = hostname[4:]
+
+        return hostname
 
     except Exception:
         return ""
@@ -336,11 +399,14 @@ def blocked(url):
     if not host:
         return True
 
-    return any(
-        host == x
-        or host.endswith("." + x)
-        for x in BLOCKED_DOMAINS
-    )
+    for blocked_domain in BLOCKED_DOMAINS:
+        if host == blocked_domain:
+            return True
+
+        if host.endswith("." + blocked_domain):
+            return True
+
+    return False
 
 
 def approved(url):
@@ -352,91 +418,325 @@ def approved(url):
     if blocked(url):
         return False
 
-    return any(
-        host == x
-        or host.endswith("." + x)
-        for x in APPROVED_DOMAINS
+    for approved_domain in APPROVED_DOMAINS:
+        if host == approved_domain:
+            return True
+
+        if host.endswith("." + approved_domain):
+            return True
+
+    return False
+
+
+def valid_http_url(url):
+    if not url:
+        return False
+
+    try:
+        parsed = urlparse(url)
+
+        return (
+            parsed.scheme.lower() in {"http", "https"}
+            and bool(parsed.netloc)
+        )
+
+    except Exception:
+        return False
+
+
+def absolute_url(base_url, value):
+    value = clean(value)
+
+    if not value:
+        return ""
+
+    if value.startswith("//"):
+        return "https:" + value
+
+    return urljoin(
+        base_url,
+        value,
     )
+
+
+# ============================================================
+# FETCH
+# ============================================================
+
+def fetch(url, require_html=False):
+    try:
+        response = requests.get(
+            url,
+            headers=HEADERS,
+            timeout=REQUEST_TIMEOUT,
+            allow_redirects=True,
+        )
+
+        if response.status_code != 200:
+            print(
+                f"    HTTP {response.status_code}: {url}"
+            )
+            return None
+
+        if require_html:
+            content_type = (
+                response.headers.get(
+                    "Content-Type",
+                    "",
+                ).lower()
+            )
+
+            if (
+                "html" not in content_type
+                and "xhtml" not in content_type
+            ):
+                return None
+
+        return response
+
+    except Exception as exc:
+        print(
+            f"    FETCH FAILED: {url} -> {exc}"
+        )
+        return None
 
 
 # ============================================================
 # COUNTY DETECTION
 # ============================================================
 
-def county_from_text(text):
-    text = clean(text).lower()
+def alias_pattern(alias):
+    escaped = re.escape(
+        normalize_for_match(alias)
+    )
 
-    best = ""
-    best_score = 0
+    escaped = escaped.replace(
+        r"\ ",
+        r"\s+",
+    )
 
-    for county, aliases in COUNTIES.items():
+    return re.compile(
+        r"(?<![a-z0-9])"
+        + escaped
+        + r"(?![a-z0-9])",
+        re.IGNORECASE,
+    )
 
-        score = 0
+
+def count_alias(text, alias):
+    if not text:
+        return 0
+
+    pattern = alias_pattern(alias)
+
+    return len(
+        pattern.findall(
+            normalize_for_match(text)
+        )
+    )
+
+
+def county_scores(title="", summary="", body=""):
+    title = clean(title)
+    summary = clean(summary)
+    body = clean(body)
+
+    scores = {}
+    raw_counts = {}
+
+    for county, aliases in COUNTY_ALIASES.items():
+
+        title_count = 0
+        summary_count = 0
+        body_count = 0
 
         for alias in aliases:
-
-            if re.search(
-                r"\b"
-                + re.escape(alias.lower())
-                + r"\b",
-                text,
-            ):
-                score += 1
-
-        if score > best_score:
-            best = county
-            best_score = score
-
-    return best
-
-
-# ============================================================
-# HTTP FETCH
-# ============================================================
-
-def fetch(
-    url,
-    accept_html=True,
-    timeout=25,
-):
-    try:
-
-        response = SESSION.get(
-            url,
-            timeout=timeout,
-            allow_redirects=True,
-        )
-
-        if response.status_code != 200:
-            log(
-                f"FETCH HTTP {response.status_code}: {url}"
+            title_count += count_alias(
+                title,
+                alias,
             )
 
-            return None
-
-        if accept_html:
-
-            content_type = (
-                response.headers
-                .get(
-                    "content-type",
-                    "",
-                )
-                .lower()
+            summary_count += count_alias(
+                summary,
+                alias,
             )
 
-            if "html" not in content_type:
-                return None
+            body_count += count_alias(
+                body,
+                alias,
+            )
 
-        return response
-
-    except Exception as exc:
-
-        log(
-            f"FETCH FAILED: {url} | {exc}"
+        weighted = (
+            title_count * 8
+            + summary_count * 5
+            + body_count
         )
 
-        return None
+        scores[county] = weighted
+
+        raw_counts[county] = (
+            title_count
+            + summary_count
+            + body_count
+        )
+
+    return scores, raw_counts
+
+
+def counties_in_title(title):
+    found = []
+
+    for county, aliases in COUNTY_ALIASES.items():
+        for alias in aliases:
+            if count_alias(title, alias) > 0:
+                found.append(county)
+                break
+
+    return found
+
+
+def detect_primary_county(title, summary, body):
+    scores, raw_counts = county_scores(
+        title,
+        summary,
+        body,
+    )
+
+    ordered = sorted(
+        scores.items(),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+
+    if not ordered:
+        return {
+            "county": "",
+            "scores": {},
+            "raw_counts": {},
+            "ambiguous": True,
+            "reason": "No counties detected.",
+        }
+
+    primary_county = ordered[0][0]
+    primary_score = ordered[0][1]
+
+    second_county = ""
+    second_score = 0
+
+    if len(ordered) > 1:
+        second_county = ordered[1][0]
+        second_score = ordered[1][1]
+
+    title_counties = counties_in_title(
+        title
+    )
+
+    # --------------------------------------------------------
+    # A title containing two counties is considered ambiguous.
+    # --------------------------------------------------------
+
+    if len(title_counties) > 1:
+        return {
+            "county": primary_county,
+            "scores": scores,
+            "raw_counts": raw_counts,
+            "ambiguous": True,
+            "reason": (
+                "Multiple counties detected in article title."
+            ),
+        }
+
+    # --------------------------------------------------------
+    # The primary county must have meaningful evidence.
+    # --------------------------------------------------------
+
+    if primary_score < 5:
+        return {
+            "county": primary_county,
+            "scores": scores,
+            "raw_counts": raw_counts,
+            "ambiguous": True,
+            "reason": (
+                "Insufficient county evidence."
+            ),
+        }
+
+    # --------------------------------------------------------
+    # Reject stories where two counties have comparable
+    # importance.
+    # --------------------------------------------------------
+
+    if (
+        second_score >= 8
+        and second_score >= primary_score * 0.55
+    ):
+        return {
+            "county": primary_county,
+            "scores": scores,
+            "raw_counts": raw_counts,
+            "ambiguous": True,
+            "reason": (
+                f"Competing counties: "
+                f"{primary_county} and {second_county}."
+            ),
+        }
+
+    # --------------------------------------------------------
+    # Reject articles that explicitly put two counties in
+    # the headline/summary.
+    # --------------------------------------------------------
+
+    summary_counties = []
+
+    for county, aliases in COUNTY_ALIASES.items():
+        for alias in aliases:
+            if count_alias(summary, alias) > 0:
+                summary_counties.append(county)
+                break
+
+    combined_strong = set(
+        title_counties
+        + summary_counties
+    )
+
+    if len(combined_strong) > 1:
+        return {
+            "county": primary_county,
+            "scores": scores,
+            "raw_counts": raw_counts,
+            "ambiguous": True,
+            "reason": (
+                "Multiple counties appear in headline/summary."
+            ),
+        }
+
+    # --------------------------------------------------------
+    # If another county is mentioned many times in body,
+    # reject it.
+    # --------------------------------------------------------
+
+    if (
+        second_score >= 12
+        and second_score >= primary_score * 0.40
+    ):
+        return {
+            "county": primary_county,
+            "scores": scores,
+            "raw_counts": raw_counts,
+            "ambiguous": True,
+            "reason": (
+                f"Secondary county has substantial presence: "
+                f"{second_county}."
+            ),
+        }
+
+    return {
+        "county": primary_county,
+        "scores": scores,
+        "raw_counts": raw_counts,
+        "ambiguous": False,
+        "reason": "Single dominant county detected.",
+    }
 
 
 # ============================================================
@@ -446,85 +746,121 @@ def fetch(
 def clean_title(title):
     title = clean(title)
 
-    publishers = [
-        "People Daily",
-        "The Star",
-        "Citizen Digital",
-        "Citizen",
-        "The Standard",
-        "Daily Nation",
-        "Nation",
-        "Capital News",
-        "KBC",
-        "NTV Kenya",
-        "TV47",
-    ]
+    title = re.sub(
+        r"\s+\|\s+[^|]+$",
+        "",
+        title,
+    )
 
-    for publisher in publishers:
+    title = re.sub(
+        r"\s+-\s+(Citizen Digital|The Star|KBC|Nation)$",
+        "",
+        title,
+        flags=re.IGNORECASE,
+    )
 
-        title = re.sub(
-            r"\s*[-|–—:]\s*"
-            + re.escape(publisher)
-            + r"\s*$",
-            "",
-            title,
-            flags=re.I,
-        )
+    title = re.sub(
+        r"^\s*(BREAKING|LATEST)\s*:\s*",
+        "",
+        title,
+        flags=re.IGNORECASE,
+    )
 
     return clean(title)
 
 
 # ============================================================
-# REMOVE METADATA
+# METADATA CLEANING
 # ============================================================
 
 def remove_metadata(text):
     text = clean(text)
 
-    patterns = [
-        r"\bGoogle News\b",
-        r"\bPeople Daily\b",
-        r"\bThe Star\b",
-        r"\bCitizen Digital\b",
-        r"\bThe Standard\b",
-        r"\bDaily Nation\b",
-        r"\bCapital News\b",
-        r"\bKBC\b",
-        r"\bNTV Kenya\b",
-        r"\bTV47\b",
-        r"\bFacebook\b",
-        r"\bInstagram\b",
-        r"\bTwitter\b",
-        r"\bYouTube\b",
-        r"\bTikTok\b",
+    remove_patterns = [
+        r"follow us on .*",
+        r"subscribe to .*",
+        r"read more .*",
+        r"click here .*",
+        r"advertisement",
+        r"advertising",
     ]
 
-    for pattern in patterns:
-
+    for pattern in remove_patterns:
         text = re.sub(
             pattern,
             "",
             text,
-            flags=re.I,
+            flags=re.IGNORECASE,
         )
 
-    text = re.sub(
-        r"\s+",
-        " ",
-        text,
-    )
-
-    return text.strip()
+    return clean(text)
 
 
 # ============================================================
-# LINK DISCOVERY
+# ARTICLE LINK DISCOVERY
 # ============================================================
+
+def is_probable_article_link(url, anchor_text=""):
+    if not approved(url):
+        return False
+
+    parsed = urlparse(url)
+
+    path = (
+        parsed.path or ""
+    ).lower()
+
+    if len(path) < 8:
+        return False
+
+    excluded_fragments = [
+        "/video",
+        "/videos",
+        "/photo",
+        "/photos",
+        "/gallery",
+        "/author",
+        "/authors",
+        "/tag",
+        "/tags",
+        "/category",
+        "/categories",
+        "/search",
+        "/contact",
+        "/about",
+        "/privacy",
+        "/terms",
+        "/advert",
+        "/login",
+        "/signup",
+        "/subscribe",
+    ]
+
+    for fragment in excluded_fragments:
+        if fragment in path:
+            return False
+
+    text = clean(anchor_text)
+
+    if len(text) < 15:
+        return False
+
+    return True
+
 
 def discover_links(page_url):
-    response = fetch(page_url)
+    print("")
+    print(
+        "    DISCOVERING ARTICLES:",
+        page_url,
+    )
 
-    if not response:
+    response = fetch(
+        page_url,
+        require_html=True,
+    )
+
+    if response is None:
         return []
 
     soup = BeautifulSoup(
@@ -532,293 +868,796 @@ def discover_links(page_url):
         "html.parser",
     )
 
-    result = []
+    links = []
     seen = set()
 
-    for a in soup.find_all(
-        "a",
-        href=True,
-    ):
+    for anchor in soup.find_all("a"):
+        href = anchor.get("href")
 
-        raw_href = clean(
-            a.get("href")
-        )
-
-        if not raw_href:
+        if not href:
             continue
 
-        url = urljoin(
+        url = absolute_url(
             page_url,
-            raw_href,
+            href,
         )
 
-        url = url.split("#")[0]
+        if not valid_http_url(url):
+            continue
 
         if not approved(url):
             continue
 
-        if url == page_url:
-            continue
-
-        if url in seen:
-            continue
-
-        path = (
-            urlparse(url)
-            .path
-            .lower()
-            .rstrip("/")
-        )
-
-        excluded_paths = {
-            "",
-            "/",
-            "/news",
-            "/search",
-            "/category/news",
-        }
-
-        if path in excluded_paths:
-            continue
-
         text = clean(
-            a.get_text(
+            anchor.get_text(
                 " ",
                 strip=True,
             )
         )
 
-        county = county_from_text(
-            text + " " + url
-        )
+        if not is_probable_article_link(
+            url,
+            text,
+        ):
+            continue
 
-        seen.add(url)
+        normalized = url.split("#")[0].rstrip("/")
 
-        result.append(
-            {
-                "url": url,
-                "text": text,
-                "county": county,
-            }
-        )
-
-    return result
-
-
-# ============================================================
-# IMAGE CANDIDATE ADDER
-# ============================================================
-
-def add_image_candidate(
-    result,
-    seen,
-    value,
-    article_url,
-):
-    value = clean(value)
-
-    if not value:
-        return
-
-    if value.startswith("data:"):
-        return
-
-    value = urljoin(
-        article_url,
-        value,
-    )
-
-    if not value.startswith(
-        (
-            "http://",
-            "https://",
-        )
-    ):
-        return
-
-    low = value.lower()
-
-    if any(
-        term in low
-        for term in BAD_IMAGE_TERMS
-    ):
-        return
-
-    # Ignore obvious tracking pixels.
-    if (
-        "pixel" in low
-        or "tracking" in low
-    ):
-        return
-
-    normalized = value.strip()
-
-    if normalized not in seen:
+        if normalized in seen:
+            continue
 
         seen.add(normalized)
 
-        result.append(
-            normalized
+        title_counties = counties_in_title(
+            text
         )
 
-
-# ============================================================
-# RECURSIVE JSON IMAGE SCANNER
-# ============================================================
-
-def scan_json_images(
-    value,
-    result,
-    seen,
-    article_url,
-):
-    if isinstance(value, str):
-
-        if (
-            value.startswith("http://")
-            or value.startswith("https://")
-        ):
-            add_image_candidate(
-                result,
-                seen,
-                value,
-                article_url,
-            )
-
-        return
-
-    if isinstance(value, list):
-
-        for item in value:
-
-            scan_json_images(
-                item,
-                result,
-                seen,
-                article_url,
-            )
-
-        return
-
-    if isinstance(value, dict):
-
-        preferred_keys = [
-            "image",
-            "images",
-            "thumbnailUrl",
-            "contentUrl",
-            "url",
-            "src",
-            "srcset",
-        ]
-
-        for key in preferred_keys:
-
-            if key in value:
-
-                scan_json_images(
-                    value[key],
-                    result,
-                    seen,
-                    article_url,
-                )
-
-
-# ============================================================
-# GET IMAGE CANDIDATES FROM ARTICLE
-# ============================================================
-
-def get_image_candidates(
-    soup,
-    article_url,
-):
-    result = []
-    seen = set()
+        links.append(
+            {
+                "url": normalized,
+                "anchor_text": text,
+                "county_hint": (
+                    title_counties[0]
+                    if len(title_counties) == 1
+                    else ""
+                ),
+                "county_count": len(
+                    title_counties
+                ),
+            }
+        )
 
     # --------------------------------------------------------
-    # OpenGraph / Twitter
+    # Prioritize links with a single county hint.
     # --------------------------------------------------------
 
-    meta_attributes = [
-        {
-            "property": "og:image"
-        },
-        {
-            "property": "og:image:url"
-        },
-        {
-            "property": "og:image:secure_url"
-        },
-        {
-            "name": "twitter:image"
-        },
-        {
-            "name": "twitter:image:src"
-        },
-        {
-            "property": "twitter:image"
-        },
+    links.sort(
+        key=lambda item: (
+            0
+            if item["county_hint"]
+            else 1,
+            item["county_count"],
+        )
+    )
+
+    print(
+        f"    Discovered {len(links)} article candidates."
+    )
+
+    return links[:MAX_ARTICLES_PER_SOURCE]
+
+
+# ============================================================
+# PUBLICATION DATE EXTRACTION
+# ============================================================
+
+DATE_META_NAMES = {
+    "article:published_time",
+    "article:published",
+    "datepublished",
+    "datepublishedtime",
+    "publishdate",
+    "published",
+    "published_time",
+    "publication_date",
+    "date",
+    "pubdate",
+    "dc.date",
+    "dc.date.issued",
+    "datecreated",
+}
+
+
+def parse_datetime_value(value):
+    value = clean(value)
+
+    if not value:
+        return None
+
+    value = value.replace(
+        "Z",
+        "+00:00",
+    )
+
+    # --------------------------------------------------------
+    # ISO date/time.
+    # --------------------------------------------------------
+
+    try:
+        parsed = datetime.fromisoformat(
+            value
+        )
+
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(
+                tzinfo=timezone.utc
+            )
+
+        return parsed.astimezone(
+            timezone.utc
+        )
+
+    except Exception:
+        pass
+
+    # --------------------------------------------------------
+    # Common date formats.
+    # --------------------------------------------------------
+
+    formats = [
+        "%Y-%m-%d",
+        "%Y/%m/%d",
+        "%d-%m-%Y",
+        "%d/%m/%Y",
+        "%B %d, %Y",
+        "%b %d, %Y",
+        "%d %B %Y",
+        "%d %b %Y",
+        "%B %d, %Y %H:%M",
+        "%b %d, %Y %H:%M",
+        "%d %B %Y %H:%M",
+        "%d %b %Y %H:%M",
     ]
 
-    for attrs in meta_attributes:
+    for fmt in formats:
+        try:
+            parsed = datetime.strptime(
+                value,
+                fmt,
+            )
 
-        for tag in soup.find_all(
-            "meta",
-            attrs=attrs,
+            parsed = parsed.replace(
+                tzinfo=timezone.utc
+            )
+
+            return parsed
+
+        except Exception:
+            continue
+
+    return None
+
+
+def recursive_find_dates(value):
+    found = []
+
+    if isinstance(value, dict):
+        for key, child in value.items():
+
+            key_normalized = (
+                clean(key)
+                .lower()
+                .replace(" ", "")
+                .replace("-", "")
+                .replace("_", "")
+            )
+
+            if key_normalized in {
+                "datepublished",
+                "datecreated",
+                "publishedtime",
+                "publisheddate",
+            }:
+                if isinstance(child, str):
+                    parsed = parse_datetime_value(
+                        child
+                    )
+
+                    if parsed:
+                        found.append(
+                            (
+                                key_normalized,
+                                parsed,
+                            )
+                        )
+
+            found.extend(
+                recursive_find_dates(child)
+            )
+
+    elif isinstance(value, list):
+        for child in value:
+            found.extend(
+                recursive_find_dates(child)
+            )
+
+    return found
+
+
+def extract_publication_date(soup):
+    candidates = []
+
+    # --------------------------------------------------------
+    # Meta tags.
+    # --------------------------------------------------------
+
+    for meta in soup.find_all("meta"):
+
+        key = clean(
+            meta.get("property")
+            or meta.get("name")
+            or meta.get("itemprop")
+            or ""
+        ).lower()
+
+        value = clean(
+            meta.get("content")
+            or ""
+        )
+
+        if not value:
+            continue
+
+        key_normalized = (
+            key
+            .replace(" ", "")
+            .replace("-", "")
+            .replace("_", "")
+        )
+
+        if (
+            key in DATE_META_NAMES
+            or key_normalized in DATE_META_NAMES
         ):
+            parsed = parse_datetime_value(
+                value
+            )
 
-            add_image_candidate(
-                result,
-                seen,
-                tag.get("content"),
-                article_url,
+            if parsed:
+                candidates.append(
+                    (
+                        "metadata",
+                        parsed,
+                    )
+                )
+
+    # --------------------------------------------------------
+    # <time datetime="">
+    # --------------------------------------------------------
+
+    for tag in soup.find_all("time"):
+
+        value = clean(
+            tag.get("datetime")
+            or tag.get("content")
+            or tag.get_text(
+                " ",
+                strip=True,
+            )
+        )
+
+        parsed = parse_datetime_value(
+            value
+        )
+
+        if parsed:
+            candidates.append(
+                (
+                    "time",
+                    parsed,
+                )
             )
 
     # --------------------------------------------------------
-    # JSON-LD
+    # JSON-LD.
     # --------------------------------------------------------
 
     for script in soup.find_all(
         "script",
-        type="application/ld+json",
+        attrs={
+            "type": re.compile(
+                r"application/ld\+json",
+                re.IGNORECASE,
+            )
+        },
     ):
 
-        raw = (
-            script.string
-            or script.get_text()
-            or ""
-        )
+        raw = script.string or script.get_text()
+
+        raw = clean(raw)
 
         if not raw:
             continue
 
         try:
-
             data = json.loads(raw)
 
-            scan_json_images(
-                data,
-                result,
-                seen,
+        except Exception:
+            continue
+
+        for key, parsed in recursive_find_dates(
+            data
+        ):
+
+            if key == "datepublished":
+                candidates.append(
+                    (
+                        "jsonld_published",
+                        parsed,
+                    )
+                )
+
+            else:
+                candidates.append(
+                    (
+                        "jsonld",
+                        parsed,
+                    )
+                )
+
+    # --------------------------------------------------------
+    # Prefer explicitly published timestamps.
+    # --------------------------------------------------------
+
+    if not candidates:
+        return None, ""
+
+    published = [
+        item
+        for item in candidates
+        if (
+            "published" in item[0]
+            or item[0] == "metadata"
+        )
+    ]
+
+    if published:
+        published.sort(
+            key=lambda item: item[1],
+            reverse=True,
+        )
+
+        return (
+            published[0][1],
+            published[0][0],
+        )
+
+    candidates.sort(
+        key=lambda item: item[1],
+        reverse=True,
+    )
+
+    return (
+        candidates[0][1],
+        candidates[0][0],
+    )
+
+
+def validate_publication_date(published_at):
+    if published_at is None:
+        return {
+            "valid": False,
+            "reason": "No publication timestamp found.",
+            "age_hours": None,
+            "freshness": "UNKNOWN",
+        }
+
+    now = datetime.now(
+        timezone.utc
+    )
+
+    if published_at > now + timedelta(
+        minutes=FUTURE_TOLERANCE_MINUTES
+    ):
+        return {
+            "valid": False,
+            "reason": "Publication date is in the future.",
+            "age_hours": None,
+            "freshness": "INVALID",
+        }
+
+    age_seconds = (
+        now - published_at
+    ).total_seconds()
+
+    age_hours = age_seconds / 3600.0
+
+    if age_hours < 0:
+        age_hours = 0
+
+    if age_hours > MAX_ARTICLE_AGE_HOURS:
+        return {
+            "valid": False,
+            "reason": (
+                f"Article is {age_hours:.1f} hours old."
+            ),
+            "age_hours": age_hours,
+            "freshness": "STALE",
+        }
+
+    if age_hours <= EXCELLENT_FRESHNESS_HOURS:
+        freshness = "EXCELLENT"
+
+    elif age_hours <= GOOD_FRESHNESS_HOURS:
+        freshness = "VERY GOOD"
+
+    elif age_hours <= ACCEPTABLE_FRESHNESS_HOURS:
+        freshness = "GOOD"
+
+    else:
+        freshness = "ACCEPTABLE"
+
+    return {
+        "valid": True,
+        "reason": "Article is within realtime window.",
+        "age_hours": age_hours,
+        "freshness": freshness,
+    }
+
+
+def freshness_score(age_hours):
+    if age_hours is None:
+        return 0
+
+    if age_hours <= 3:
+        return 140
+
+    if age_hours <= 6:
+        return 125
+
+    if age_hours <= 12:
+        return 110
+
+    if age_hours <= 18:
+        return 95
+
+    if age_hours <= 24:
+        return 80
+
+    if age_hours <= 36:
+        return 55
+
+    if age_hours <= 48:
+        return 25
+
+    return 0
+
+
+# ============================================================
+# IMAGE HELPERS
+# ============================================================
+
+def bad_image_url(url):
+    if not valid_http_url(url):
+        return True
+
+    lowered = (
+        normalize_for_match(url)
+    )
+
+    for term in BAD_IMAGE_TERMS:
+        if term in lowered:
+            return True
+
+    parsed = urlparse(url)
+
+    path = (
+        parsed.path
+        or ""
+    ).lower()
+
+    if path.endswith(
+        (
+            ".svg",
+            ".ico",
+        )
+    ):
+        return True
+
+    if "data:image" in lowered:
+        return True
+
+    return False
+
+
+def add_image_candidate(
+    candidates,
+    url,
+    base_url,
+):
+    url = absolute_url(
+        base_url,
+        url,
+    )
+
+    if not valid_http_url(url):
+        return
+
+    if bad_image_url(url):
+        return
+
+    # Remove obvious tracking/query noise where possible.
+    url = url.strip()
+
+    if url not in candidates:
+        candidates.append(url)
+
+
+def parse_srcset(
+    srcset,
+    candidates,
+    base_url,
+):
+    if not srcset:
+        return
+
+    parts = srcset.split(",")
+
+    for part in parts:
+        item = part.strip()
+
+        if not item:
+            continue
+
+        pieces = item.split()
+
+        if not pieces:
+            continue
+
+        add_image_candidate(
+            candidates,
+            pieces[0],
+            base_url,
+        )
+
+
+def recursive_find_images(
+    value,
+    candidates,
+    base_url,
+):
+    if isinstance(value, dict):
+
+        preferred_keys = {
+            "image",
+            "images",
+            "imageurl",
+            "image_url",
+            "imageurlsecure",
+            "thumbnail",
+            "thumbnailurl",
+            "thumbnail_url",
+            "contenturl",
+            "content_url",
+            "contentimage",
+            "content_image",
+        }
+
+        for key, child in value.items():
+
+            key_normalized = (
+                clean(key)
+                .lower()
+                .replace("-", "")
+                .replace("_", "")
+                .replace(" ", "")
+            )
+
+            if (
+                key_normalized
+                in {
+                    item.replace(
+                        "_",
+                        "",
+                    ).replace(
+                        "-",
+                        "",
+                    )
+                    for item in preferred_keys
+                }
+            ):
+
+                if isinstance(child, str):
+                    add_image_candidate(
+                        candidates,
+                        child,
+                        base_url,
+                    )
+
+                elif isinstance(child, list):
+                    for item in child:
+                        if isinstance(
+                            item,
+                            str,
+                        ):
+                            add_image_candidate(
+                                candidates,
+                                item,
+                                base_url,
+                            )
+
+                        elif isinstance(
+                            item,
+                            dict,
+                        ):
+                            recursive_find_images(
+                                item,
+                                candidates,
+                                base_url,
+                            )
+
+                elif isinstance(
+                    child,
+                    dict,
+                ):
+                    recursive_find_images(
+                        child,
+                        candidates,
+                        base_url,
+                    )
+
+            # Continue recursion.
+            if isinstance(
+                child,
+                (dict, list),
+            ):
+                recursive_find_images(
+                    child,
+                    candidates,
+                    base_url,
+                )
+
+    elif isinstance(value, list):
+
+        for child in value:
+            recursive_find_images(
+                child,
+                candidates,
+                base_url,
+            )
+
+
+def get_image_candidates(
+    soup,
+    article_url,
+):
+    candidates = []
+
+    # --------------------------------------------------------
+    # OpenGraph.
+    # --------------------------------------------------------
+
+    for meta in soup.find_all(
+        "meta"
+    ):
+
+        property_name = clean(
+            meta.get("property")
+            or meta.get("name")
+            or ""
+        ).lower()
+
+        content = clean(
+            meta.get("content")
+            or ""
+        )
+
+        if not content:
+            continue
+
+        if property_name in {
+            "og:image",
+            "og:image:url",
+            "og:image:secure_url",
+            "twitter:image",
+            "twitter:image:src",
+        }:
+
+            add_image_candidate(
+                candidates,
+                content,
                 article_url,
             )
 
+    # --------------------------------------------------------
+    # Itemprop image.
+    # --------------------------------------------------------
+
+    for tag in soup.find_all(
+        attrs={
+            "itemprop": re.compile(
+                r"image",
+                re.IGNORECASE,
+            )
+        }
+    ):
+
+        for attribute in [
+            "content",
+            "src",
+            "data-src",
+            "data-lazy-src",
+            "data-original",
+        ]:
+
+            value = tag.get(
+                attribute
+            )
+
+            if value:
+                add_image_candidate(
+                    candidates,
+                    value,
+                    article_url,
+                )
+
+    # --------------------------------------------------------
+    # JSON-LD.
+    # --------------------------------------------------------
+
+    for script in soup.find_all(
+        "script",
+        attrs={
+            "type": re.compile(
+                r"application/ld\+json",
+                re.IGNORECASE,
+            )
+        },
+    ):
+
+        raw = script.string or script.get_text()
+
+        raw = clean(raw)
+
+        if not raw:
+            continue
+
+        try:
+            data = json.loads(raw)
+
         except Exception:
-            pass
+            continue
+
+        recursive_find_images(
+            data,
+            candidates,
+            article_url,
+        )
 
     # --------------------------------------------------------
-    # Article/main images
+    # Actual article/main images.
     # --------------------------------------------------------
 
-    containers = (
-        soup.find_all("article")
-        or soup.find_all("main")
-        or [soup]
-    )
+    containers = []
+
+    for selector in [
+        "article",
+        "main",
+        "[role='main']",
+    ]:
+
+        containers.extend(
+            soup.select(selector)
+        )
+
+    if not containers:
+        containers = [
+            soup
+        ]
 
     for container in containers:
 
-        for img in container.find_all(
+        for image in container.find_all(
             "img"
         ):
 
@@ -828,117 +1667,83 @@ def get_image_candidates(
                 "data-original",
                 "data-lazy-src",
                 "data-image",
-                "data-original-src",
-                "data-fallback-src",
-                "data-lazy",
+                "data-filename",
+                "data-url",
             ]
 
-            for key in attributes:
+            for attribute in attributes:
 
-                add_image_candidate(
-                    result,
-                    seen,
-                    img.get(key),
-                    article_url,
+                value = image.get(
+                    attribute
                 )
 
-            srcset = (
-                img.get("srcset")
-                or img.get("data-srcset")
-            )
-
-            if srcset:
-
-                for item in srcset.split(","):
-
-                    item = item.strip()
-
-                    if not item:
-                        continue
-
-                    candidate = item.split(
-                        " "
-                    )[0]
-
+                if value:
                     add_image_candidate(
-                        result,
-                        seen,
-                        candidate,
+                        candidates,
+                        value,
                         article_url,
                     )
 
-    return result
+            parse_srcset(
+                image.get("srcset"),
+                candidates,
+                article_url,
+            )
+
+            parse_srcset(
+                image.get("data-srcset"),
+                candidates,
+                article_url,
+            )
+
+    return candidates[:100]
 
 
 # ============================================================
-# DOWNLOAD IMAGE
+# IMAGE DOWNLOAD / VALIDATION
 # ============================================================
 
 def download_image(
     url,
-    referer=None,
+    destination,
 ):
-    if any(
-        term in url.lower()
-        for term in BAD_IMAGE_TERMS
-    ):
-        return None
-
-    headers = {
-        **HEADERS,
-        "Accept": (
-            "image/avif,image/webp,"
-            "image/apng,image/*,*/*;q=0.8"
-        ),
-    }
-
-    if referer:
-        headers["Referer"] = referer
-
     try:
 
         response = requests.get(
             url,
-            headers=headers,
-            timeout=25,
+            headers=IMAGE_HEADERS,
+            timeout=IMAGE_TIMEOUT,
             allow_redirects=True,
         )
 
         if response.status_code != 200:
             return None
 
-        data = response.content
-
-        if len(data) < 20000:
-            return None
-
         content_type = (
-            response.headers
-            .get(
-                "content-type",
+            response.headers.get(
+                "Content-Type",
                 "",
-            )
-            .lower()
+            ).lower()
         )
 
         if (
-            not content_type.startswith(
-                "image/"
-            )
-            and not content_type.endswith(
-                "octet-stream"
-            )
+            "image" not in content_type
+            and "octet-stream" not in content_type
         ):
             return None
 
+        content = response.content
+
+        if len(content) < 20_000:
+            return None
+
         image = Image.open(
-            BytesIO(data)
+            BytesIO(content)
         )
 
         image.load()
 
-        width = image.width
-        height = image.height
+        width, height = image.size
 
         if width < MIN_IMAGE_WIDTH:
             return None
@@ -946,10 +1751,7 @@ def download_image(
         if height < MIN_IMAGE_HEIGHT:
             return None
 
-        if (
-            width * height
-            < MIN_IMAGE_AREA
-        ):
+        if width * height < MIN_IMAGE_AREA:
             return None
 
         ratio = width / float(height)
@@ -957,114 +1759,390 @@ def download_image(
         if ratio < 0.45 or ratio > 3.5:
             return None
 
-        # Reject tiny square icons.
+        # Reject tiny square-like icons.
         if (
-            width == height
-            and width < 500
+            abs(width - height)
+            < 20
+            and width < 700
         ):
             return None
 
+        destination.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        rgb_image = image.convert(
+            "RGB"
+        )
+
+        rgb_image.save(
+            destination,
+            "JPEG",
+            quality=94,
+            optimize=True,
+        )
+
         return {
-            "image": image.copy(),
-            "md5": hashlib.md5(
-                data
-            ).hexdigest(),
-            "url": response.url,
+            "requested_url": url,
+            "final_url": response.url,
             "width": width,
             "height": height,
+            "bytes": len(content),
+            "path": str(destination),
         }
 
     except Exception:
         return None
 
 
-# ============================================================
-# DOWNLOAD MULTIPLE ARTICLE IMAGES
-# ============================================================
-
 def download_article_images(
-    soup,
     article_url,
+    candidates,
 ):
-    log("")
-    log("COLLECTING REAL ARTICLE PHOTOS")
-    log("-" * 70)
+    SOURCE_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
-    candidates = get_image_candidates(
-        soup,
+    results = []
+    seen_final_urls = set()
+
+    for index, image_url in enumerate(
+        candidates[:100]
+    ):
+
+        if len(results) >= MAX_ARTICLE_IMAGES:
+            break
+
+        print(
+            f"      Checking image "
+            f"{index + 1}: {image_url[:140]}"
+        )
+
+        destination = (
+            SOURCE_DIR
+            / f"story_image_{len(results) + 1}.jpg"
+        )
+
+        result = download_image(
+            image_url,
+            destination,
+        )
+
+        if result is None:
+            continue
+
+        final_url = (
+            result.get(
+                "final_url"
+            )
+            or image_url
+        )
+
+        if final_url in seen_final_urls:
+            try:
+                destination.unlink()
+            except Exception:
+                pass
+
+            continue
+
+        seen_final_urls.add(
+            final_url
+        )
+
+        result["article_url"] = article_url
+
+        results.append(
+            result
+        )
+
+        print(
+            f"      VALID REAL PHOTO: "
+            f"{result['width']}x{result['height']}"
+        )
+
+    return results
+
+
+# ============================================================
+# ARTICLE TEXT EXTRACTION
+# ============================================================
+
+def extract_article_text(
+    soup,
+    title,
+    description,
+):
+    paragraphs = []
+
+    # --------------------------------------------------------
+    # Prefer article containers.
+    # --------------------------------------------------------
+
+    containers = []
+
+    for selector in [
+        "article",
+        "[itemprop='articleBody']",
+        "main",
+    ]:
+
+        selected = soup.select(
+            selector
+        )
+
+        if selected:
+            containers.extend(
+                selected
+            )
+
+    if not containers:
+        containers = [
+            soup
+        ]
+
+    seen = set()
+
+    for container in containers:
+
+        for paragraph in container.find_all(
+            ["p", "h2", "h3"]
+        ):
+
+            text = clean(
+                paragraph.get_text(
+                    " ",
+                    strip=True,
+                )
+            )
+
+            if not text:
+                continue
+
+            if len(text) < 35:
+                continue
+
+            normalized = normalize_for_match(
+                text
+            )
+
+            if normalized in seen:
+                continue
+
+            seen.add(
+                normalized
+            )
+
+            # ------------------------------------------------
+            # Remove obvious navigation/social junk.
+            # ------------------------------------------------
+
+            junk_terms = [
+                "share this article",
+                "follow us",
+                "subscribe",
+                "advertisement",
+                "read also",
+                "related stories",
+                "click here",
+                "download our app",
+                "sign up",
+            ]
+
+            if any(
+                term in normalized
+                for term in junk_terms
+            ):
+                continue
+
+            paragraphs.append(
+                text
+            )
+
+    # --------------------------------------------------------
+    # Remove duplicate consecutive paragraphs.
+    # --------------------------------------------------------
+
+    cleaned = []
+
+    previous = ""
+
+    for paragraph in paragraphs:
+
+        normalized = normalize_for_match(
+            paragraph
+        )
+
+        if normalized == previous:
+            continue
+
+        previous = normalized
+
+        cleaned.append(
+            paragraph
+        )
+
+    body = " ".join(
+        cleaned
+    )
+
+    body = clean(
+        body
+    )
+
+    if not body:
+        body = clean(
+            description
+        )
+
+    return body
+
+
+# ============================================================
+# STORY QUALITY SCORING
+# ============================================================
+
+POSITIVE_TERMS = [
+    "county government",
+    "governor",
+    "deputy governor",
+    "president",
+    "government",
+    "minister",
+    "cabinet",
+    "parliament",
+    "mp",
+    "senator",
+    "development",
+    "project",
+    "launch",
+    "launched",
+    "hospital",
+    "road",
+    "school",
+    "education",
+    "health",
+    "security",
+    "police",
+    "court",
+    "arrest",
+    "business",
+    "economy",
+    "farmers",
+    "agriculture",
+    "teachers",
+    "residents",
+    "accident",
+    "flood",
+    "fire",
+    "crime",
+    "community",
+]
+
+
+NEGATIVE_PHRASES = [
+    "advertisement",
+    "sponsored",
+    "opinion",
+    "lifestyle",
+    "horoscope",
+    "quiz",
+    "watch live",
+    "photo gallery",
+]
+
+
+def article_quality_score(
+    title,
+    summary,
+    body,
+    image_count,
+):
+    combined = normalize_for_match(
+        " ".join(
+            [
+                title,
+                summary,
+                body,
+            ]
+        )
+    )
+
+    words = len(
+        combined.split()
+    )
+
+    score = min(
+        words // 5,
+        220,
+    )
+
+    for term in POSITIVE_TERMS:
+
+        if term in combined:
+            score += 2
+
+    for phrase in NEGATIVE_PHRASES:
+
+        if phrase in combined:
+            score -= 7
+
+    score += min(
+        image_count * 4,
+        20,
+    )
+
+    # Better titles receive a small bonus.
+    title_words = len(
+        title.split()
+    )
+
+    if 6 <= title_words <= 25:
+        score += 10
+
+    if len(title) > 180:
+        score -= 10
+
+    return max(
+        score,
+        0,
+    )
+
+
+# ============================================================
+# ARTICLE EXTRACTION
+# ============================================================
+
+def extract_article(
+    article_url,
+    anchor_text="",
+):
+    print("")
+    print(
+        "    EXTRACTING:",
         article_url,
     )
 
-    log(
-        f"IMAGE CANDIDATES FOUND: {len(candidates)}"
+    response = fetch(
+        article_url,
+        require_html=True,
     )
 
-    valid = []
-    hashes = set()
+    if response is None:
+        return None
 
-    for index, image_url in enumerate(
-        candidates[:MAX_ARTICLE_IMAGES * 8],
-        start=1,
-    ):
-
-        log(
-            f"IMAGE TEST {index}: {image_url}"
-        )
-
-        image_info = download_image(
-            image_url,
-            referer=article_url,
-        )
-
-        if not image_info:
-            continue
-
-        image_hash = image_info["md5"]
-
-        if image_hash in hashes:
-            continue
-
-        hashes.add(image_hash)
-
-        valid.append(
-            {
-                "url": image_info["url"],
-                "width": image_info["width"],
-                "height": image_info["height"],
-                "md5": image_hash,
-            }
-        )
-
-        log(
-            "ACCEPTED REAL PHOTO: "
-            f"{image_info['width']}x"
-            f"{image_info['height']}"
-        )
-
-        if len(valid) >= MAX_ARTICLE_IMAGES:
-            break
-
-    log(
-        f"VALID REAL ARTICLE PHOTOS: {len(valid)}"
+    final_url = (
+        response.url
+        or article_url
     )
 
-    return valid
-
-
-# ============================================================
-# EXTRACT ARTICLE
-# ============================================================
-
-def extract_article(url):
-    response = fetch(url)
-
-    if not response:
+    if not approved(final_url):
+        print(
+            "      REJECTED: redirected outside approved source."
+        )
         return None
-
-    if not approved(response.url):
-        return None
-
-    final_url = response.url
 
     soup = BeautifulSoup(
         response.text,
@@ -1072,464 +2150,584 @@ def extract_article(url):
     )
 
     # --------------------------------------------------------
-    # Title
+    # Title.
     # --------------------------------------------------------
 
     title = ""
 
-    title_meta = [
-        {
+    og_title = soup.find(
+        "meta",
+        attrs={
             "property": "og:title"
         },
-        {
-            "name": "twitter:title"
-        },
-    ]
+    )
 
-    for attrs in title_meta:
-
-        tag = soup.find(
-            "meta",
-            attrs=attrs,
+    if og_title:
+        title = clean(
+            og_title.get("content")
         )
-
-        if tag:
-
-            title = clean(
-                tag.get("content")
-            )
-
-            if title:
-                break
 
     if not title:
 
-        h1 = soup.find("h1")
+        title_tag = soup.find(
+            "title"
+        )
 
-        if h1:
+        if title_tag:
             title = clean(
-                h1.get_text(
+                title_tag.get_text()
+            )
+
+    if not title:
+
+        heading = soup.find(
+            "h1"
+        )
+
+        if heading:
+            title = clean(
+                heading.get_text(
                     " ",
                     strip=True,
                 )
             )
 
-    if not title and soup.title:
+    title = clean_title(
+        title
+    )
 
-        title = clean(
-            soup.title.get_text(
-                " ",
-                strip=True,
-            )
+    if len(title) < 10:
+        print(
+            "      REJECTED: weak title."
         )
-
-    title = clean_title(title)
-
-    if len(title) < 12:
         return None
 
     # --------------------------------------------------------
-    # Description
+    # Description.
     # --------------------------------------------------------
 
-    summary = ""
+    description = ""
 
-    description_meta = [
-        {
-            "property": "og:description"
-        },
-        {
-            "name": "description"
-        },
-        {
-            "name": "twitter:description"
-        },
-    ]
+    for meta_name in [
+        "description",
+        "og:description",
+        "twitter:description",
+    ]:
 
-    for attrs in description_meta:
-
-        tag = soup.find(
+        meta = soup.find(
             "meta",
-            attrs=attrs,
+            attrs={
+                "name": meta_name
+            },
         )
 
-        if tag:
+        if not meta:
 
-            summary = clean(
-                tag.get("content")
+            meta = soup.find(
+                "meta",
+                attrs={
+                    "property": meta_name
+                },
             )
 
-            if summary:
+        if meta:
+
+            description = clean(
+                meta.get("content")
+            )
+
+            if description:
                 break
 
-    # --------------------------------------------------------
-    # Article paragraphs
-    # --------------------------------------------------------
-
-    paragraphs = []
-
-    container = (
-        soup.find("article")
-        or soup.find("main")
-        or soup.body
+    description = remove_metadata(
+        description
     )
 
-    if container:
+    # --------------------------------------------------------
+    # Publication date.
+    # --------------------------------------------------------
 
-        for p in container.find_all(
-            "p"
-        ):
-
-            text = clean(
-                p.get_text(
-                    " ",
-                    strip=True,
-                )
-            )
-
-            low = text.lower()
-
-            if len(text) < 35:
-                continue
-
-            excluded = [
-                "subscribe",
-                "newsletter",
-                "privacy policy",
-                "cookie policy",
-                "terms and conditions",
-                "advertisement",
-                "download our app",
-                "sign up",
-                "all rights reserved",
-            ]
-
-            if any(
-                item in low
-                for item in excluded
-            ):
-                continue
-
-            if text not in paragraphs:
-                paragraphs.append(text)
-
-    body = clean(
-        " ".join(
-            paragraphs[:20]
+    published_at, date_source = (
+        extract_publication_date(
+            soup
         )
     )
 
-    county = county_from_text(
-        f"{title} {summary} {body}"
+    freshness = validate_publication_date(
+        published_at
     )
+
+    if not freshness["valid"]:
+
+        print(
+            "      REJECTED FRESHNESS:",
+            freshness["reason"],
+        )
+
+        return None
+
+    age_hours = freshness[
+        "age_hours"
+    ]
+
+    # --------------------------------------------------------
+    # Body.
+    # --------------------------------------------------------
+
+    body = extract_article_text(
+        soup,
+        title,
+        description,
+    )
+
+    word_count = len(
+        body.split()
+    )
+
+    if word_count < MIN_ARTICLE_BODY_WORDS:
+
+        print(
+            "      REJECTED: body too short:",
+            word_count,
+        )
+
+        return None
+
+    # --------------------------------------------------------
+    # County.
+    # --------------------------------------------------------
+
+    county_result = detect_primary_county(
+        title,
+        description,
+        body,
+    )
+
+    if county_result["ambiguous"]:
+
+        print(
+            "      REJECTED COUNTY:",
+            county_result["reason"],
+        )
+
+        return None
+
+    county = county_result[
+        "county"
+    ]
 
     if not county:
-        return None
 
-    if (
-        len(body.split())
-        < MIN_ARTICLE_BODY_WORDS
-    ):
-        return None
-
-    # --------------------------------------------------------
-    # Real photos
-    # --------------------------------------------------------
-
-    image_candidates = (
-        download_article_images(
-            soup,
-            final_url,
+        print(
+            "      REJECTED: no county."
         )
+
+        return None
+
+    # --------------------------------------------------------
+    # Image candidates.
+    # --------------------------------------------------------
+
+    image_candidates = get_image_candidates(
+        soup,
+        final_url,
     )
 
     if not image_candidates:
-        log(
-            "REJECTED: no usable real article photos"
+
+        print(
+            "      REJECTED: no article image candidates."
         )
 
         return None
 
     # --------------------------------------------------------
-    # Score
+    # Download and validate real article photos.
     # --------------------------------------------------------
 
-    lower = (
-        f"{title} "
-        f"{summary} "
-        f"{body}"
-    ).lower()
+    image_results = download_article_images(
+        final_url,
+        image_candidates,
+    )
 
-    score = min(
-        len(body.split()),
-        220,
-    ) // 5
+    if not image_results:
 
-    positive_terms = [
-        "project",
-        "road",
-        "hospital",
-        "school",
-        "water",
-        "market",
-        "farmers",
-        "agriculture",
-        "jobs",
-        "business",
-        "investment",
-        "health",
-        "security",
-        "police",
-        "court",
-        "development",
-        "construction",
-        "funding",
-        "budget",
-        "education",
-        "transport",
-        "infrastructure",
-        "residents",
-        "county",
-        "government",
-        "president",
-        "minister",
-        "mp",
-        "senator",
-        "governor",
-    ]
+        print(
+            "      REJECTED: no valid real article photos."
+        )
 
-    for word in positive_terms:
+        return None
 
-        if re.search(
-            r"\b"
-            + re.escape(word)
-            + r"\b",
-            lower,
+    image_urls = []
+
+    for result in image_results:
+
+        final_image_url = (
+            result.get(
+                "final_url"
+            )
+            or result.get(
+                "requested_url"
+            )
+        )
+
+        if (
+            final_image_url
+            and final_image_url not in image_urls
         ):
-            score += 2
+            image_urls.append(
+                final_image_url
+            )
 
-    negative_phrases = [
-        "crowd erupts",
-        "crowd goes wild",
-        "dance",
-        "chants",
-        "campaign rally",
-        "campaign trail",
-        "celebration",
-        "funeral",
-        "birthday",
+    image_urls = image_urls[
+        :MAX_STORED_IMAGE_URLS
     ]
 
-    for phrase in negative_phrases:
+    # --------------------------------------------------------
+    # Quality.
+    # --------------------------------------------------------
 
-        if phrase in lower:
-            score -= 7
+    quality_score = article_quality_score(
+        title,
+        description,
+        body,
+        len(image_urls),
+    )
 
-    # Stronger score when several real photos
-    # are available.
-    score += min(
-        len(image_candidates),
-        5,
-    ) * 3
+    fresh_score = freshness_score(
+        age_hours
+    )
+
+    county_score = county_result[
+        "scores"
+    ].get(
+        county,
+        0,
+    )
+
+    # County confidence contribution.
+    county_confidence_score = min(
+        county_score,
+        60,
+    )
+
+    selection_score = (
+        quality_score
+        + fresh_score
+        + county_confidence_score
+    )
+
+    published_iso = (
+        published_at.astimezone(
+            timezone.utc
+        ).isoformat()
+        if published_at
+        else ""
+    )
+
+    print(
+        f"      ACCEPTED: {county}"
+    )
+
+    print(
+        f"      TITLE: {title}"
+    )
+
+    print(
+        f"      PUBLISHED: {published_iso}"
+    )
+
+    print(
+        f"      AGE: {age_hours:.1f} hours"
+    )
+
+    print(
+        f"      FRESHNESS: {freshness['freshness']}"
+    )
+
+    print(
+        f"      PHOTOS: {len(image_urls)}"
+    )
+
+    print(
+        f"      QUALITY SCORE: {quality_score}"
+    )
+
+    print(
+        f"      FRESHNESS SCORE: {fresh_score}"
+    )
+
+    print(
+        f"      SELECTION SCORE: {selection_score}"
+    )
 
     return {
         "title": title,
-        "summary": summary,
+        "summary": description,
         "body": body,
         "county": county,
+        "county_scores": county_result[
+            "scores"
+        ],
+        "county_mentions": county_result[
+            "raw_counts"
+        ],
+        "county_evidence": county_result[
+            "reason"
+        ],
         "url": final_url,
+        "article_url": final_url,
+        "source": domain(final_url),
+        "anchor_text": clean(
+            anchor_text
+        ),
+        "published_at": published_iso,
+        "published_at_utc": published_iso,
+        "publication_date_source": date_source,
+        "age_hours": round(
+            age_hours,
+            2,
+        ),
+        "freshness": freshness[
+            "freshness"
+        ],
+        "quality_score": quality_score,
+        "freshness_score": fresh_score,
+        "county_score": county_confidence_score,
+        "selection_score": selection_score,
+        "word_count": word_count,
         "image_candidates": image_candidates,
-        "score": score,
+        "image_urls": image_urls,
+        "image_results": image_results,
     }
 
 
 # ============================================================
-# BUILD NARRATION
+# NARRATION SCRIPT
 # ============================================================
 
-def build_script(article):
-    title = clean_title(
-        article["title"]
+def split_sentences(text):
+    text = clean(
+        text
     )
 
+    if not text:
+        return []
+
+    parts = re.split(
+        r"(?<=[.!?])\s+",
+        text,
+    )
+
+    return [
+        clean(part)
+        for part in parts
+        if len(clean(part)) > 20
+    ]
+
+
+def build_script(article):
     county = clean(
         article["county"]
     )
 
-    summary = remove_metadata(
+    title = clean(
+        article["title"]
+    )
+
+    summary = clean(
         article["summary"]
     )
 
-    body = remove_metadata(
+    body = clean(
         article["body"]
     )
 
-    parts = []
-
-    # Opening.
-    parts.append(
-        f"Here is the latest development "
-        f"from {county}."
+    sentences = split_sentences(
+        body
     )
 
-    # Headline.
-    parts.append(
-        f"{title}."
+    script_parts = []
+
+    opening = (
+        f"In {county} County, "
+        f"the latest development is "
+        f"making headlines."
     )
 
-    # Summary.
-    if (
-        summary
-        and summary.lower()
-        != title.lower()
-    ):
-
-        parts.append(summary)
-
-    # Body.
-    body_sentences = re.split(
-        r"(?<=[.!?])\s+",
-        body,
+    script_parts.append(
+        opening
     )
 
-    seen = {
-        x.lower()
-        for x in parts
-    }
+    script_parts.append(
+        title
+    )
 
-    for sentence in body_sentences:
+    if summary:
+        script_parts.append(
+            summary
+        )
 
-        sentence = remove_metadata(
+    # --------------------------------------------------------
+    # Add article sentences until a useful narration length
+    # is reached.
+    # --------------------------------------------------------
+
+    current_words = len(
+        " ".join(
+            script_parts
+        ).split()
+    )
+
+    for sentence in sentences:
+
+        if current_words >= 125:
+            break
+
+        normalized = normalize_for_match(
             sentence
         )
 
-        if len(sentence) < 35:
-            continue
-
-        key = sentence.lower()
-
-        if key in seen:
-            continue
-
-        seen.add(key)
-
-        parts.append(sentence)
-
-        if (
-            len(
-                " ".join(parts).split()
-            )
-            >= 135
+        # Avoid obvious navigation/social material.
+        if any(
+            term in normalized
+            for term in [
+                "follow us",
+                "subscribe",
+                "advertisement",
+                "read more",
+                "click here",
+            ]
         ):
-            break
+            continue
 
-    script = clean(
-        " ".join(parts)
-    )
-
-    # Remove accidental metadata.
-    script = re.sub(
-        r"\bSource\s*:\s*.*$",
-        "",
-        script,
-        flags=re.I,
-    )
-
-    script = re.sub(
-        r"\bPhoto\s*:\s*.*$",
-        "",
-        script,
-        flags=re.I,
-    )
-
-    script = re.sub(
-        r"\s+",
-        " ",
-        script,
-    )
-
-    return script.strip()
-
-
-# ============================================================
-# VALIDATE STORY
-# ============================================================
-
-def validate_story(story):
-    if not isinstance(
-        story,
-        dict,
-    ):
-        raise RuntimeError(
-            "Selected story is not a dictionary."
+        script_parts.append(
+            sentence
         )
 
-    title = clean(
-        story.get("title")
-    )
+        current_words = len(
+            " ".join(
+                script_parts
+            ).split()
+        )
 
-    county = clean(
-        story.get("county")
+    # --------------------------------------------------------
+    # Hard maximum.
+    # --------------------------------------------------------
+
+    script = " ".join(
+        script_parts
     )
 
     script = clean(
-        story.get("script")
+        script
     )
 
-    if not title:
-        raise RuntimeError(
-            "Story title missing."
+    words = script.split()
+
+    if len(words) > 190:
+        script = " ".join(
+            words[:190]
         )
 
-    if not county:
-        raise RuntimeError(
-            "Story county missing."
+        if not script.endswith(
+            (".", "!", "?")
+        ):
+            script += "."
+
+    return script
+
+
+# ============================================================
+# STORY VALIDATION
+# ============================================================
+
+def validate_story(article):
+    if not article:
+        return False
+
+    required = [
+        "title",
+        "county",
+        "body",
+        "article_url",
+        "image_urls",
+        "published_at",
+    ]
+
+    for key in required:
+
+        if not article.get(key):
+            print(
+                f"VALIDATION FAILED: missing {key}"
+            )
+            return False
+
+    if article["county"] not in COUNTIES:
+
+        print(
+            "VALIDATION FAILED: invalid county."
         )
 
-    if not script:
-        raise RuntimeError(
-            "Story narration missing."
-        )
-
-    if len(
-        script.split()
-    ) < 45:
-        raise RuntimeError(
-            "Narration is too short."
-        )
-
-    image_urls = story.get(
-        "image_urls"
-    )
-
-    if not isinstance(
-        image_urls,
-        list,
-    ):
-        raise RuntimeError(
-            "image_urls is missing."
-        )
-
-    if not image_urls:
-        raise RuntimeError(
-            "No real article image URLs were saved."
-        )
-
-    article_url = clean(
-        story.get("article_url")
-    )
-
-    if not article_url:
-        raise RuntimeError(
-            "Article URL missing."
-        )
+        return False
 
     if not approved(
-        article_url
+        article["article_url"]
     ):
-        raise RuntimeError(
-            "Article source is not approved."
+
+        print(
+            "VALIDATION FAILED: unapproved article domain."
         )
+
+        return False
+
+    freshness = validate_publication_date(
+        parse_datetime_value(
+            article["published_at"]
+        )
+    )
+
+    if not freshness["valid"]:
+
+        print(
+            "VALIDATION FAILED: story is not fresh."
+        )
+
+        return False
+
+    if len(
+        article["image_urls"]
+    ) < 1:
+
+        print(
+            "VALIDATION FAILED: no valid image."
+        )
+
+        return False
+
+    county_result = detect_primary_county(
+        article["title"],
+        article["summary"],
+        article["body"],
+    )
+
+    if county_result["ambiguous"]:
+
+        print(
+            "VALIDATION FAILED: county is ambiguous."
+        )
+
+        return False
+
+    if county_result["county"] != article[
+        "county"
+    ]:
+
+        print(
+            "VALIDATION FAILED: county mismatch."
+        )
+
+        return False
 
     return True
 
@@ -1539,517 +2737,622 @@ def validate_story(story):
 # ============================================================
 
 def write_selected_files(article):
-    log("")
-    log("=" * 70)
-    log("WRITING SELECTED STORY FILES")
-    log("=" * 70)
+    selected_at = datetime.now(
+        timezone.utc
+    ).isoformat()
 
     script = build_script(
         article
     )
 
-    image_candidates = (
+    image_urls = [
+        url
+        for url in article.get(
+            "image_urls",
+            [],
+        )
+        if valid_http_url(url)
+    ]
+
+    image_urls = image_urls[
+        :MAX_STORED_IMAGE_URLS
+    ]
+
+    story_data = {
+        "title": article["title"],
+        "county": article["county"],
+        "summary": article["summary"],
+        "body": article["body"],
+        "article_url": article["article_url"],
+        "url": article["article_url"],
+        "source": article["source"],
+        "published_at": article["published_at"],
+        "published_at_utc": article["published_at_utc"],
+        "publication_date_source": article[
+            "publication_date_source"
+        ],
+        "age_hours": article["age_hours"],
+        "freshness": article["freshness"],
+        "quality_score": article[
+            "quality_score"
+        ],
+        "freshness_score": article[
+            "freshness_score"
+        ],
+        "county_score": article[
+            "county_score"
+        ],
+        "selection_score": article[
+            "selection_score"
+        ],
+        "county_scores": article[
+            "county_scores"
+        ],
+        "county_mentions": article[
+            "county_mentions"
+        ],
+        "county_evidence": article[
+            "county_evidence"
+        ],
+        "word_count": article[
+            "word_count"
+        ],
+        "image_url": (
+            image_urls[0]
+            if image_urls
+            else ""
+        ),
+        "image_urls": image_urls,
+        "image_path": str(
+            FINAL_IMAGE
+        ),
+        "selected_at": selected_at,
+        "generator_version": MAIN_GENERATOR_VERSION,
+    }
+
+    script_data = {
+        "title": article["title"],
+        "county": article["county"],
+        "script": script,
+        "narration": script,
+        "article_url": article["article_url"],
+        "source": article["source"],
+        "published_at": article[
+            "published_at"
+        ],
+        "age_hours": article[
+            "age_hours"
+        ],
+        "freshness": article[
+            "freshness"
+        ],
+        "image_urls": image_urls,
+        "selected_at": selected_at,
+        "generator_version": MAIN_GENERATOR_VERSION,
+    }
+
+    save_json(
+        SELECTED_STORY,
+        story_data,
+    )
+
+    save_json(
+        SELECTED_SCRIPT,
+        script_data,
+    )
+
+    print("")
+    print(
+        "============================================================"
+    )
+    print(
+        "SELECTED STORY FILES WRITTEN"
+    )
+    print(
+        "============================================================"
+    )
+
+    print(
+        "County:",
+        article["county"],
+    )
+
+    print(
+        "Title:",
+        article["title"],
+    )
+
+    print(
+        "Published:",
+        article["published_at"],
+    )
+
+    print(
+        "Age:",
+        article["age_hours"],
+        "hours",
+    )
+
+    print(
+        "Freshness:",
+        article["freshness"],
+    )
+
+    print(
+        "Article:",
+        article["article_url"],
+    )
+
+    print(
+        "Photos:",
+        len(image_urls),
+    )
+
+    print(
+        "Script words:",
+        len(
+            script.split()
+        ),
+    )
+
+    print(
+        "selected_story.json:",
+        SELECTED_STORY,
+    )
+
+    print(
+        "selected_script.json:",
+        SELECTED_SCRIPT,
+    )
+
+
+# ============================================================
+# SAVE FIRST IMAGE
+# ============================================================
+
+def save_first_image(article):
+    print("")
+    print(
+        "============================================================"
+    )
+    print(
+        "SAVING PRIMARY STORY IMAGE"
+    )
+    print(
+        "============================================================"
+    )
+
+    FINAL_IMAGE.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    # --------------------------------------------------------
+    # Prefer already validated image URLs.
+    # --------------------------------------------------------
+
+    for index, image_url in enumerate(
+        article.get(
+            "image_urls",
+            [],
+        )
+    ):
+
+        print(
+            f"  Primary image candidate {index + 1}:"
+        )
+
+        result = download_image(
+            image_url,
+            FINAL_IMAGE,
+        )
+
+        if result:
+
+            print(
+                "  PRIMARY IMAGE SAVED"
+            )
+
+            print(
+                "  Source:",
+                result["final_url"],
+            )
+
+            print(
+                "  Dimensions:",
+                result["width"],
+                "x",
+                result["height"],
+            )
+
+            article[
+                "primary_image_url"
+            ] = result["final_url"]
+
+            return True
+
+    # --------------------------------------------------------
+    # Fallback to image candidates.
+    # --------------------------------------------------------
+
+    for index, image_url in enumerate(
         article.get(
             "image_candidates",
             [],
         )
-    )
+    ):
 
-    image_urls = []
+        result = download_image(
+            image_url,
+            FINAL_IMAGE,
+        )
 
-    seen = set()
+        if result:
 
-    for item in image_candidates:
-
-        if isinstance(
-            item,
-            dict,
-        ):
-            url = clean(
-                item.get("url")
+            print(
+                "  PRIMARY IMAGE SAVED FROM FALLBACK"
             )
 
-        else:
-            url = clean(item)
+            article[
+                "primary_image_url"
+            ] = result["final_url"]
 
-        if not url:
-            continue
+            return True
 
-        if url in seen:
-            continue
-
-        if any(
-            term in url.lower()
-            for term in BAD_IMAGE_TERMS
-        ):
-            continue
-
-        seen.add(url)
-
-        image_urls.append(url)
-
-        if (
-            len(image_urls)
-            >= MAX_STORED_IMAGE_URLS
-        ):
-            break
-
-    if not image_urls:
-        raise RuntimeError(
-            "No usable image URLs available."
-        )
-
-    # --------------------------------------------------------
-    # Compatibility image URL.
-    # --------------------------------------------------------
-
-    first_image_url = image_urls[0]
-
-    # --------------------------------------------------------
-    # Story object.
-    # --------------------------------------------------------
-
-    story = {
-        "title": clean_title(
-            article["title"]
-        ),
-
-        "county": clean(
-            article["county"]
-        ),
-
-        "summary": remove_metadata(
-            article["summary"]
-        ),
-
-        "body": remove_metadata(
-            article["body"]
-        ),
-
-        "script": script,
-
-        "article_url": clean(
-            article["url"]
-        ),
-
-        "source": domain(
-            article["url"]
-        ),
-
-        "image_url": first_image_url,
-
-        "image_urls": image_urls,
-
-        "image_path": (
-            "assets/source/"
-            "story_image.jpg"
-        ),
-
-        "selected_at": (
-            datetime.now(
-                timezone.utc
-            ).isoformat()
-        ),
-
-        "generator_version": (
-            "RVW_MAIN_V12_MULTI_PHOTO"
-        ),
-    }
-
-    # --------------------------------------------------------
-    # Script object.
-    # --------------------------------------------------------
-
-    selected_script = {
-        "title": story["title"],
-        "county": story["county"],
-        "narration": story["script"],
-        "article_url": story[
-            "article_url"
-        ],
-        "source": story["source"],
-    }
-
-    # --------------------------------------------------------
-    # Validate BEFORE saving.
-    # --------------------------------------------------------
-
-    validate_story(
-        story
+    print(
+        "ERROR: Could not save primary story image."
     )
 
-    # --------------------------------------------------------
-    # Save selected_story.json.
-    # --------------------------------------------------------
-
-    save_json(
-        SELECTED_STORY,
-        story,
-    )
-
-    # --------------------------------------------------------
-    # Save selected_script.json.
-    # --------------------------------------------------------
-
-    save_json(
-        SELECTED_SCRIPT,
-        selected_script,
-    )
-
-    # --------------------------------------------------------
-    # HARD CHECK.
-    # --------------------------------------------------------
-
-    if not SELECTED_STORY.exists():
-        raise RuntimeError(
-            "selected_story.json was not created."
-        )
-
-    if (
-        SELECTED_STORY.stat().st_size
-        < 100
-    ):
-        raise RuntimeError(
-            "selected_story.json was created but is empty."
-        )
-
-    if not SELECTED_SCRIPT.exists():
-        raise RuntimeError(
-            "selected_script.json was not created."
-        )
-
-    if (
-        SELECTED_SCRIPT.stat().st_size
-        < 50
-    ):
-        raise RuntimeError(
-            "selected_script.json was created but is empty."
-        )
-
-    # --------------------------------------------------------
-    # Reload and verify JSON.
-    # --------------------------------------------------------
-
-    with SELECTED_STORY.open(
-        "r",
-        encoding="utf-8",
-    ) as f:
-
-        loaded_story = json.load(f)
-
-    with SELECTED_SCRIPT.open(
-        "r",
-        encoding="utf-8",
-    ) as f:
-
-        loaded_script = json.load(f)
-
-    if not loaded_story.get(
-        "image_urls"
-    ):
-        raise RuntimeError(
-            "Saved selected_story.json "
-            "does not contain image_urls."
-        )
-
-    if not loaded_script.get(
-        "narration"
-    ):
-        raise RuntimeError(
-            "Saved selected_script.json "
-            "does not contain narration."
-        )
-
-    log("")
-    log(
-        "selected_story.json CREATED SUCCESSFULLY"
-    )
-
-    log(
-        f"SIZE: "
-        f"{SELECTED_STORY.stat().st_size} bytes"
-    )
-
-    log(
-        "selected_script.json CREATED SUCCESSFULLY"
-    )
-
-    log(
-        f"SIZE: "
-        f"{SELECTED_SCRIPT.stat().st_size} bytes"
-    )
-
-    log(
-        f"REAL PHOTO URLS SAVED: "
-        f"{len(image_urls)}"
-    )
-
-    for index, url in enumerate(
-        image_urls,
-        start=1,
-    ):
-        log(
-            f"PHOTO {index}: {url}"
-        )
-
-    return story
+    return False
 
 
 # ============================================================
-# SAVE FIRST REAL IMAGE
-#
-# This is kept for the GitHub workflow compatibility check.
-# V22 itself can download the multiple image_urls.
-# ============================================================
-
-def save_first_image(article):
-    log("")
-    log("=" * 70)
-    log("SAVING COMPATIBILITY STORY IMAGE")
-    log("=" * 70)
-
-    image_candidates = article.get(
-        "image_candidates",
-        [],
-    )
-
-    if not image_candidates:
-        raise RuntimeError(
-            "No image candidate available."
-        )
-
-    for item in image_candidates:
-
-        if isinstance(
-            item,
-            dict,
-        ):
-            url = clean(
-                item.get("url")
-            )
-
-        else:
-            url = clean(item)
-
-        if not url:
-            continue
-
-        image_info = download_image(
-            url,
-            referer=article["url"],
-        )
-
-        if not image_info:
-            continue
-
-        try:
-
-            SOURCE_DIR.mkdir(
-                parents=True,
-                exist_ok=True,
-            )
-
-            if FINAL_IMAGE.exists():
-                FINAL_IMAGE.unlink()
-
-            image_info["image"].convert(
-                "RGB"
-            ).save(
-                FINAL_IMAGE,
-                "JPEG",
-                quality=95,
-                optimize=True,
-            )
-
-            with Image.open(
-                FINAL_IMAGE
-            ) as check:
-
-                check.load()
-
-                if (
-                    check.width
-                    < MIN_IMAGE_WIDTH
-                ):
-                    continue
-
-                if (
-                    check.height
-                    < MIN_IMAGE_HEIGHT
-                ):
-                    continue
-
-            log(
-                "COMPATIBILITY IMAGE SAVED:"
-            )
-
-            log(
-                str(FINAL_IMAGE)
-            )
-
-            log(
-                "SIZE: "
-                f"{image_info['width']}x"
-                f"{image_info['height']}"
-            )
-
-            return FINAL_IMAGE
-
-        except Exception as exc:
-
-            log(
-                f"FAILED TO SAVE IMAGE: {exc}"
-            )
-
-    raise RuntimeError(
-        "Unable to save a valid compatibility story image."
-    )
-
-
-# ============================================================
-# SELECT BEST STORY
+# STORY SELECTION
 # ============================================================
 
 def select_best(candidates):
     if not candidates:
+        return None
 
-        raise RuntimeError(
-            "No real Rift Valley article "
-            "with usable photos was found."
-        )
+    # --------------------------------------------------------
+    # Revalidate every candidate before selection.
+    # --------------------------------------------------------
 
-    unique = []
-    seen_urls = set()
+    valid = []
 
-    for item in candidates:
+    for candidate in candidates:
 
-        article_url = clean(
-            item.get("url")
-        )
-
-        if not article_url:
+        if not validate_story(
+            candidate
+        ):
             continue
 
-        if article_url in seen_urls:
-            continue
-
-        seen_urls.add(
-            article_url
+        valid.append(
+            candidate
         )
 
-        unique.append(item)
+    if not valid:
+        return None
 
-    if not unique:
+    # --------------------------------------------------------
+    # Freshness dominates.
+    #
+    # First: age
+    # Second: overall selection score
+    # Third: quality
+    # Fourth: photo count
+    # --------------------------------------------------------
 
-        raise RuntimeError(
-            "No unique article candidates found."
-        )
-
-    unique.sort(
-        key=lambda x: (
-            x.get(
-                "score",
+    valid.sort(
+        key=lambda item: (
+            item.get(
+                "age_hours",
+                9999,
+            ),
+            -item.get(
+                "selection_score",
                 0,
             ),
-            len(
-                x.get(
-                    "image_candidates",
+            -item.get(
+                "quality_score",
+                0,
+            ),
+            -len(
+                item.get(
+                    "image_urls",
                     [],
                 )
             ),
-        ),
-        reverse=True,
+        )
     )
 
-    return unique[0]
+    # --------------------------------------------------------
+    # A slightly more editorial ranking:
+    #
+    # Among very recent stories (<12 hours), allow the highest
+    # scoring recent story to win, provided it isn't materially
+    # older than the newest candidate.
+    # --------------------------------------------------------
+
+    newest_age = valid[0].get(
+        "age_hours",
+        9999,
+    )
+
+    recent_candidates = [
+        item
+        for item in valid
+        if item.get(
+            "age_hours",
+            9999,
+        ) <= min(
+            EXCELLENT_FRESHNESS_HOURS,
+            newest_age + 6,
+        )
+    ]
+
+    if recent_candidates:
+
+        recent_candidates.sort(
+            key=lambda item: (
+                -item.get(
+                    "selection_score",
+                    0,
+                ),
+                item.get(
+                    "age_hours",
+                    9999,
+                ),
+            )
+        )
+
+        selected = recent_candidates[0]
+
+    else:
+        selected = valid[0]
+
+    print("")
+    print(
+        "============================================================"
+    )
+    print(
+        "BEST STORY SELECTED"
+    )
+    print(
+        "============================================================"
+    )
+
+    print(
+        "County:",
+        selected["county"],
+    )
+
+    print(
+        "Title:",
+        selected["title"],
+    )
+
+    print(
+        "Published:",
+        selected["published_at"],
+    )
+
+    print(
+        "Age:",
+        selected["age_hours"],
+        "hours",
+    )
+
+    print(
+        "Freshness:",
+        selected["freshness"],
+    )
+
+    print(
+        "Selection score:",
+        selected["selection_score"],
+    )
+
+    print(
+        "Photos:",
+        len(
+            selected["image_urls"]
+        ),
+    )
+
+    print(
+        "Article:",
+        selected["article_url"],
+    )
+
+    return selected
 
 
 # ============================================================
-# DISCOVER NEWS
+# DISCOVERY ENGINE
 # ============================================================
 
 def discover():
+    print("")
+    print(
+        "============================================================"
+    )
+    print(
+        "RIFT VALLEY WATCH DISCOVERY"
+    )
+    print(
+        "REALTIME + STRICT COUNTY MODE"
+    )
+    print(
+        "============================================================"
+    )
+
+    print(
+        "Maximum article age:",
+        MAX_ARTICLE_AGE_HOURS,
+        "hours",
+    )
+
     candidates = []
 
-    log("")
-    log("=" * 70)
-    log("DISCOVERING RIFT VALLEY NEWS")
-    log("=" * 70)
+    global_seen_urls = set()
 
-    for page in PUBLISHER_PAGES:
+    for source_page in SOURCE_PAGES:
 
-        log("")
-        log(
-            f"CHECKING NEWS PAGE: "
-            f"{domain(page)}"
+        print("")
+        print(
+            "SOURCE:",
+            source_page,
         )
 
         links = discover_links(
-            page
+            source_page
         )
 
-        log(
-            f"LOCAL LINKS FOUND: "
-            f"{len(links)}"
-        )
+        source_valid = 0
 
-        # Put county-detected links first.
-        links.sort(
-            key=lambda x: (
-                1
-                if x.get("county")
-                else 0,
-                len(
-                    x.get(
-                        "text",
-                        "",
-                    )
-                ),
-            ),
-            reverse=True,
-        )
+        for index, link in enumerate(
+            links
+        ):
 
-        for item in links[
-            :MAX_ARTICLES_PER_SOURCE
-        ]:
+            if len(candidates) >= (
+                MAX_SELECTED_CANDIDATES
+                * 2
+            ):
+                break
 
-            article = extract_article(
-                item["url"]
+            article_url = link[
+                "url"
+            ]
+
+            normalized_url = (
+                article_url
+                .split("?")[0]
+                .rstrip("/")
             )
 
-            if not article:
+            if normalized_url in global_seen_urls:
                 continue
 
-            if not approved(
-                article["url"]
-            ):
+            global_seen_urls.add(
+                normalized_url
+            )
+
+            print("")
+            print(
+                f"  ARTICLE {index + 1}/{len(links)}"
+            )
+
+            article = extract_article(
+                article_url,
+                link.get(
+                    "anchor_text",
+                    "",
+                ),
+            )
+
+            if article is None:
                 continue
+
+            source_valid += 1
 
             candidates.append(
                 article
             )
 
-            log(
-                "ACCEPTED ARTICLE:"
-            )
+        print(
+            f"  Valid stories from source: "
+            f"{source_valid}"
+        )
 
-            log(
-                f"{article['county']} | "
-                f"{article['title']} | "
-                f"SCORE {article['score']} | "
-                f"PHOTOS "
-                f"{len(article['image_candidates'])}"
-            )
+    print("")
+    print(
+        "============================================================"
+    )
+    print(
+        "DISCOVERY COMPLETE"
+    )
+    print(
+        "============================================================"
+    )
 
-            if (
-                len(candidates)
-                >= MAX_SELECTED_CANDIDATES
-            ):
-                return candidates
+    print(
+        "Valid candidates:",
+        len(candidates),
+    )
 
-            time.sleep(0.10)
+    # --------------------------------------------------------
+    # Deduplicate by URL.
+    # --------------------------------------------------------
 
-    return candidates
+    unique = {}
+
+    for candidate in candidates:
+
+        key = (
+            candidate["article_url"]
+            .split("?")[0]
+            .rstrip("/")
+        )
+
+        existing = unique.get(
+            key
+        )
+
+        if (
+            existing is None
+            or candidate[
+                "selection_score"
+            ]
+            > existing[
+                "selection_score"
+            ]
+        ):
+            unique[key] = candidate
+
+    candidates = list(
+        unique.values()
+    )
+
+    # --------------------------------------------------------
+    # Keep the best candidates for logging.
+    # --------------------------------------------------------
+
+    candidates.sort(
+        key=lambda item: (
+            item.get(
+                "age_hours",
+                9999,
+            ),
+            -item.get(
+                "selection_score",
+                0,
+            ),
+        )
+    )
+
+    print("")
+    print(
+        "CURRENT VALID STORIES:"
+    )
+
+    for index, candidate in enumerate(
+        candidates[:20],
+        start=1,
+    ):
+
+        print(
+            f"{index:02d}. "
+            f"{candidate['county']} | "
+            f"{candidate['age_hours']:.1f}h | "
+            f"{candidate['freshness']} | "
+            f"{candidate['selection_score']} | "
+            f"{candidate['title'][:100]}"
+        )
+
+    return candidates[
+        :MAX_SELECTED_CANDIDATES
+    ]
 
 
 # ============================================================
@@ -2057,31 +3360,25 @@ def discover():
 # ============================================================
 
 def clean_previous():
-    log("")
-    log("=" * 70)
-    log("CLEANING PREVIOUS GENERATED FILES")
-    log("=" * 70)
-
-    directories = [
-        DATA_DIR,
-        OUTPUT_DIR,
-        SOURCE_DIR,
-        AUDIO_DIR,
-        VIDEO_WORK_DIR,
-    ]
-
-    for directory in directories:
-
-        directory.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
+    print("")
+    print(
+        "============================================================"
+    )
+    print(
+        "CLEANING PREVIOUS GENERATED FILES"
+    )
+    print(
+        "============================================================"
+    )
 
     files_to_remove = [
         SELECTED_STORY,
         SELECTED_SCRIPT,
         FINAL_IMAGE,
         FINAL_VIDEO,
+        AUDIO_DIR / "narration.mp3",
+        AUDIO_DIR / "narration_temp.mp3",
+        VIDEO_WORK_DIR / "narration.mp3",
     ]
 
     for path in files_to_remove:
@@ -2089,241 +3386,474 @@ def clean_previous():
         try:
 
             if path.exists():
-                path.unlink()
+
+                if path.is_file():
+                    path.unlink()
+
+                    print(
+                        "Removed:",
+                        path,
+                    )
 
         except Exception as exc:
 
-            log(
-                f"WARNING: Could not remove "
-                f"{path}: {exc}"
+            print(
+                "Could not remove:",
+                path,
+                exc,
             )
 
-    # Remove generated source photos.
-    for pattern in [
-        "story_image_*.jpg",
-        "_candidate_*.jpg",
-    ]:
+    # --------------------------------------------------------
+    # Remove generated article photos.
+    # --------------------------------------------------------
+
+    if SOURCE_DIR.exists():
 
         for path in SOURCE_DIR.glob(
-            pattern
+            "story_image_*.jpg"
         ):
 
             try:
                 path.unlink()
+
+                print(
+                    "Removed:",
+                    path,
+                )
+
             except Exception:
                 pass
 
+    # --------------------------------------------------------
     # Remove generated scene files.
-    for pattern in [
-        "scene_*.jpg",
-        "silent_video.mp4",
-        "scenes.txt",
-        "narration.mp3",
-    ]:
+    # --------------------------------------------------------
 
-        for path in VIDEO_WORK_DIR.glob(
-            pattern
-        ):
+    if VIDEO_WORK_DIR.exists():
+
+        for path in VIDEO_WORK_DIR.iterdir():
 
             try:
-                path.unlink()
+
+                if path.is_file():
+                    path.unlink()
+
             except Exception:
                 pass
 
-    # Remove old audio.
-    for path in [
-        AUDIO_DIR / "narration.mp3",
-        AUDIO_DIR / "narration_temp.mp3",
-        AUDIO_DIR / "narration_best.mp3",
-    ]:
+    # --------------------------------------------------------
+    # Ensure directories exist.
+    # --------------------------------------------------------
 
-        try:
+    DATA_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
-            if path.exists():
-                path.unlink()
+    OUTPUT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
-        except Exception:
-            pass
+    SOURCE_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    AUDIO_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    VIDEO_WORK_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    print(
+        "Clean-up complete."
+    )
 
 
 # ============================================================
-# VERIFY PROJECT FILES
+# PROJECT VERIFICATION
 # ============================================================
 
 def verify_project_files():
-    log("")
-    log("=" * 70)
-    log("VERIFYING PROJECT FILES")
-    log("=" * 70)
+    print("")
+    print(
+        "============================================================"
+    )
+    print(
+        "VERIFYING PROJECT"
+    )
+    print(
+        "============================================================"
+    )
 
     if not VIDEO_GENERATOR.exists():
 
-        raise RuntimeError(
-            "rift_valley_video_generator.py "
-            "not found."
+        print(
+            "ERROR: rift_valley_video_generator.py not found."
         )
 
-    log(
-        "MAIN FILE: "
-        f"{Path(__file__).name}"
+        return False
+
+    print(
+        "rift_valley_main.py:"
     )
 
-    log(
-        "VIDEO GENERATOR: "
-        f"{VIDEO_GENERATOR.name}"
+    print(
+        ROOT / "rift_valley_main.py"
     )
 
-    # Syntax check both files.
-    result = subprocess.run(
+    print(
+        "rift_valley_video_generator.py:"
+    )
+
+    print(
+        VIDEO_GENERATOR
+    )
+
+    print("")
+    print(
+        "Checking Python syntax..."
+    )
+
+    main_check = subprocess.run(
         [
             sys.executable,
             "-m",
             "py_compile",
-            str(Path(__file__)),
-            str(VIDEO_GENERATOR),
+            str(
+                ROOT
+                / "rift_valley_main.py"
+            ),
         ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+        capture_output=True,
         text=True,
     )
 
-    if result.returncode != 0:
+    if main_check.returncode != 0:
 
-        log(
-            result.stdout
+        print(
+            main_check.stdout
         )
 
-        raise RuntimeError(
-            "Python syntax check failed."
+        print(
+            main_check.stderr
         )
 
-    log(
+        return False
+
+    generator_check = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "py_compile",
+            str(
+                VIDEO_GENERATOR
+            ),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    if generator_check.returncode != 0:
+
+        print(
+            generator_check.stdout
+        )
+
+        print(
+            generator_check.stderr
+        )
+
+        return False
+
+    print(
         "PYTHON SYNTAX CHECK PASSED"
     )
 
+    return True
+
 
 # ============================================================
-# HARD VERIFY SELECTED JSON
+# SELECTED FILE VERIFICATION
 # ============================================================
 
 def verify_selected_files():
-    log("")
-    log("=" * 70)
-    log("VERIFYING SELECTED JSON FILES")
-    log("=" * 70)
+    print("")
+    print(
+        "============================================================"
+    )
+    print(
+        "VERIFYING SELECTED STORY"
+    )
+    print(
+        "============================================================"
+    )
 
     if not SELECTED_STORY.exists():
 
-        raise RuntimeError(
-            "ERROR: selected_story.json "
-            "was not generated."
+        print(
+            "ERROR: selected_story.json missing."
         )
 
-    if (
-        SELECTED_STORY.stat().st_size
-        == 0
-    ):
-
-        raise RuntimeError(
-            "ERROR: selected_story.json "
-            "is empty."
-        )
+        return False
 
     if not SELECTED_SCRIPT.exists():
 
-        raise RuntimeError(
-            "ERROR: selected_script.json "
-            "was not generated."
+        print(
+            "ERROR: selected_script.json missing."
         )
 
-    if (
-        SELECTED_SCRIPT.stat().st_size
-        == 0
-    ):
-
-        raise RuntimeError(
-            "ERROR: selected_script.json "
-            "is empty."
-        )
+        return False
 
     try:
 
         with SELECTED_STORY.open(
             "r",
             encoding="utf-8",
-        ) as f:
-
-            story = json.load(f)
+        ) as handle:
+            story = json.load(handle)
 
         with SELECTED_SCRIPT.open(
             "r",
             encoding="utf-8",
-        ) as f:
-
-            script = json.load(f)
+        ) as handle:
+            script = json.load(handle)
 
     except Exception as exc:
 
-        raise RuntimeError(
-            "Saved JSON could not be parsed: "
-            f"{exc}"
+        print(
+            "ERROR: Could not load selected JSON:",
+            exc,
         )
 
-    if not story.get("title"):
+        return False
 
-        raise RuntimeError(
-            "selected_story.json has no title."
+    # --------------------------------------------------------
+    # Story fields.
+    # --------------------------------------------------------
+
+    required_story_fields = [
+        "title",
+        "county",
+        "article_url",
+        "published_at",
+        "image_urls",
+    ]
+
+    for field in required_story_fields:
+
+        if not story.get(field):
+
+            print(
+                f"ERROR: selected_story missing {field}"
+            )
+
+            return False
+
+    # --------------------------------------------------------
+    # Script fields.
+    # --------------------------------------------------------
+
+    required_script_fields = [
+        "title",
+        "county",
+        "script",
+        "article_url",
+    ]
+
+    for field in required_script_fields:
+
+        if not script.get(field):
+
+            print(
+                f"ERROR: selected_script missing {field}"
+            )
+
+            return False
+
+    # --------------------------------------------------------
+    # Story/script consistency.
+    # --------------------------------------------------------
+
+    if story["county"] != script["county"]:
+
+        print(
+            "ERROR: Story/script county mismatch."
         )
 
-    if not story.get("county"):
-
-        raise RuntimeError(
-            "selected_story.json has no county."
+        print(
+            "Story:",
+            story["county"],
         )
 
-    if not story.get("script"):
-
-        raise RuntimeError(
-            "selected_story.json has no script."
+        print(
+            "Script:",
+            script["county"],
         )
 
-    if not story.get("image_urls"):
+        return False
 
-        raise RuntimeError(
-            "selected_story.json has no image_urls."
+    if story["title"] != script["title"]:
+
+        print(
+            "ERROR: Story/script title mismatch."
         )
 
-    if not script.get("narration"):
+        return False
 
-        raise RuntimeError(
-            "selected_script.json has no narration."
+    if (
+        story["article_url"]
+        != script["article_url"]
+    ):
+
+        print(
+            "ERROR: Story/script article URL mismatch."
         )
 
-    log(
-        "SELECTED STORY JSON: VALID"
+        return False
+
+    # --------------------------------------------------------
+    # Freshness validation.
+    # --------------------------------------------------------
+
+    published_at = parse_datetime_value(
+        story["published_at"]
     )
 
-    log(
-        f"TITLE: {story['title']}"
+    freshness = validate_publication_date(
+        published_at
     )
 
-    log(
-        f"COUNTY: {story['county']}"
+    if not freshness["valid"]:
+
+        print(
+            "ERROR: Selected story is not fresh:"
+        )
+
+        print(
+            freshness["reason"]
+        )
+
+        return False
+
+    # --------------------------------------------------------
+    # County validation.
+    # --------------------------------------------------------
+
+    county_result = detect_primary_county(
+        story["title"],
+        story.get(
+            "summary",
+            "",
+        ),
+        story.get(
+            "body",
+            "",
+        ),
     )
 
-    log(
-        f"IMAGE URLS: "
-        f"{len(story['image_urls'])}"
+    if county_result["ambiguous"]:
+
+        print(
+            "ERROR: Selected story has ambiguous county."
+        )
+
+        print(
+            county_result["reason"]
+        )
+
+        return False
+
+    if county_result["county"] != story[
+        "county"
+    ]:
+
+        print(
+            "ERROR: Selected story county failed revalidation."
+        )
+
+        return False
+
+    # --------------------------------------------------------
+    # Image validation.
+    # --------------------------------------------------------
+
+    if not isinstance(
+        story["image_urls"],
+        list,
+    ):
+
+        print(
+            "ERROR: image_urls is not a list."
+        )
+
+        return False
+
+    if len(
+        story["image_urls"]
+    ) < 1:
+
+        print(
+            "ERROR: No story images."
+        )
+
+        return False
+
+    print(
+        "Selected county:",
+        story["county"],
     )
 
-    log(
-        "SELECTED SCRIPT JSON: VALID"
+    print(
+        "Selected title:",
+        story["title"],
     )
 
-    log(
-        f"NARRATION WORDS: "
-        f"{len(script['narration'].split())}"
+    print(
+        "Published:",
+        story["published_at"],
     )
+
+    print(
+        "Age:",
+        story.get(
+            "age_hours",
+            "unknown",
+        ),
+    )
+
+    print(
+        "Freshness:",
+        story.get(
+            "freshness",
+            "unknown",
+        ),
+    )
+
+    print(
+        "Story images:",
+        len(
+            story["image_urls"]
+        ),
+    )
+
+    print(
+        "Story/script consistency: PASSED"
+    )
+
+    print(
+        "Freshness validation: PASSED"
+    )
+
+    print(
+        "County validation: PASSED"
+    )
+
+    return True
 
 
 # ============================================================
@@ -2331,306 +3861,419 @@ def verify_selected_files():
 # ============================================================
 
 def run_generator():
-    log("")
-    log("=" * 70)
-    log("STARTING RVW_VIDEO_V22")
-    log("=" * 70)
+    print("")
+    print(
+        "============================================================"
+    )
+    print(
+        "STARTING RIFT VALLEY WATCH VIDEO GENERATOR"
+    )
+    print(
+        "============================================================"
+    )
 
     if not VIDEO_GENERATOR.exists():
 
-        raise RuntimeError(
-            "rift_valley_video_generator.py "
-            "not found."
+        print(
+            "ERROR: Video generator does not exist."
         )
 
-    # IMPORTANT:
-    # Verify JSON exists BEFORE launching V22.
-    verify_selected_files()
+        return False
 
-    log("")
-    log(
-        "LAUNCHING VIDEO GENERATOR:"
-    )
+    try:
 
-    log(
-        str(VIDEO_GENERATOR)
-    )
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-u",
-            str(VIDEO_GENERATOR),
-        ],
-        cwd=str(ROOT),
-        env={
-            **__import__(
-                "os"
-            ).environ,
-            "PYTHONUNBUFFERED": "1",
-        },
-    )
-
-    if result.returncode != 0:
-
-        raise RuntimeError(
-            "Video generator failed with "
-            f"exit code {result.returncode}"
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-u",
+                str(VIDEO_GENERATOR),
+            ],
+            cwd=str(ROOT),
+            timeout=VIDEO_TIMEOUT_SECONDS,
         )
 
-    log(
-        "VIDEO GENERATOR COMPLETED SUCCESSFULLY"
-    )
+        if completed.returncode != 0:
+
+            print(
+                "ERROR: Video generator failed."
+            )
+
+            print(
+                "Exit code:",
+                completed.returncode,
+            )
+
+            return False
+
+        print(
+            "VIDEO GENERATOR FINISHED SUCCESSFULLY"
+        )
+
+        return True
+
+    except subprocess.TimeoutExpired:
+
+        print(
+            "ERROR: Video generator timed out."
+        )
+
+        return False
+
+    except Exception as exc:
+
+        print(
+            "ERROR running video generator:",
+            exc,
+        )
+
+        return False
 
 
 # ============================================================
-# VERIFY FINAL MP4
+# FINAL VIDEO VERIFICATION
 # ============================================================
 
 def verify_final_video():
-    log("")
-    log("=" * 70)
-    log("VERIFYING FINAL MP4")
-    log("=" * 70)
+    print("")
+    print(
+        "============================================================"
+    )
+    print(
+        "VERIFYING FINAL MP4"
+    )
+    print(
+        "============================================================"
+    )
 
     if not FINAL_VIDEO.exists():
 
-        raise RuntimeError(
-            "Final Rift Valley Watch MP4 "
-            "was not generated."
+        print(
+            "ERROR: Final MP4 was not generated."
         )
+
+        return False
 
     size = FINAL_VIDEO.stat().st_size
 
-    log(
-        f"FINAL MP4 SIZE: "
-        f"{size / 1048576:.2f} MB"
+    print(
+        "MP4:",
+        FINAL_VIDEO,
     )
 
-    if size < 100000:
+    print(
+        "Size:",
+        size,
+        "bytes",
+    )
 
-        raise RuntimeError(
-            "Final MP4 is suspiciously small."
+    if size < 100_000:
+
+        print(
+            "ERROR: MP4 is too small."
         )
 
-    probe = subprocess.run(
-        [
-            "ffprobe",
-            "-v",
-            "error",
-            "-show_entries",
-            "stream="
-            "codec_type,"
-            "codec_name,"
-            "width,"
-            "height,"
-            "sample_rate,"
-            "channels",
-            "-show_entries",
-            "format=duration,size",
-            "-of",
-            "default=noprint_wrappers=1",
-            str(FINAL_VIDEO),
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
+        return False
 
-    if probe.returncode != 0:
-
-        log(
-            probe.stdout
-        )
-
-        raise RuntimeError(
-            "Final MP4 failed FFprobe validation."
-        )
-
-    log("")
-    log(
-        probe.stdout
-    )
-
-    width_probe = subprocess.run(
-        [
-            "ffprobe",
-            "-v",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=width",
-            "-of",
-            "csv=p=0",
-            str(FINAL_VIDEO),
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-
-    height_probe = subprocess.run(
-        [
-            "ffprobe",
-            "-v",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=height",
-            "-of",
-            "csv=p=0",
-            str(FINAL_VIDEO),
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-
-    audio_probe = subprocess.run(
-        [
-            "ffprobe",
-            "-v",
-            "error",
-            "-select_streams",
-            "a:0",
-            "-show_entries",
-            "stream=codec_type",
-            "-of",
-            "csv=p=0",
-            str(FINAL_VIDEO),
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration,size",
+        "-show_entries",
+        "stream=codec_type,codec_name,width,height",
+        "-of",
+        "default=noprint_wrappers=1",
+        str(FINAL_VIDEO),
+    ]
 
     try:
 
-        width = int(
-            width_probe.stdout.strip()
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
 
-        height = int(
-            height_probe.stdout.strip()
+        print("")
+        print(
+            "FFprobe:"
+        )
+
+        print(
+            result.stdout
+        )
+
+        if result.returncode != 0:
+
+            print(
+                result.stderr
+            )
+
+            return False
+
+    except Exception as exc:
+
+        print(
+            "ERROR running ffprobe:",
+            exc,
+        )
+
+        return False
+
+    # --------------------------------------------------------
+    # Width.
+    # --------------------------------------------------------
+
+    try:
+
+        width_result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width",
+                "-of",
+                "csv=p=0",
+                str(FINAL_VIDEO),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+        width = clean(
+            width_result.stdout
         )
 
     except Exception:
+        width = ""
 
-        raise RuntimeError(
-            "Unable to read final video dimensions."
-        )
-
-    has_audio = bool(
-        audio_probe.stdout.strip()
-    )
-
-    if width != 1080:
-
-        raise RuntimeError(
-            f"Wrong video width: {width}"
-        )
-
-    if height != 1920:
-
-        raise RuntimeError(
-            f"Wrong video height: {height}"
-        )
-
-    if not has_audio:
-
-        raise RuntimeError(
-            "Final MP4 does not contain audio."
-        )
-
-    duration_probe = subprocess.run(
-        [
-            "ffprobe",
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            str(FINAL_VIDEO),
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    # --------------------------------------------------------
+    # Height.
+    # --------------------------------------------------------
 
     try:
+
+        height_result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=height",
+                "-of",
+                "csv=p=0",
+                str(FINAL_VIDEO),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+        height = clean(
+            height_result.stdout
+        )
+
+    except Exception:
+        height = ""
+
+    # --------------------------------------------------------
+    # Duration.
+    # --------------------------------------------------------
+
+    try:
+
+        duration_result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "csv=p=0",
+                str(FINAL_VIDEO),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+        duration_text = clean(
+            duration_result.stdout
+        )
 
         duration = float(
-            duration_probe.stdout.strip()
+            duration_text
         )
 
     except Exception:
 
-        raise RuntimeError(
-            "Final MP4 duration could not be read."
+        duration = 0
+
+    # --------------------------------------------------------
+    # Audio.
+    # --------------------------------------------------------
+
+    try:
+
+        audio_result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "a:0",
+                "-show_entries",
+                "stream=codec_type,codec_name",
+                "-of",
+                "default=noprint_wrappers=1",
+                str(FINAL_VIDEO),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
+
+        audio_info = clean(
+            audio_result.stdout
+        )
+
+    except Exception:
+
+        audio_info = ""
+
+    print(
+        "Width:",
+        width,
+    )
+
+    print(
+        "Height:",
+        height,
+    )
+
+    print(
+        "Duration:",
+        duration,
+        "seconds",
+    )
+
+    print(
+        "Audio:",
+        audio_info,
+    )
+
+    if width != "1080":
+
+        print(
+            "ERROR: Video width is not 1080."
+        )
+
+        return False
+
+    if height != "1920":
+
+        print(
+            "ERROR: Video height is not 1920."
+        )
+
+        return False
 
     if duration < 5:
 
-        raise RuntimeError(
-            "Final MP4 is too short."
+        print(
+            "ERROR: Video duration is too short."
         )
 
-    log("")
-    log(
-        "FINAL VIDEO VERIFIED SUCCESSFULLY"
+        return False
+
+    if not audio_info:
+
+        print(
+            "ERROR: Video contains no audio."
+        )
+
+        return False
+
+    print("")
+    print(
+        "FINAL MP4 VERIFICATION PASSED"
     )
 
-    log(
-        f"RESOLUTION: {width}x{height}"
-    )
-
-    log(
-        f"DURATION: {duration:.2f} seconds"
-    )
-
-    log(
-        "AUDIO: PRESENT"
-    )
-
-    log(
-        f"FILE: {FINAL_VIDEO}"
-    )
+    return True
 
 
 # ============================================================
-# FINAL DIRECTORY REPORT
+# REPORT
 # ============================================================
 
 def report_files():
-    log("")
-    log("=" * 70)
-    log("FINAL OUTPUT REPORT")
-    log("=" * 70)
+    print("")
+    print(
+        "============================================================"
+    )
+    print(
+        "GENERATED FILE REPORT"
+    )
+    print(
+        "============================================================"
+    )
 
     paths = [
         SELECTED_STORY,
         SELECTED_SCRIPT,
         FINAL_IMAGE,
         FINAL_VIDEO,
+        AUDIO_DIR / "narration.mp3",
     ]
 
     for path in paths:
 
         if path.exists():
 
-            log(
-                f"OK  {path} "
-                f"({path.stat().st_size} bytes)"
+            try:
+                size = path.stat().st_size
+
+            except Exception:
+                size = 0
+
+            print(
+                f"FOUND: {path} "
+                f"({size:,} bytes)"
             )
 
         else:
 
-            log(
-                f"MISSING  {path}"
+            print(
+                f"NOT FOUND: {path}"
             )
+
+    print("")
+    print(
+        "Source directory:"
+    )
+
+    if SOURCE_DIR.exists():
+
+        for path in sorted(
+            SOURCE_DIR.glob("*")
+        ):
+
+            if path.is_file():
+
+                print(
+                    " ",
+                    path.name,
+                    f"({path.stat().st_size:,} bytes)",
+                )
 
 
 # ============================================================
@@ -2638,171 +4281,300 @@ def report_files():
 # ============================================================
 
 def main():
-    try:
+    print("")
+    print(
+        "################################################################"
+    )
+    print(
+        "# RIFT VALLEY WATCH"
+    )
+    print(
+        "# REALTIME NEWS VIDEO PIPELINE"
+    )
+    print(
+        f"# {MAIN_GENERATOR_VERSION}"
+    )
+    print(
+        "################################################################"
+    )
 
-        log("")
-        log("=" * 70)
-        log("RIFT VALLEY WATCH")
-        log("=" * 70)
-        log(
-            "VERSION: "
-            "RVW_MAIN_V12_MULTI_PHOTO_JSON_STABLE"
+    start_time = time.time()
+
+    # --------------------------------------------------------
+    # Clean.
+    # --------------------------------------------------------
+
+    clean_previous()
+
+    # --------------------------------------------------------
+    # Verify project.
+    # --------------------------------------------------------
+
+    if not verify_project_files():
+
+        print(
+            "ERROR: Project verification failed."
         )
-        log("=" * 70)
 
-        # ----------------------------------------------------
-        # Prepare.
-        # ----------------------------------------------------
+        sys.exit(1)
 
-        clean_previous()
+    # --------------------------------------------------------
+    # Discover current stories.
+    # --------------------------------------------------------
 
-        verify_project_files()
+    candidates = discover()
 
-        # ----------------------------------------------------
-        # Discover.
-        # ----------------------------------------------------
+    if not candidates:
 
-        candidates = discover()
-
-        log("")
-        log(
-            f"VALID STORIES FOUND: "
-            f"{len(candidates)}"
+        print("")
+        print(
+            "============================================================"
+        )
+        print(
+            "ERROR: NO CURRENT VALID STORIES FOUND"
+        )
+        print(
+            "============================================================"
         )
 
-        if not candidates:
+        print(
+            "All discovered articles were rejected because they "
+            "were stale, lacked valid publication dates, had "
+            "ambiguous counties, lacked sufficient article text, "
+            "or lacked valid real article photos."
+        )
 
-            raise RuntimeError(
-                "No valid Rift Valley stories "
-                "with real article photos were found."
+        sys.exit(1)
+
+    # --------------------------------------------------------
+    # Select best.
+    # --------------------------------------------------------
+
+    selected = select_best(
+        candidates
+    )
+
+    if selected is None:
+
+        print(
+            "ERROR: No valid story survived final selection."
+        )
+
+        sys.exit(1)
+
+    # --------------------------------------------------------
+    # Final story validation.
+    # --------------------------------------------------------
+
+    if not validate_story(
+        selected
+    ):
+
+        print(
+            "ERROR: Selected story failed final validation."
+        )
+
+        sys.exit(1)
+
+    # --------------------------------------------------------
+    # Save primary image.
+    # --------------------------------------------------------
+
+    if not save_first_image(
+        selected
+    ):
+
+        print(
+            "ERROR: Primary article image could not be saved."
+        )
+
+        sys.exit(1)
+
+    # --------------------------------------------------------
+    # Update primary image information.
+    # --------------------------------------------------------
+
+    selected["image_path"] = str(
+        FINAL_IMAGE
+    )
+
+    if selected.get(
+        "primary_image_url"
+    ):
+
+        primary_url = selected[
+            "primary_image_url"
+        ]
+
+        existing_urls = selected.get(
+            "image_urls",
+            [],
+        )
+
+        if primary_url in existing_urls:
+
+            existing_urls.remove(
+                primary_url
             )
 
-        # ----------------------------------------------------
-        # Select.
-        # ----------------------------------------------------
+        selected[
+            "image_urls"
+        ] = [
+            primary_url
+        ] + existing_urls
 
-        selected = select_best(
-            candidates
+        selected[
+            "image_urls"
+        ] = selected[
+            "image_urls"
+        ][:MAX_STORED_IMAGE_URLS]
+
+    # --------------------------------------------------------
+    # Write selected JSON.
+    # --------------------------------------------------------
+
+    write_selected_files(
+        selected
+    )
+
+    # --------------------------------------------------------
+    # Verify JSON.
+    # --------------------------------------------------------
+
+    if not verify_selected_files():
+
+        print(
+            "ERROR: Selected story/script verification failed."
         )
 
-        log("")
-        log("=" * 70)
-        log("SELECTED STORY")
-        log("=" * 70)
+        sys.exit(1)
 
-        log(
-            f"COUNTY: "
-            f"{selected['county']}"
+    # --------------------------------------------------------
+    # Verify primary image.
+    # --------------------------------------------------------
+
+    if not FINAL_IMAGE.exists():
+
+        print(
+            "ERROR: Primary story image missing."
         )
 
-        log(
-            f"TITLE: "
-            f"{selected['title']}"
+        sys.exit(1)
+
+    image_size = FINAL_IMAGE.stat().st_size
+
+    if image_size < 10_000:
+
+        print(
+            "ERROR: Primary story image is too small."
         )
 
-        log(
-            f"SOURCE: "
-            f"{domain(selected['url'])}"
+        sys.exit(1)
+
+    print("")
+    print(
+        "PRIMARY IMAGE VERIFICATION PASSED"
+    )
+
+    # --------------------------------------------------------
+    # Generate video.
+    # --------------------------------------------------------
+
+    if not run_generator():
+
+        print(
+            "ERROR: Video generation failed."
         )
 
-        log(
-            f"SCORE: "
-            f"{selected['score']}"
+        sys.exit(1)
+
+    # --------------------------------------------------------
+    # Final video verification.
+    # --------------------------------------------------------
+
+    if not verify_final_video():
+
+        print(
+            "ERROR: Final MP4 verification failed."
         )
 
-        log(
-            f"REAL PHOTOS: "
-            f"{len(selected['image_candidates'])}"
-        )
+        sys.exit(1)
 
-        log(
-            f"ARTICLE: "
-            f"{selected['url']}"
-        )
+    # --------------------------------------------------------
+    # Report.
+    # --------------------------------------------------------
 
-        # ----------------------------------------------------
-        # Save compatibility image.
-        # ----------------------------------------------------
+    report_files()
 
-        save_first_image(
-            selected
-        )
+    elapsed = (
+        time.time()
+        - start_time
+    )
 
-        # ----------------------------------------------------
-        # Write JSON.
-        # ----------------------------------------------------
+    print("")
+    print(
+        "################################################################"
+    )
+    print(
+        "# RIFT VALLEY WATCH GENERATION SUCCESSFUL"
+    )
+    print(
+        "################################################################"
+    )
 
-        story = write_selected_files(
-            selected
-        )
+    print(
+        "County:",
+        selected["county"],
+    )
 
-        # ----------------------------------------------------
-        # HARD CHECK BEFORE GENERATOR.
-        # ----------------------------------------------------
+    print(
+        "Story:",
+        selected["title"],
+    )
 
-        verify_selected_files()
+    print(
+        "Published:",
+        selected["published_at"],
+    )
 
-        # ----------------------------------------------------
-        # Run V22.
-        # ----------------------------------------------------
+    print(
+        "Age:",
+        selected["age_hours"],
+        "hours",
+    )
 
-        run_generator()
+    print(
+        "Freshness:",
+        selected["freshness"],
+    )
 
-        # ----------------------------------------------------
-        # Verify final MP4.
-        # ----------------------------------------------------
+    print(
+        "Article:",
+        selected["article_url"],
+    )
 
-        verify_final_video()
+    print(
+        "Photos:",
+        len(
+            selected["image_urls"]
+        ),
+    )
 
-        # ----------------------------------------------------
-        # Report.
-        # ----------------------------------------------------
+    print(
+        "Final MP4:",
+        FINAL_VIDEO,
+    )
 
-        report_files()
+    print(
+        "Elapsed:",
+        f"{elapsed:.1f}",
+        "seconds",
+    )
 
-        log("")
-        log("=" * 70)
-        log("RIFT VALLEY WATCH COMPLETED SUCCESSFULLY")
-        log("=" * 70)
+    print(
+        "################################################################"
+    )
 
-        log(
-            f"FINAL VIDEO: {FINAL_VIDEO}"
-        )
-
-        return 0
-
-    except KeyboardInterrupt:
-
-        log("")
-        log(
-            "Generation interrupted."
-        )
-
-        return 130
-
-    except Exception as exc:
-
-        log("")
-        log("=" * 70)
-        log("RIFT VALLEY WATCH GENERATION FAILED")
-        log("=" * 70)
-
-        log(
-            f"ERROR: {exc}"
-        )
-
-        import traceback
-
-        traceback.print_exc()
-
-        return 1
-
-
-# ============================================================
-# ENTRY POINT
-# ============================================================
 
 if __name__ == "__main__":
-    sys.exit(
-        main()
-    )
+    main()
