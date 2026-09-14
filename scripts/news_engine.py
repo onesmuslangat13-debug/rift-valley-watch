@@ -14,65 +14,31 @@ import requests
 from PIL import Image
 
 
-# ============================================================
-# RIFT VALLEY WATCH
-# NEWS ENGINE
-# VERSION: V16_STABLE_REAL_PHOTO
-#
-# PURPOSE
-# ------------------------------------------------------------
-# - Fetch fresh Rift Valley news
-# - Find current stories
-# - Resolve article URLs
-# - Extract real article photographs
-# - Validate photographs with Pillow
-# - Reject placeholders / logos / screenshots
-# - Create data/story.json
-# - Create data/script.json
-# ============================================================
-
-
 BASE_DIR = Path(__file__).resolve().parent.parent
-
 DATA_DIR = BASE_DIR / "data"
 SOURCE_DIR = BASE_DIR / "assets" / "source"
 
 STORY_FILE = DATA_DIR / "story.json"
 SCRIPT_FILE = DATA_DIR / "script.json"
 
-REQUEST_TIMEOUT = 25
+TIMEOUT = 25
+MAX_ITEMS = 120
+MAX_TEST = 60
+MAX_PHOTOS = 5
 
-MAX_RSS_ITEMS = 150
-MAX_STORIES_TO_TEST = 80
-MAX_IMAGES_PER_STORY = 5
-
-MIN_IMAGE_BYTES = 8000
-MIN_IMAGE_WIDTH = 240
-MIN_IMAGE_HEIGHT = 160
-MIN_IMAGE_PIXELS = 60000
-
-
-# ============================================================
-# USER AGENTS
-# ============================================================
-
-USER_AGENTS = [
-    (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/131.0.0.0 Safari/537.36"
-    ),
-    (
-        "Mozilla/5.0 (X11; Linux x86_64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/130.0 Safari/537.36"
-    ),
-]
+MIN_BYTES = 8000
+MIN_WIDTH = 240
+MIN_HEIGHT = 160
+MIN_PIXELS = 60000
 
 
-# ============================================================
-# COUNTIES
-# ============================================================
+USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) "
+    "AppleWebKit/537.36 "
+    "(KHTML, like Gecko) "
+    "Chrome/131.0 Safari/537.36"
+)
+
 
 COUNTIES = [
     "Bomet",
@@ -91,29 +57,13 @@ COUNTIES = [
 ]
 
 
-COUNTY_ALIASES = {
-    "uasin gishu": "Uasin Gishu",
-    "elgeyo marakwet": "Elgeyo-Marakwet",
-    "trans nzoia": "Trans Nzoia",
-    "west pokot": "West Pokot",
-}
-
-
-# ============================================================
-# FORBIDDEN STORY TERMS
-# ============================================================
-
-FORBIDDEN_STORY_TERMS = [
+FORBIDDEN_STORIES = [
     "rigathi gachagua",
     "gachagua",
 ]
 
 
-# ============================================================
-# FORBIDDEN IMAGE TERMS
-# ============================================================
-
-FORBIDDEN_IMAGE_TERMS = [
+FORBIDDEN_IMAGES = [
     "google.com",
     "googleusercontent",
     "news.google.com",
@@ -126,9 +76,9 @@ FORBIDDEN_IMAGE_TERMS = [
     "screen_shot",
     "citizen",
     "ctv",
+    "world cup",
     "world-cup",
     "world_cup",
-    "world cup",
     "avatar",
     "placeholder",
     "default-image",
@@ -145,14 +95,8 @@ FORBIDDEN_IMAGE_TERMS = [
     "adsense",
     "social-share",
     "social_share",
-    "share-image",
-    "share_image",
 ]
 
-
-# ============================================================
-# SEARCH QUERIES
-# ============================================================
 
 SEARCH_TERMS = [
     "Rift Valley Kenya news",
@@ -172,51 +116,19 @@ SEARCH_TERMS = [
 ]
 
 
-def build_feed_url(query):
-    return (
-        "https://news.google.com/rss/search?q="
-        + quote_plus(query + " when:3d")
-        + "&hl=en-KE&gl=KE&ceid=KE:en"
-    )
+def log(text=""):
+    print(text, flush=True)
 
 
-RSS_FEEDS = []
-
-for search_term in SEARCH_TERMS:
-    RSS_FEEDS.append(
-        build_feed_url(search_term)
-    )
-
-
-# ============================================================
-# LOGGING
-# ============================================================
-
-def log(message=""):
-    print(message, flush=True)
-
-
-# ============================================================
-# TEXT
-# ============================================================
-
-def clean_text(value):
-    if value is None:
+def clean(text):
+    if text is None:
         return ""
 
-    value = unescape(str(value))
-    value = re.sub(
-        r"<[^>]+>",
-        " ",
-        value,
-    )
-    value = re.sub(
-        r"\s+",
-        " ",
-        value,
-    )
+    text = unescape(str(text))
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text)
 
-    return value.strip()
+    return text.strip()
 
 
 def normalize_url(url):
@@ -224,204 +136,256 @@ def normalize_url(url):
         return ""
 
     url = unescape(str(url)).strip()
-
-    url = url.replace(
-        "&amp;",
-        "&",
-    )
+    url = url.replace("&amp;", "&")
 
     if url.startswith("//"):
         url = "https:" + url
 
-    if not url.startswith(
-        ("http://", "https://")
-    ):
+    if not url.startswith(("http://", "https://")):
         return ""
 
     return url
 
 
-def safe_filename(value):
-    value = re.sub(
-        r"[^A-Za-z0-9._-]+",
-        "_",
-        value,
-    )
-
-    value = value.strip("_")
-
-    if not value:
-        value = "story"
-
-    return value[:90]
-
-
-def make_hash(value):
+def hash_text(text):
     return hashlib.sha1(
-        value.encode(
-            "utf-8",
-            errors="ignore",
-        )
+        text.encode("utf-8", errors="ignore")
     ).hexdigest()[:16]
 
 
-# ============================================================
-# STORY FILTER
-# ============================================================
+def safe_name(text):
+    text = re.sub(
+        r"[^A-Za-z0-9._-]+",
+        "_",
+        text,
+    )
+
+    text = text.strip("_")
+
+    if not text:
+        return "story"
+
+    return text[:80]
+
 
 def forbidden_story(text):
-    lowered = clean_text(
-        text
-    ).lower()
+    text = clean(text).lower()
 
-    for term in FORBIDDEN_STORY_TERMS:
-        if term in lowered:
+    for term in FORBIDDEN_STORIES:
+        if term in text:
             return True
 
     return False
 
-
-# ============================================================
-# IMAGE FILTER
-# ============================================================
 
 def forbidden_image(url):
-    lowered = clean_text(
-        url
-    ).lower()
+    url = clean(url).lower()
 
-    for term in FORBIDDEN_IMAGE_TERMS:
-        if term in lowered:
+    for term in FORBIDDEN_IMAGES:
+        if term in url:
             return True
 
     return False
 
 
-# ============================================================
-# COUNTY
-# ============================================================
-
 def detect_county(text):
-    lowered = clean_text(
-        text
-    ).lower()
+    text = clean(text).lower()
 
     for county in COUNTIES:
-        if county.lower() in lowered:
-            return county
-
-    for alias, county in COUNTY_ALIASES.items():
-        if alias in lowered:
+        if county.lower() in text:
             return county
 
     return "Rift Valley"
 
 
-# ============================================================
-# RECENCY
-# ============================================================
-
-def is_recent(date_value):
-    if not date_value:
+def recent(date_text):
+    if not date_text:
         return True
 
     try:
-        parsed = parsedate_to_datetime(
-            date_value
-        )
+        value = parsedate_to_datetime(date_text)
 
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(
-                tzinfo=timezone.utc
-            )
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
 
-        age_hours = (
+        hours = (
             datetime.now(timezone.utc)
-            - parsed.astimezone(timezone.utc)
+            - value.astimezone(timezone.utc)
         ).total_seconds() / 3600
 
-        return age_hours <= 96
+        return hours <= 96
 
     except Exception:
         return True
 
 
-# ============================================================
-# HTTP
-# ============================================================
-
-def request_url(
-    url,
-    image=False,
-    referer=None,
-):
-    url = normalize_url(
-        url
-    )
+def request_url(url, image=False, referer=None):
+    url = normalize_url(url)
 
     if not url:
         return None
 
-    for user_agent in USER_AGENTS:
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    }
 
-        headers = {
-            "User-Agent": user_agent,
-            "Accept-Language": "en-US,en;q=0.9",
-            "Cache-Control": "no-cache",
-            "Pragma": "no-cache",
-        }
+    if image:
+        headers["Accept"] = (
+            "image/avif,image/webp,image/apng,"
+            "image/*,*/*;q=0.8"
+        )
+    else:
+        headers["Accept"] = (
+            "text/html,application/xhtml+xml,"
+            "application/xml;q=0.9,*/*;q=0.8"
+        )
 
-        if image:
-            headers["Accept"] = (
-                "image/avif,image/webp,"
-                "image/apng,image/*,*/*;q=0.8"
-            )
-        else:
-            headers["Accept"] = (
-                "text/html,application/xhtml+xml,"
-                "application/xml;q=0.9,*/*;q=0.8"
-            )
+    if referer:
+        headers["Referer"] = referer
 
-        if referer:
-            headers["Referer"] = referer
+    try:
+        response = requests.get(
+            url,
+            headers=headers,
+            timeout=TIMEOUT,
+            allow_redirects=True,
+        )
 
-        try:
-            response = requests.get(
-                url,
-                headers=headers,
-                timeout=REQUEST_TIMEOUT,
-                allow_redirects=True,
-            )
-
-            if response.status_code < 400:
-                return response
-
+        if response.status_code >= 400:
             log(
-                "    HTTP "
+                "HTTP "
                 + str(response.status_code)
                 + ": "
                 + url
             )
+            return None
 
-        except Exception as exc:
-            log(
-                "    Request failed: "
-                + str(exc)
-            )
+        return response
 
-        time.sleep(0.4)
+    except Exception as exc:
+        log(
+            "Request failed: "
+            + str(exc)
+        )
+        return None
 
-    return None
 
-
-# ============================================================
-# RESOLVE ARTICLE URL
-# ============================================================
-
-def resolve_article_url(url):
-    url = normalize_url(
-        url
+def build_feed(query):
+    return (
+        "https://news.google.com/rss/search?q="
+        + quote_plus(query + " when:3d")
+        + "&hl=en-KE&gl=KE&ceid=KE:en"
     )
+
+
+def local_tag(tag):
+    tag = str(tag)
+
+    if "}" in tag:
+        tag = tag.split("}", 1)[1]
+
+    return tag.lower()
+
+
+def parse_rss(text):
+    items = []
+
+    try:
+        root = ET.fromstring(text)
+    except Exception as exc:
+        log(
+            "RSS parse error: "
+            + str(exc)
+        )
+        return items
+
+    for element in root.iter():
+
+        if local_tag(element.tag) != "item":
+            continue
+
+        item = {
+            "title": "",
+            "description": "",
+            "link": "",
+            "pubdate": "",
+            "source": "",
+            "media": [],
+        }
+
+        for child in list(element):
+
+            tag = local_tag(child.tag)
+            value = child.text or ""
+
+            if tag == "title":
+                item["title"] = clean(value)
+
+            elif tag == "description":
+                item["description"] = clean(value)
+
+            elif tag == "link":
+                item["link"] = normalize_url(value)
+
+            elif tag in (
+                "pubdate",
+                "published",
+                "updated",
+            ):
+                if not item["pubdate"]:
+                    item["pubdate"] = clean(value)
+
+            elif tag == "source":
+                item["source"] = clean(value)
+
+            elif tag in (
+                "content",
+                "thumbnail",
+                "enclosure",
+            ):
+                media = normalize_url(
+                    child.attrib.get(
+                        "url",
+                        "",
+                    )
+                )
+
+                if media:
+                    item["media"].append(
+                        media
+                    )
+
+        if item["title"] and item["link"]:
+            items.append(item)
+
+    return items
+
+
+def fetch_feed(url):
+    log("")
+    log("RSS FEED:")
+    log(url)
+
+    response = request_url(url)
+
+    if response is None:
+        return []
+
+    items = parse_rss(response.text)
+
+    log(
+        "RSS ITEMS: "
+        + str(len(items))
+    )
+
+    return items
+
+
+def resolve_article(url):
+    url = normalize_url(url)
 
     if not url:
         return ""
@@ -429,9 +393,7 @@ def resolve_article_url(url):
     if "news.google.com" not in url:
         return url
 
-    response = request_url(
-        url
-    )
+    response = request_url(url)
 
     if response is None:
         return url
@@ -446,502 +408,192 @@ def resolve_article_url(url):
     return url
 
 
-# ============================================================
-# RSS XML
-# ============================================================
-
-def local_name(tag):
-    tag = str(tag)
-
-    if "}" in tag:
-        tag = tag.split(
-            "}",
-            1,
-        )[1]
-
-    return tag.lower()
-
-
-def parse_rss(xml_text):
-    items = []
-
-    if not xml_text:
-        return items
-
-    try:
-        root = ET.fromstring(
-            xml_text
-        )
-    except Exception as exc:
-        log(
-            "RSS XML error: "
-            + str(exc)
-        )
-        return items
-
-    for element in root.iter():
-
-        if local_name(
-            element.tag
-        ) != "item":
-            continue
-
-        item = {
-            "title": "",
-            "description": "",
-            "link": "",
-            "pubdate": "",
-            "source": "",
-            "media_urls": [],
-        }
-
-        for child in list(element):
-
-            tag = local_name(
-                child.tag
-            )
-
-            text = child.text or ""
-
-            if tag == "title":
-                item["title"] = clean_text(
-                    text
-                )
-
-            elif tag == "description":
-                item["description"] = clean_text(
-                    text
-                )
-
-            elif tag == "link":
-                item["link"] = normalize_url(
-                    text
-                )
-
-            elif tag in (
-                "pubdate",
-                "published",
-                "updated",
-            ):
-
-                if not item["pubdate"]:
-                    item["pubdate"] = clean_text(
-                        text
-                    )
-
-            elif tag == "source":
-                item["source"] = clean_text(
-                    text
-                )
-
-            elif tag in (
-                "content",
-                "thumbnail",
-                "enclosure",
-            ):
-
-                media_url = normalize_url(
-                    child.attrib.get(
-                        "url",
-                        "",
-                    )
-                )
-
-                if media_url:
-                    item["media_urls"].append(
-                        media_url
-                    )
-
-        if (
-            item["title"]
-            and item["link"]
-        ):
-            items.append(
-                item
-            )
-
-    return items
-
-
-# ============================================================
-# RSS FETCH
-# ============================================================
-
-def fetch_feed(feed_url):
-    log("")
-    log(
-        "Fetching RSS:"
-    )
-    log(
-        feed_url
-    )
-
-    response = request_url(
-        feed_url
-    )
-
-    if response is None:
-        log(
-            "RSS request failed."
-        )
-        return []
-
-    items = parse_rss(
-        response.text
-    )
-
-    log(
-        "RSS items found: "
-        + str(len(items))
-    )
-
-    return items
-
-
-# ============================================================
-# EXTRACT IMAGE URLS FROM TEXT
-# ============================================================
-
-def extract_image_urls(
-    text,
+def add_candidate(
+    candidates,
+    value,
     page_url,
 ):
-    results = []
+    if not value:
+        return
 
-    if not text:
-        return results
+    value = unescape(str(value)).strip()
+
+    if value.startswith("data:"):
+        return
+
+    value = urljoin(
+        page_url,
+        value,
+    )
+
+    value = normalize_url(value)
+
+    if not value:
+        return
+
+    if forbidden_image(value):
+        return
+
+    if value not in candidates:
+        candidates.append(value)
+
+
+def html_images(html, page_url):
+    candidates = []
+
+    if not html:
+        return candidates
 
     patterns = [
-        r"https?://[^\"'<>\\\s]+",
-        r"//[^\"'<>\\\s]+",
+        r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
+        r'<meta[^>]+property=["\']og:image:url["\'][^>]+content=["\']([^"\']+)',
+        r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:image["\']',
+        r'<img[^>]+src=["\']([^"\']+)["\']',
+        r'<img[^>]+data-src=["\']([^"\']+)["\']',
+        r'<img[^>]+data-original=["\']([^"\']+)["\']',
+        r'<img[^>]+data-lazy-src=["\']([^"\']+)["\']',
+        r'<source[^>]+srcset=["\']([^"\']+)["\']',
     ]
-
-    raw_urls = []
 
     for pattern in patterns:
 
         matches = re.findall(
             pattern,
-            text,
+            html,
             flags=re.IGNORECASE,
         )
 
         for value in matches:
 
-            value = value.rstrip(
-                "\"'<>),;\\"
+            if "," in value and " " in value:
+                value = value.split(
+                    ",",
+                    1,
+                )[0]
+
+            add_candidate(
+                candidates,
+                value,
+                page_url,
             )
 
-            if value.startswith("//"):
-                value = "https:" + value
+    raw_urls = re.findall(
+        r"https?://[^\"'<>\\\s]+",
+        html,
+        flags=re.IGNORECASE,
+    )
 
-            value = normalize_url(
-                value
-            )
+    for value in raw_urls:
 
-            if value:
-                raw_urls.append(
-                    value
-                )
+        value = value.rstrip(
+            "\"'<>),;\\"
+        )
 
-    for url in raw_urls:
+        lower = value.lower()
 
-        lowered = url.lower()
-
-        looks_like_image = any(
-            extension in lowered
-            for extension in (
+        if not any(
+            ext in lower
+            for ext in (
                 ".jpg",
                 ".jpeg",
                 ".png",
                 ".webp",
                 ".avif",
             )
-        )
-
-        if not looks_like_image:
-            continue
-
-        if forbidden_image(
-            url
         ):
             continue
 
-        absolute = urljoin(
+        add_candidate(
+            candidates,
+            value,
             page_url,
-            url,
         )
-
-        absolute = normalize_url(
-            absolute
-        )
-
-        if (
-            absolute
-            and absolute not in results
-        ):
-            results.append(
-                absolute
-            )
-
-    return results
-
-
-# ============================================================
-# HTML IMAGE EXTRACTION
-# ============================================================
-
-def extract_html_images(
-    html,
-    page_url,
-):
-    candidates = []
-
-    if not html:
-        return candidates
-
-    # --------------------------------------------------------
-    # OpenGraph
-    # --------------------------------------------------------
-
-    patterns = [
-        r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)',
-        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
-        r'<meta[^>]+property=["\']og:image:url["\'][^>]+content=["\']([^"\']+)',
-        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image:url["\']',
-        r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)',
-        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:image["\']',
-    ]
-
-    for pattern in patterns:
-
-        matches = re.findall(
-            pattern,
-            html,
-            flags=re.IGNORECASE,
-        )
-
-        for value in matches:
-
-            value = urljoin(
-                page_url,
-                unescape(
-                    value
-                ),
-            )
-
-            value = normalize_url(
-                value
-            )
-
-            if not value:
-                continue
-
-            if forbidden_image(
-                value
-            ):
-                continue
-
-            if value not in candidates:
-                candidates.append(
-                    value
-                )
-
-    # --------------------------------------------------------
-    # IMG SRC
-    # --------------------------------------------------------
-
-    img_patterns = [
-        r'<img[^>]+src=["\']([^"\']+)["\']',
-        r'<img[^>]+data-src=["\']([^"\']+)["\']',
-        r'<img[^>]+data-original=["\']([^"\']+)["\']',
-        r'<img[^>]+data-lazy-src=["\']([^"\']+)["\']',
-        r'<img[^>]+data-url=["\']([^"\']+)["\']',
-    ]
-
-    for pattern in img_patterns:
-
-        matches = re.findall(
-            pattern,
-            html,
-            flags=re.IGNORECASE,
-        )
-
-        for value in matches:
-
-            value = urljoin(
-                page_url,
-                unescape(
-                    value
-                ),
-            )
-
-            value = normalize_url(
-                value
-            )
-
-            if not value:
-                continue
-
-            if forbidden_image(
-                value
-            ):
-                continue
-
-            if value not in candidates:
-                candidates.append(
-                    value
-                )
-
-    # --------------------------------------------------------
-    # SRCSET
-    # --------------------------------------------------------
-
-    srcset_patterns = [
-        r'<img[^>]+srcset=["\']([^"\']+)["\']',
-        r'<source[^>]+srcset=["\']([^"\']+)["\']',
-    ]
-
-    for pattern in srcset_patterns:
-
-        matches = re.findall(
-            pattern,
-            html,
-            flags=re.IGNORECASE,
-        )
-
-        for srcset in matches:
-
-            entries = srcset.split(
-                ","
-            )
-
-            for entry in entries:
-
-                entry = entry.strip()
-
-                if not entry:
-                    continue
-
-                image_url = entry.split()[0]
-
-                image_url = urljoin(
-                    page_url,
-                    image_url,
-                )
-
-                image_url = normalize_url(
-                    image_url
-                )
-
-                if not image_url:
-                    continue
-
-                if forbidden_image(
-                    image_url
-                ):
-                    continue
-
-                if image_url not in candidates:
-                    candidates.append(
-                        image_url
-                    )
-
-    # --------------------------------------------------------
-    # Raw image URLs
-    # --------------------------------------------------------
-
-    for url in extract_image_urls(
-        html,
-        page_url,
-    ):
-
-        if url not in candidates:
-            candidates.append(
-                url
-            )
 
     return candidates
 
 
-# ============================================================
-# RSS IMAGE EXTRACTION
-# ============================================================
-
-def extract_rss_images(item):
+def rss_images(item):
     candidates = []
 
-    for url in item.get(
-        "media_urls",
+    for value in item.get(
+        "media",
         [],
     ):
 
-        url = normalize_url(
-            url
+        add_candidate(
+            candidates,
+            value,
+            item.get(
+                "link",
+                "",
+            ),
         )
-
-        if not url:
-            continue
-
-        if forbidden_image(
-            url
-        ):
-            continue
-
-        if url not in candidates:
-            candidates.append(
-                url
-            )
 
     description = item.get(
         "description",
         "",
     )
 
-    for url in extract_image_urls(
+    urls = re.findall(
+        r"https?://[^\"'<>\\\s]+",
         description,
-        item.get(
-            "link",
-            "",
-        ),
-    ):
+        flags=re.IGNORECASE,
+    )
 
-        if url not in candidates:
-            candidates.append(
-                url
+    for value in urls:
+
+        value = value.rstrip(
+            "\"'<>),;\\"
+        )
+
+        lower = value.lower()
+
+        if not any(
+            ext in lower
+            for ext in (
+                ".jpg",
+                ".jpeg",
+                ".png",
+                ".webp",
+                ".avif",
             )
+        ):
+            continue
+
+        add_candidate(
+            candidates,
+            value,
+            item.get(
+                "link",
+                "",
+            ),
+        )
 
     return candidates
 
 
-# ============================================================
-# IMAGE VALIDATION
-# ============================================================
-
-def validate_image(
-    path
-):
+def valid_image(path):
     try:
 
         if not path.exists():
             return False
 
-        if path.stat().st_size < MIN_IMAGE_BYTES:
+        if path.stat().st_size < MIN_BYTES:
             return False
 
-        with Image.open(
-            path
-        ) as image:
+        with Image.open(path) as image:
 
             width, height = image.size
 
-            if width < MIN_IMAGE_WIDTH:
+            if width < MIN_WIDTH:
                 return False
 
-            if height < MIN_IMAGE_HEIGHT:
+            if height < MIN_HEIGHT:
                 return False
 
-            if width * height < MIN_IMAGE_PIXELS:
+            if width * height < MIN_PIXELS:
                 return False
 
             image.verify()
@@ -952,25 +604,33 @@ def validate_image(
         return False
 
 
-# ============================================================
-# DOWNLOAD IMAGE
-# ============================================================
+def extension(url):
+    path = urlparse(
+        url
+    ).path.lower()
 
-def download_image(
-    image_url,
+    if path.endswith(".png"):
+        return ".png"
+
+    if path.endswith(".webp"):
+        return ".webp"
+
+    if path.endswith(".jpeg"):
+        return ".jpeg"
+
+    if path.endswith(".avif"):
+        return ".avif"
+
+    return ".jpg"
+
+
+def download_photo(
+    url,
     destination,
     referer,
 ):
-    if not image_url:
-        return False
-
-    if forbidden_image(
-        image_url
-    ):
-        return False
-
     response = request_url(
-        image_url,
+        url,
         image=True,
         referer=referer,
     )
@@ -986,15 +646,13 @@ def download_image(
         .lower()
     )
 
-    content = response.content
-
     if (
         "text/html" in content_type
-        or "application/xhtml" in content_type
+        or "xhtml" in content_type
     ):
         return False
 
-    if len(content) < MIN_IMAGE_BYTES:
+    if len(response.content) < MIN_BYTES:
         return False
 
     try:
@@ -1005,83 +663,39 @@ def download_image(
         )
 
         destination.write_bytes(
-            content
+            response.content
         )
 
-        if not validate_image(
+        if not valid_image(
             destination
         ):
-
             destination.unlink(
                 missing_ok=True
             )
-
             return False
 
         return True
 
     except Exception:
-
         destination.unlink(
             missing_ok=True
         )
-
         return False
 
 
-# ============================================================
-# EXTENSION
-# ============================================================
-
-def get_extension(
-    url
-):
-    path = urlparse(
-        url
-    ).path.lower()
-
-    if path.endswith(
-        ".png"
-    ):
-        return ".png"
-
-    if path.endswith(
-        ".webp"
-    ):
-        return ".webp"
-
-    if path.endswith(
-        ".jpeg"
-    ):
-        return ".jpeg"
-
-    if path.endswith(
-        ".avif"
-    ):
-        return ".avif"
-
-    return ".jpg"
-
-
-# ============================================================
-# DOWNLOAD STORY PHOTOS
-# ============================================================
-
-def download_story_images(
+def download_photos(
     story_id,
     candidates,
     article_url,
 ):
-    story_dir = (
+    folder = (
         SOURCE_DIR / story_id
     )
 
-    if story_dir.exists():
-        shutil.rmtree(
-            story_dir
-        )
+    if folder.exists():
+        shutil.rmtree(folder)
 
-    story_dir.mkdir(
+    folder.mkdir(
         parents=True,
         exist_ok=True,
     )
@@ -1089,144 +703,119 @@ def download_story_images(
     accepted = []
     seen = set()
 
-    for image_url in candidates:
+    for url in candidates:
 
-        if len(accepted) >= MAX_IMAGES_PER_STORY:
+        if len(accepted) >= MAX_PHOTOS:
             break
 
-        image_url = normalize_url(
-            image_url
-        )
+        url = normalize_url(url)
 
-        if not image_url:
+        if not url:
             continue
 
-        if forbidden_image(
-            image_url
-        ):
+        if forbidden_image(url):
             continue
 
-        image_hash = make_hash(
-            image_url
-        )
+        key = hash_text(url)
 
-        if image_hash in seen:
+        if key in seen:
             continue
 
-        seen.add(
-            image_hash
-        )
+        seen.add(key)
 
-        extension = get_extension(
-            image_url
-        )
-
-        filename = (
-            "photo_"
-            + str(len(accepted) + 1)
-            + extension
-        )
-
-        destination = (
-            story_dir / filename
+        path = (
+            folder
+            / (
+                "photo_"
+                + str(len(accepted) + 1)
+                + extension(url)
+            )
         )
 
         log(
-            "    Trying photo:"
+            "PHOTO:"
         )
-
         log(
-            "    "
-            + image_url
+            url
         )
 
-        success = download_image(
-            image_url,
-            destination,
+        success = download_photo(
+            url,
+            path,
             article_url,
         )
 
         if not success:
-
             log(
-                "    REJECTED"
+                "REJECTED"
             )
-
             continue
+
+        relative = str(
+            path.relative_to(
+                BASE_DIR
+            )
+        ).replace(
+            "\\",
+            "/",
+        )
 
         accepted.append(
             {
-                "path": str(
-                    destination.relative_to(
-                        BASE_DIR
-                    )
-                ).replace(
-                    "\\",
-                    "/",
-                ),
-                "url": image_url,
+                "path": relative,
+                "url": url,
             }
         )
 
         log(
-            "    ACCEPTED REAL PHOTO"
+            "ACCEPTED REAL PHOTO:"
+        )
+        log(
+            relative
         )
 
     return accepted
 
 
-# ============================================================
-# STORY ID
-# ============================================================
-
-def create_story_id(
-    title
-):
+def story_id(title):
     return (
-        make_hash(title)
+        hash_text(title)
         + "_"
-        + safe_filename(
-            title[:60]
-        )
+        + safe_name(title[:60])
     )
 
 
-# ============================================================
-# PROCESS STORY
-# ============================================================
+def process_item(item):
 
-def process_story(
-    item
-):
-    title = clean_text(
+    title = clean(
         item.get(
             "title",
             "",
         )
     )
 
-    description = clean_text(
+    description = clean(
         item.get(
             "description",
             "",
         )
     )
 
-    rss_url = normalize_url(
+    link = normalize_url(
         item.get(
             "link",
             "",
         )
     )
 
-    published = clean_text(
+    published = clean(
         item.get(
             "pubdate",
             "",
         )
     )
 
-    source = clean_text(
+    source = clean(
         item.get(
             "source",
             "",
@@ -1236,9 +825,137 @@ def process_story(
     if not title:
         return None
 
-    if not rss_url:
+    if not link:
         return None
 
-    if forbidden_story(
-        title
+    if forbidden_story(title):
+        log(
+            "FORBIDDEN STORY:"
+        )
+        log(title)
+        return None
+
+    if not recent(published):
+        log(
+            "OLD STORY:"
+        )
+        log(title)
+        return None
+
+    log("")
+    log(
+        "------------------------------------------------------------"
+    )
+    log(
+        "TESTING:"
+    )
+    log(title)
+
+    article_url = resolve_article(
+        link
+    )
+
+    response = request_url(
+        article_url
+    )
+
+    page_html = ""
+
+    if response is not None:
+        final_url = normalize_url(
+            response.url
+        )
+
+        if final_url:
+            article_url = final_url
+
+        page_html = response.text
+
+    page_candidates = html_images(
+        page_html,
+        article_url,
+    )
+
+    rss_candidates = rss_images(
+        item
+    )
+
+    candidates = []
+
+    for value in (
+        page_candidates
+        + rss_candidates
     ):
+
+        if value not in candidates:
+            candidates.append(value)
+
+    log(
+        "HTML IMAGE CANDIDATES: "
+        + str(
+            len(page_candidates)
+        )
+    )
+
+    log(
+        "RSS IMAGE CANDIDATES: "
+        + str(
+            len(rss_candidates)
+        )
+    )
+
+    log(
+        "TOTAL IMAGE CANDIDATES: "
+        + str(
+            len(candidates)
+        )
+    )
+
+    if not candidates:
+        log(
+            "NO IMAGE URL FOUND"
+        )
+        return None
+
+    sid = story_id(
+        title
+    )
+
+    photos = download_photos(
+        sid,
+        candidates,
+        article_url,
+    )
+
+    if not photos:
+        log(
+            "NO VALID REAL ARTICLE PHOTO"
+        )
+        return None
+
+    county = detect_county(
+        title
+        + " "
+        + description
+        + " "
+        + page_html[:10000]
+    )
+
+    return {
+        "id": sid,
+        "title": title,
+        "description": description,
+        "summary": description,
+        "county": county,
+        "source": source,
+        "published": published,
+        "article_url": article_url,
+        "images": photos,
+        "image_count": len(photos),
+        "fetched_at": datetime.now(
+            timezone.utc
+        ).isoformat(),
+    }
+
+
+def shorten(text,
