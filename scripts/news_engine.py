@@ -12,46 +12,15 @@ from PIL import Image
 # ============================================================
 # RIFT VALLEY WATCH
 # NEWS ENGINE
-# VERSION: RVW_NEWS_ENGINE_V9_NO_BS4_REAL_PHOTOS
-#
-# PURPOSE
-# - Fetch fresh Rift Valley news
-# - Cover the full Rift Valley region
-# - Prioritize current stories
-# - Reject Gachagua-focused stories
-# - Reject Citizen / CTV content
-# - Extract REAL article photographs
-# - Reject Google/Bing/search-result screenshots
-# - Save genuine JPEG files
-# - Support multiple article photographs
-# - Create data/story.json
-# - Create data/script.json
-# - NEVER silently exit successfully without story.json
-#
-# DEPENDENCIES
-# - requests
-# - Pillow
-#
-# NO BEAUTIFULSOUP
-# ============================================================
-
-
-# ============================================================
-# PATHS
+# VERSION: RVW_NEWS_ENGINE_V10_STABLE_NO_BS4
 # ============================================================
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-
 DATA_DIR = BASE_DIR / "data"
 SOURCE_DIR = BASE_DIR / "assets" / "source"
 
 STORY_JSON = DATA_DIR / "story.json"
 SCRIPT_JSON = DATA_DIR / "script.json"
-
-
-# ============================================================
-# SETTINGS
-# ============================================================
 
 MAX_STORIES = 8
 MAX_IMAGES_PER_STORY = 6
@@ -114,16 +83,6 @@ COUNTIES = [
 ]
 
 
-COUNTY_ALIASES = {
-    "uasin gishu": "Uasin Gishu",
-    "uasin-gishu": "Uasin Gishu",
-    "elgeyo marakwet": "Elgeyo-Marakwet",
-    "elgeyo-marakwet": "Elgeyo-Marakwet",
-    "west pokot": "West Pokot",
-    "trans nzoia": "Trans Nzoia",
-}
-
-
 # ============================================================
 # SEARCH QUERIES
 # ============================================================
@@ -154,7 +113,7 @@ SEARCH_QUERIES = [
 
 
 # ============================================================
-# SOURCE SCORING
+# SOURCE SCORES
 # ============================================================
 
 SOURCE_SCORES = {
@@ -167,12 +126,11 @@ SOURCE_SCORES = {
     "capitalfm.co.ke": 7,
     "kenyans.co.ke": 7,
     "tuko.co.ke": 6,
-    "kenyamoja.com": 5,
 }
 
 
 # ============================================================
-# FORBIDDEN STORY TERMS
+# FORBIDDEN TERMS
 # ============================================================
 
 FORBIDDEN_STORY_TERMS = [
@@ -180,23 +138,14 @@ FORBIDDEN_STORY_TERMS = [
     "gachagua",
 ]
 
-
-# ============================================================
-# FORBIDDEN SOURCE TERMS
-# ============================================================
-
 FORBIDDEN_SOURCE_TERMS = [
     "citizen.digital",
     "citizentv.co.ke",
     "citizen tv",
     "citizen digital",
+    "citizen",
     "ctv",
 ]
-
-
-# ============================================================
-# FORBIDDEN IMAGE TERMS
-# ============================================================
 
 FORBIDDEN_IMAGE_TERMS = [
     "citizen",
@@ -234,10 +183,6 @@ FORBIDDEN_IMAGE_TERMS = [
 ]
 
 
-# ============================================================
-# SEARCH ENGINE DOMAINS
-# ============================================================
-
 SEARCH_ENGINE_DOMAINS = {
     "google.com",
     "www.google.com",
@@ -269,19 +214,12 @@ def log(message):
 
 
 # ============================================================
-# DIRECTORY SETUP
+# DIRECTORIES
 # ============================================================
 
 def ensure_directories():
-    DATA_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    SOURCE_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    SOURCE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ============================================================
@@ -289,12 +227,6 @@ def ensure_directories():
 # ============================================================
 
 def clean_old_images():
-    """
-    Remove images created during previous runs.
-
-    This prevents old Google screenshots, old article images,
-    and stale assets from being accidentally reused.
-    """
 
     extensions = {
         ".jpg",
@@ -373,15 +305,8 @@ def normalize_text(value):
     if value is None:
         return ""
 
-    value = html.unescape(
-        str(value)
-    )
-
-    value = re.sub(
-        r"\s+",
-        " ",
-        value,
-    )
+    value = html.unescape(str(value))
+    value = re.sub(r"\s+", " ", value)
 
     return value.strip()
 
@@ -391,9 +316,7 @@ def clean_html_text(value):
     if not value:
         return ""
 
-    value = html.unescape(
-        str(value)
-    )
+    value = html.unescape(str(value))
 
     value = re.sub(
         r"<script\b[^>]*>.*?</script>",
@@ -422,31 +345,21 @@ def clean_html_text(value):
         value,
     )
 
-    value = html.unescape(
-        value
-    )
-
-    value = re.sub(
-        r"\s+",
-        " ",
-        value,
-    )
+    value = html.unescape(value)
+    value = re.sub(r"\s+", " ", value)
 
     return value.strip()
 
 
 # ============================================================
-# URL HELPERS
+# URL
 # ============================================================
 
 def domain_of(url):
 
     try:
 
-        host = urlparse(
-            url
-        ).netloc.lower()
-
+        host = urlparse(url).netloc.lower()
         host = host.split(":")[0]
 
         if host.startswith("www."):
@@ -467,10 +380,10 @@ def is_search_engine_domain(url):
 
     for domain in SEARCH_ENGINE_DOMAINS:
 
-        if (
-            host == domain
-            or host.endswith("." + domain)
-        ):
+        if host == domain:
+            return True
+
+        if host.endswith("." + domain):
             return True
 
     return False
@@ -481,22 +394,13 @@ def absolute_url(url, base_url):
     if not url:
         return ""
 
-    url = html.unescape(
-        str(url)
-    ).strip()
-
-    url = url.replace(
-        "\\/",
-        "/",
-    )
+    url = html.unescape(str(url)).strip()
+    url = url.replace("\\/", "/")
 
     if url.startswith("//"):
-        return "https:" + url
+        url = "https:" + url
 
-    return urljoin(
-        base_url,
-        url,
-    )
+    return urljoin(base_url, url)
 
 
 # ============================================================
@@ -505,26 +409,26 @@ def absolute_url(url, base_url):
 
 def forbidden_story(text):
 
-    value = normalize_text(
-        text
-    ).lower()
+    value = normalize_text(text).lower()
 
-    return any(
-        term in value
-        for term in FORBIDDEN_STORY_TERMS
-    )
+    for term in FORBIDDEN_STORY_TERMS:
+
+        if term in value:
+            return True
+
+    return False
 
 
 def forbidden_source(value):
 
-    value = normalize_text(
-        value
-    ).lower()
+    value = normalize_text(value).lower()
 
-    return any(
-        term in value
-        for term in FORBIDDEN_SOURCE_TERMS
-    )
+    for term in FORBIDDEN_SOURCE_TERMS:
+
+        if term in value:
+            return True
+
+    return False
 
 
 def forbidden_image_url(url):
@@ -532,9 +436,7 @@ def forbidden_image_url(url):
     if not url:
         return True
 
-    value = html.unescape(
-        str(url)
-    ).strip()
+    value = html.unescape(str(url)).strip()
 
     if not value:
         return True
@@ -553,22 +455,10 @@ def forbidden_image_url(url):
     parsed = urlparse(value)
 
     host = parsed.netloc.lower()
+    path = unquote(parsed.path).lower()
+    query = unquote(parsed.query).lower()
 
-    path = unquote(
-        parsed.path
-    ).lower()
-
-    query = unquote(
-        parsed.query
-    ).lower()
-
-    combined = (
-        host
-        + " "
-        + path
-        + " "
-        + query
-    )
+    combined = host + " " + path + " " + query
 
     for term in FORBIDDEN_IMAGE_TERMS:
 
@@ -595,18 +485,6 @@ def forbidden_image_url(url):
 
         if pattern in combined:
             return True
-
-    if "google" in host:
-        return True
-
-    if "gstatic" in host:
-        return True
-
-    if "bing" in host:
-        return True
-
-    if "yandex" in host:
-        return True
 
     return False
 
@@ -649,7 +527,7 @@ def fetch_url(
 
 
 # ============================================================
-# RSS
+# GOOGLE NEWS RSS
 # ============================================================
 
 def google_news_url(query):
@@ -736,9 +614,7 @@ def extract_rss_items(xml):
 
 def fetch_rss_query(query):
 
-    url = google_news_url(
-        query
-    )
+    url = google_news_url(query)
 
     response = fetch_url(
         url,
@@ -766,16 +642,23 @@ def fetch_rss_query(query):
 
 def extract_county(text):
 
-    value = normalize_text(
-        text
-    ).lower()
+    value = normalize_text(text).lower()
 
     for county in COUNTIES:
 
         if county.lower() in value:
             return county
 
-    for alias, county in COUNTY_ALIASES.items():
+    aliases = {
+        "elgeyo marakwet": "Elgeyo-Marakwet",
+        "elgeyo-marakwet": "Elgeyo-Marakwet",
+        "uasin-gishu": "Uasin Gishu",
+        "uasin gishu": "Uasin Gishu",
+        "west pokot": "West Pokot",
+        "trans nzoia": "Trans Nzoia",
+    }
+
+    for alias, county in aliases.items():
 
         if alias in value:
             return county
@@ -789,9 +672,7 @@ def extract_county(text):
 
 def source_name_from_url(url):
 
-    host = domain_of(
-        url
-    )
+    host = domain_of(url)
 
     mapping = {
         "nation.africa": "Nation",
@@ -799,10 +680,10 @@ def source_name_from_url(url):
         "kbc.co.ke": "KBC",
         "standardmedia.co.ke": "The Standard",
         "the-star.co.ke": "The Star",
+        "businessdailyafrica.com": "Business Daily",
         "capitalfm.co.ke": "Capital FM",
         "kenyans.co.ke": "Kenyans.co.ke",
         "tuko.co.ke": "Tuko",
-        "businessdailyafrica.com": "Business Daily",
     }
 
     if host in mapping:
@@ -816,9 +697,7 @@ def source_name_from_url(url):
 
 def source_score(url):
 
-    host = domain_of(
-        url
-    )
+    host = domain_of(url)
 
     if forbidden_source(host):
         return -100
@@ -828,9 +707,7 @@ def source_score(url):
 
     for domain, score in SOURCE_SCORES.items():
 
-        if host.endswith(
-            "." + domain
-        ):
+        if host.endswith("." + domain):
             return score
 
     return 3
@@ -842,9 +719,7 @@ def source_score(url):
 
 def infer_category(text):
 
-    value = normalize_text(
-        text
-    ).lower()
+    value = normalize_text(text).lower()
 
     categories = [
         (
@@ -852,7 +727,7 @@ def infer_category(text):
             [
                 "governor",
                 "senator",
-                "mp",
+                " mp ",
                 "politics",
                 "political",
                 "president",
@@ -945,17 +820,14 @@ def infer_category(text):
 
 def story_relevance_score(item):
 
-    text = " ".join(
-        [
-            item.get(
-                "title",
-                "",
-            ),
-            item.get(
-                "description",
-                "",
-            ),
-        ]
+    text = (
+        normalize_text(
+            item.get("title", "")
+        )
+        + " "
+        + normalize_text(
+            item.get("description", "")
+        )
     ).lower()
 
     score = 0
@@ -971,7 +843,7 @@ def story_relevance_score(item):
         "cabinet",
         "governor",
         "senator",
-        "mp",
+        " mp ",
         "member of parliament",
         "county assembly",
         "development",
@@ -997,53 +869,39 @@ def story_relevance_score(item):
         "jobs",
     ]
 
+    padded = " " + text + " "
+
     for term in important_terms:
 
-        if term in text:
+        if term in padded:
             score += 2
 
     return score
 
 
 # ============================================================
-# NORMALIZE STORY
+# STORY NORMALIZATION
 # ============================================================
 
 def normalize_story(item):
 
     title = normalize_text(
-        item.get(
-            "title",
-            "",
-        )
+        item.get("title", "")
     )
 
     description = normalize_text(
-        item.get(
-            "description",
-            "",
-        )
+        item.get("description", "")
     )
 
     url = normalize_text(
-        item.get(
-            "url",
-            "",
-        )
+        item.get("url", "")
     )
 
     published = normalize_text(
-        item.get(
-            "published",
-            "",
-        )
+        item.get("published", "")
     )
 
-    combined = (
-        title
-        + " "
-        + description
-    )
+    combined = title + " " + description
 
     county = extract_county(
         combined
@@ -1083,16 +941,14 @@ def extract_meta_content(
 
     for name in names:
 
-        name_escaped = re.escape(
-            name
-        )
+        escaped = re.escape(name)
 
         patterns = [
             (
                 r"<meta\b[^>]*"
                 r"(?:property|name|itemprop)"
                 r"\s*=\s*['\"]"
-                + name_escaped
+                + escaped
                 + r"['\"][^>]*"
                 r"content\s*=\s*['\"]"
                 r"([^'\"]+)"
@@ -1105,9 +961,512 @@ def extract_meta_content(
                 r"['\"][^>]*"
                 r"(?:property|name|itemprop)"
                 r"\s*=\s*['\"]"
-                + name_escaped
+                + escaped
                 + r"['\"]"
             ),
         ]
 
-        for pattern in patterns
+        for pattern in patterns:
+
+            match = re.search(
+                pattern,
+                page_html,
+                flags=re.I | re.S,
+            )
+
+            if match:
+                value = html.unescape(
+                    match.group(1)
+                ).strip()
+
+                if value:
+                    return value
+
+    return ""
+
+
+# ============================================================
+# JSON-LD IMAGES
+# ============================================================
+
+def extract_jsonld_images(page_html):
+
+    results = []
+
+    scripts = re.findall(
+        r"<script\b[^>]*"
+        r'type\s*=\s*["\']application/ld\+json["\']'
+        r"[^>]*>"
+        r"(.*?)"
+        r"</script>",
+        page_html,
+        flags=re.I | re.S,
+    )
+
+    def walk(value):
+
+        if isinstance(value, dict):
+
+            for key, child in value.items():
+
+                key_lower = str(key).lower()
+
+                if key_lower in {
+                    "image",
+                    "thumbnailurl",
+                    "contenturl",
+                }:
+
+                    if isinstance(
+                        child,
+                        str,
+                    ):
+
+                        results.append(child)
+
+                    elif isinstance(
+                        child,
+                        list,
+                    ):
+
+                        for entry in child:
+
+                            if isinstance(
+                                entry,
+                                str,
+                            ):
+
+                                results.append(
+                                    entry
+                                )
+
+                            elif isinstance(
+                                entry,
+                                dict,
+                            ):
+
+                                for subkey in [
+                                    "url",
+                                    "contentUrl",
+                                    "thumbnailUrl",
+                                ]:
+
+                                    if entry.get(
+                                        subkey
+                                    ):
+
+                                        results.append(
+                                            str(
+                                                entry[
+                                                    subkey
+                                                ]
+                                            )
+                                        )
+
+                    elif isinstance(
+                        child,
+                        dict,
+                    ):
+
+                        for subkey in [
+                            "url",
+                            "contentUrl",
+                            "thumbnailUrl",
+                        ]:
+
+                            if child.get(
+                                subkey
+                            ):
+
+                                results.append(
+                                    str(
+                                        child[
+                                            subkey
+                                        ]
+                                    )
+                                )
+
+                walk(child)
+
+        elif isinstance(
+            value,
+            list,
+        ):
+
+            for entry in value:
+                walk(entry)
+
+    for raw in scripts:
+
+        raw = html.unescape(
+            raw
+        ).strip()
+
+        if not raw:
+            continue
+
+        try:
+
+            data = json.loads(
+                raw
+            )
+
+        except Exception:
+
+            continue
+
+        walk(data)
+
+    return results
+
+
+# ============================================================
+# IMAGE URL CLEANING
+# ============================================================
+
+def clean_image_url(
+    value,
+    page_url,
+):
+
+    if not value:
+        return ""
+
+    value = html.unescape(
+        str(value)
+    ).strip()
+
+    value = value.replace(
+        "\\/",
+        "/",
+    )
+
+    if value.startswith("data:"):
+        return ""
+
+    value = absolute_url(
+        value,
+        page_url,
+    )
+
+    if not value:
+        return ""
+
+    if forbidden_image_url(
+        value
+    ):
+        return ""
+
+    return value
+
+
+# ============================================================
+# IMAGE URL EXTRACTION
+# ============================================================
+
+def extract_image_urls_from_html(
+    page_html,
+    page_url,
+):
+
+    candidates = []
+
+    def add(
+        value,
+        priority,
+        reason,
+    ):
+
+        cleaned = clean_image_url(
+            value,
+            page_url,
+        )
+
+        if not cleaned:
+            return
+
+        candidates.append(
+            {
+                "url": cleaned,
+                "priority": priority,
+                "reason": reason,
+            }
+        )
+
+    # --------------------------------------------------------
+    # OpenGraph
+    # --------------------------------------------------------
+
+    og_image = extract_meta_content(
+        page_html,
+        [
+            "og:image",
+            "og:image:url",
+            "og:image:secure_url",
+        ],
+    )
+
+    if og_image:
+        add(
+            og_image,
+            120,
+            "og:image",
+        )
+
+    # --------------------------------------------------------
+    # Twitter
+    # --------------------------------------------------------
+
+    twitter_image = extract_meta_content(
+        page_html,
+        [
+            "twitter:image",
+            "twitter:image:src",
+        ],
+    )
+
+    if twitter_image:
+        add(
+            twitter_image,
+            100,
+            "twitter:image",
+        )
+
+    # --------------------------------------------------------
+    # JSON-LD
+    # --------------------------------------------------------
+
+    jsonld_images = (
+        extract_jsonld_images(
+            page_html
+        )
+    )
+
+    for image in jsonld_images:
+
+        add(
+            image,
+            95,
+            "jsonld",
+        )
+
+    # --------------------------------------------------------
+    # IMG TAGS
+    # --------------------------------------------------------
+
+    img_tags = re.findall(
+        r"<img\b[^>]*>",
+        page_html,
+        flags=re.I | re.S,
+    )
+
+    for tag in img_tags:
+
+        attributes = re.findall(
+            r"([a-zA-Z_:][-a-zA-Z0-9_:.]*)"
+            r"\s*=\s*"
+            r"['\"]"
+            r"([^'\"]*)"
+            r"['\"]",
+            tag,
+            flags=re.I | re.S,
+        )
+
+        attr_map = {}
+
+        for key, value in attributes:
+
+            attr_map[
+                key.lower()
+            ] = html.unescape(
+                value
+            ).strip()
+
+        direct_attributes = [
+            "src",
+            "data-src",
+            "data-lazy-src",
+            "data-original",
+            "data-image",
+            "data-url",
+            "data-fallback-src",
+        ]
+
+        for attr in direct_attributes:
+
+            value = attr_map.get(
+                attr,
+                "",
+            )
+
+            if value:
+                add(
+                    value,
+                    75,
+                    attr,
+                )
+
+        srcset_attributes = [
+            "srcset",
+            "data-srcset",
+            "data-lazy-srcset",
+        ]
+
+        for attr in srcset_attributes:
+
+            value = attr_map.get(
+                attr,
+                "",
+            )
+
+            if not value:
+                continue
+
+            parts = value.split(",")
+
+            for part in parts:
+
+                part = part.strip()
+
+                if not part:
+                    continue
+
+                image_url = part.split()[0]
+
+                add(
+                    image_url,
+                    70,
+                    attr,
+                )
+
+    # --------------------------------------------------------
+    # SOURCE TAGS
+    # --------------------------------------------------------
+
+    source_tags = re.findall(
+        r"<source\b[^>]*>",
+        page_html,
+        flags=re.I | re.S,
+    )
+
+    for tag in source_tags:
+
+        attributes = re.findall(
+            r"([a-zA-Z_:][-a-zA-Z0-9_:.]*)"
+            r"\s*=\s*"
+            r"['\"]"
+            r"([^'\"]*)"
+            r"['\"]",
+            tag,
+            flags=re.I | re.S,
+        )
+
+        attr_map = {}
+
+        for key, value in attributes:
+
+            attr_map[
+                key.lower()
+            ] = html.unescape(
+                value
+            ).strip()
+
+        for attr in [
+            "src",
+            "data-src",
+            "srcset",
+            "data-srcset",
+        ]:
+
+            value = attr_map.get(
+                attr,
+                "",
+            )
+
+            if not value:
+                continue
+
+            for part in value.split(","):
+
+                part = part.strip()
+
+                if not part:
+                    continue
+
+                image_url = part.split()[0]
+
+                add(
+                    image_url,
+                    60,
+                    "source-" + attr,
+                )
+
+    # --------------------------------------------------------
+    # Raw absolute image URLs
+    # --------------------------------------------------------
+
+    raw_urls = re.findall(
+        r"https?://[^\"'<>\s]+",
+        page_html,
+        flags=re.I,
+    )
+
+    for raw_url in raw_urls:
+
+        raw_url = html.unescape(
+            raw_url
+        )
+
+        if forbidden_image_url(
+            raw_url
+        ):
+            continue
+
+        lower = raw_url.lower()
+
+        image_like = False
+
+        extensions = [
+            ".jpg",
+            ".jpeg",
+            ".png",
+            ".webp",
+            ".avif",
+            ".bmp",
+            ".gif",
+        ]
+
+        for extension in extensions:
+
+            if extension in lower:
+
+                image_like = True
+                break
+
+        if not image_like:
+
+            markers = [
+                "/images/",
+                "/image/",
+                "/img/",
+                "/media/",
+                "/uploads/",
+                "/upload/",
+                "/photo/",
+                "/photos/",
+                "/wp-content/",
+                "/featured/",
+            ]
+
+            for marker in markers:
+
+                if marker in lower:
+
+                    image_like = True
+                    break
+
+        if image_like:
+
+            add(
+                raw_url,
+                
