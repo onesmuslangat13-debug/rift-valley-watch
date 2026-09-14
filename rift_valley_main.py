@@ -11,21 +11,6 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter
 # RIFT VALLEY WATCH
 # VIDEO GENERATOR
 # VERSION: RVW_VIDEO_V28_STABLE_MULTI_PHOTO
-#
-# PURPOSE
-# - 1080x1920 vertical news reel
-# - Real article photographs only
-# - Uses multiple genuinely different article photographs
-# - Never presents repeated copies as different photos
-# - Audio-driven scene timing
-# - Professional broadcast-style presentation
-# - Citizen-branded image filenames are rejected
-# - Final MP4 contains narration
-# ============================================================
-
-
-# ============================================================
-# PATHS
 # ============================================================
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -48,11 +33,6 @@ SCENE_VIDEO_DIR = VIDEO_WORK_DIR / "scene_videos"
 
 CONCAT_FILE = VIDEO_WORK_DIR / "concat.txt"
 
-
-# ============================================================
-# VIDEO SETTINGS
-# ============================================================
-
 WIDTH = 1080
 HEIGHT = 1920
 FPS = 30
@@ -64,19 +44,9 @@ VIDEO_CRF = "20"
 VIDEO_PRESET = "medium"
 AUDIO_BITRATE = "160k"
 
-
-# ============================================================
-# IMAGE SETTINGS
-# ============================================================
-
 MIN_IMAGE_WIDTH = 400
 MIN_IMAGE_HEIGHT = 250
 MIN_IMAGE_BYTES = 10000
-
-
-# ============================================================
-# FONT SETTINGS
-# ============================================================
 
 FONT_CANDIDATES_BOLD = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
@@ -87,11 +57,6 @@ FONT_CANDIDATES_REGULAR = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
 ]
-
-
-# ============================================================
-# IMAGE REJECTION TERMS
-# ============================================================
 
 BAD_IMAGE_TERMS = (
     "citizen-tv",
@@ -542,7 +507,6 @@ def resolve_image_paths(story):
 
             candidates.append(path)
 
-    # Also inspect the source directory.
     for pattern in [
         "story_image*.jpg",
         "story_image*.jpeg",
@@ -671,8 +635,6 @@ def prepare_background(
         0.52,
     ]
 
-    # Re-crop slightly for visual variation
-    # without pretending the source photo is different.
     if image.width > 100 and image.height > 100:
         h_bias = horizontal_positions[
             scene_index
@@ -744,7 +706,7 @@ def prepare_background(
 
 
 # ============================================================
-# VISUAL OVERLAY
+# OVERLAY
 # ============================================================
 
 def add_overlay(image):
@@ -758,7 +720,6 @@ def add_overlay(image):
         overlay
     )
 
-    # Top newsroom bar.
     draw.rectangle(
         (
             0,
@@ -774,7 +735,6 @@ def add_overlay(image):
         ),
     )
 
-    # Bottom information panel.
     draw.rectangle(
         (
             0,
@@ -790,7 +750,6 @@ def add_overlay(image):
         ),
     )
 
-    # Breaking-news accent line.
     draw.rectangle(
         (
             0,
@@ -867,7 +826,6 @@ def add_story_graphics(
         False,
     )
 
-    # Main channel identity.
     draw.text(
         (
             55,
@@ -897,7 +855,6 @@ def add_story_graphics(
         ),
     )
 
-    # Headline.
     title_lines = wrap_text(
         draw,
         title,
@@ -937,7 +894,6 @@ def add_story_graphics(
             + 12
         )
 
-    # Source.
     draw.text(
         (
             55,
@@ -952,12 +908,8 @@ def add_story_graphics(
         ),
     )
 
-    # IMPORTANT:
-    # A scene counter is displayed ONLY when there are
-    # genuinely different photographs.
-    #
-    # If there is one photograph, there is NO fake 1/5,
-    # 2/5, 3/5, 4/5, 5/5 counter.
+    # Only show a scene counter when the reel actually
+    # contains different photographs.
     if scene_total > 1:
         counter = (
             f"{scene_index + 1}"
@@ -1032,7 +984,6 @@ def create_scene_image(
         scene_index,
     )
 
-    # Background blur is used only as an edge-safe layer.
     blurred = background.filter(
         ImageFilter.GaussianBlur(
             radius=6
@@ -1168,7 +1119,6 @@ def calculate_scene_durations(
         / float(scene_count)
     )
 
-    # Avoid extremely short scenes.
     if duration < 2.5:
         return [
             total_duration
@@ -1278,7 +1228,7 @@ def write_concat_file(
 
 
 # ============================================================
-# CONCATENATE SCENES
+# CONCATENATE
 # ============================================================
 
 def concatenate_scenes(
@@ -1427,7 +1377,7 @@ def create_final_video(
 
 
 # ============================================================
-# FINAL VIDEO PROBES
+# FFPROBE
 # ============================================================
 
 def probe_video_value(
@@ -1650,10 +1600,6 @@ def main():
 
     clean_work_directories()
 
-    # --------------------------------------------------------
-    # Load story.
-    # --------------------------------------------------------
-
     section(
         "LOADING SELECTED STORY"
     )
@@ -1677,10 +1623,6 @@ def main():
     log(
         f"Title: {story.get('title', '')}"
     )
-
-    # --------------------------------------------------------
-    # Load narration.
-    # --------------------------------------------------------
 
     section(
         "CHECKING NARRATION"
@@ -1715,10 +1657,6 @@ def main():
         f"{narration_duration:.2f} seconds"
     )
 
-    # --------------------------------------------------------
-    # Resolve real photographs.
-    # --------------------------------------------------------
-
     section(
         "RESOLVING REAL ARTICLE PHOTOGRAPHS"
     )
@@ -1751,8 +1689,6 @@ def main():
             "All image candidates were rejected as duplicates."
         )
 
-    log("")
-
     for index, path in enumerate(
         image_paths,
         start=1,
@@ -1761,35 +1697,11 @@ def main():
             f"{index}. {path}"
         )
 
-    # --------------------------------------------------------
-    # Use up to five genuinely distinct photos.
-    # --------------------------------------------------------
-
     selected_images = image_paths[:5]
 
     scene_count = len(
         selected_images
     )
-
-    # IMPORTANT:
-    #
-    # If one photograph is available:
-    #   scene_count = 1
-    #
-    # Therefore the renderer will NOT display:
-    #   1/5
-    #   2/5
-    #   3/5
-    #   4/5
-    #   5/5
-    #
-    # for the same photograph.
-    #
-    # If five different photographs are available:
-    #   scene_count = 5
-    #
-    # and the counter legitimately changes.
-    # --------------------------------------------------------
 
     section(
         "SCENE PLAN"
@@ -1822,10 +1734,6 @@ def main():
         scene_count,
     )
 
-    log(
-        "Scene durations:"
-    )
-
     for index, duration in enumerate(
         durations,
         start=1,
@@ -1834,10 +1742,6 @@ def main():
             f"Scene {index}: "
             f"{duration:.2f} seconds"
         )
-
-    # --------------------------------------------------------
-    # Create scene images and videos.
-    # --------------------------------------------------------
 
     section(
         "CREATING VISUAL SCENES"
@@ -1887,10 +1791,6 @@ def main():
             "No scene videos were generated."
         )
 
-    # --------------------------------------------------------
-    # Concatenate scenes.
-    # --------------------------------------------------------
-
     section(
         "ASSEMBLING SCENES"
     )
@@ -1899,10 +1799,6 @@ def main():
         scene_videos
     )
 
-    # --------------------------------------------------------
-    # Add narration.
-    # --------------------------------------------------------
-
     section(
         "ADDING NARRATION"
     )
@@ -1910,10 +1806,6 @@ def main():
     muxed_video = mux_audio(
         video_only
     )
-
-    # --------------------------------------------------------
-    # Create final MP4.
-    # --------------------------------------------------------
 
     section(
         "CREATING FINAL MP4"
@@ -1927,15 +1819,7 @@ def main():
         f"Final video: {FINAL_VIDEO}"
     )
 
-    # --------------------------------------------------------
-    # Validate final MP4.
-    # --------------------------------------------------------
-
     validate_final_video()
-
-    # --------------------------------------------------------
-    # Final report.
-    # --------------------------------------------------------
 
     section(
         "RIFT VALLEY WATCH GENERATION SUCCESSFUL"
