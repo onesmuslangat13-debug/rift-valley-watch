@@ -5,6 +5,7 @@ import subprocess
 import sys
 import shutil
 import traceback
+import hashlib
 
 import requests
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
@@ -14,10 +15,10 @@ from gtts import gTTS
 # ============================================================
 # RIFT VALLEY WATCH
 # VIDEO GENERATOR
-# VERSION: RVW_VIDEO_V19_STABLE_SHORT_REEL
+# VERSION: RVW_VIDEO_V20_REAL_PHOTO_FILTER
 # ============================================================
 
-VERSION = "RVW_VIDEO_V19_STABLE_SHORT_REEL"
+VERSION = "RVW_VIDEO_V20_REAL_PHOTO_FILTER"
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -45,8 +46,58 @@ MIN_NARRATION_WORDS = 40
 MAX_NARRATION_WORDS = 68
 
 MAX_PHOTOS = 5
+MAX_SCENES = 4
 
 REQUEST_TIMEOUT = 20
+
+MIN_IMAGE_WIDTH = 350
+MIN_IMAGE_HEIGHT = 250
+MIN_IMAGE_AREA = 150000
+
+USER_AGENT = (
+    "Mozilla/5.0 "
+    "(Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 "
+    "(KHTML, like Gecko) "
+    "Chrome/120.0 Safari/537.36"
+)
+
+BAD_IMAGE_TERMS = [
+    "avatar",
+    "default-avatar",
+    "default_avatar",
+    "placeholder",
+    "profile-picture",
+    "profile_picture",
+    "profile-image",
+    "profile_image",
+    "user-image",
+    "user_image",
+    "anonymous",
+    "no-image",
+    "no_image",
+    "noimage",
+    "missing-image",
+    "missing_image",
+    "generic-image",
+    "generic_image",
+    "dummy",
+    "thumbnail-placeholder",
+    "logo",
+    "icon",
+    "favicon",
+    "sprite",
+    "world-cup",
+    "world_cup",
+    "worldcup",
+    "advert",
+    "advertisement",
+    "banner",
+    "loading",
+    "loader",
+    "1x1",
+    "pixel"
+]
 
 
 # ============================================================
@@ -121,6 +172,7 @@ def load_json(path):
     try:
         with path.open("r", encoding="utf-8") as handle:
             return json.load(handle)
+
     except Exception as exc:
         raise RuntimeError(
             f"Could not read {path}: {exc}"
@@ -338,9 +390,7 @@ def build_narration(story, script):
         if total >= MAX_NARRATION_WORDS:
             break
 
-    narration = " ".join(result).strip()
-
-    return narration
+    return " ".join(result).strip()
 
 
 def shorten_narration(text, target_words):
@@ -348,6 +398,7 @@ def shorten_narration(text, target_words):
 
     if not sentences:
         words = text.split()
+
         return " ".join(
             words[:target_words]
         )
@@ -412,7 +463,9 @@ def add_image_value(value, urls):
             "href",
             "image",
             "image_url",
-            "original"
+            "original",
+            "contentUrl",
+            "content_url"
         ]:
             if key in value:
                 add_image_value(
@@ -455,8 +508,36 @@ def collect_image_urls(story):
 
 
 # ============================================================
-# IMAGE DOWNLOAD
+# IMAGE VALIDATION
 # ============================================================
+
+def normalise_url(url):
+    return clean_text(url).lower()
+
+
+def url_looks_bad(url):
+    value = normalise_url(url)
+
+    for term in BAD_IMAGE_TERMS:
+        if term in value:
+            return True
+
+    return False
+
+
+def image_hash(path):
+    try:
+        with Image.open(path) as image:
+            image = image.convert("RGB")
+            image.thumbnail((64, 64))
+
+            return hashlib.md5(
+                image.tobytes()
+            ).hexdigest()
+
+    except Exception:
+        return ""
+
 
 def verify_image(path):
     try:
@@ -469,27 +550,95 @@ def verify_image(path):
         return False
 
 
+def image_is_valid_news_photo(path, url):
+    if not path.exists():
+        return False, "file does not exist"
+
+    if url_looks_bad(url):
+        return False, "URL looks like a placeholder, logo or banner"
+
+    if not verify_image(path):
+        return False, "invalid image file"
+
+    try:
+        with Image.open(path) as image:
+            width, height = image.size
+
+            if width < MIN_IMAGE_WIDTH:
+                return False, f"image too narrow: {width}px"
+
+            if height < MIN_IMAGE_HEIGHT:
+                return False, f"image too short: {height}px"
+
+            if width * height < MIN_IMAGE_AREA:
+                return False, "image area is too small"
+
+            ratio = width / height
+
+            if ratio < 0.55:
+                return False, "portrait profile-style image"
+
+            if ratio > 4.5:
+                return False, "extremely wide banner image"
+
+            if width <= 500 and height <= 500:
+                return False, "small square image"
+
+            if width == height:
+                return False, "square image"
+
+            extrema = image.convert("RGB").getextrema()
+
+            if all(
+                channel_min >= 245 and channel_max >= 245
+                for channel_min, channel_max in extrema
+            ):
+                return False, "blank white image"
+
+            if all(
+                channel_min <= 8 and channel_max <= 12
+                for channel_min, channel_max in extrema
+            ):
+                return False, "blank black image"
+
+    except Exception as exc:
+        return False, f"image inspection failed: {exc}"
+
+    return True, "accepted"
+
+
+# ============================================================
+# IMAGE DOWNLOAD
+# ============================================================
+
 def download_image(url, number):
     log(
-        f"Downloading article photo {number}"
+        f"Checking article photo {number}: {url}"
     )
+
+    if url_looks_bad(url):
+        log(
+            "REJECTED BEFORE DOWNLOAD: "
+            "placeholder, logo, banner or unrelated asset"
+        )
+
+        return None
 
     try:
         response = requests.get(
             url,
             timeout=REQUEST_TIMEOUT,
             headers={
-                "User-Agent": (
-                    "Mozilla/5.0 "
-                    "AppleWebKit/537.36 "
-                    "Chrome/120 Safari/537.36"
-                )
-            }
+                "User-Agent": USER_AGENT,
+                "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
+            },
+            allow_redirects=True
         )
 
         response.raise_for_status()
 
         if not response.content:
+            log("Rejected empty image response")
             return None
 
         path = (
@@ -500,28 +649,46 @@ def download_image(url, number):
         with path.open("wb") as handle:
             handle.write(response.content)
 
-        if not verify_image(path):
+        valid, reason = image_is_valid_news_photo(
+            path,
+            url
+        )
+
+        if not valid:
+            log(
+                f"REJECTED IMAGE {number}: {reason}"
+            )
+
             path.unlink(
                 missing_ok=True
             )
+
             return None
 
-        with Image.open(path) as image:
-            width, height = image.size
+        image_signature = image_hash(path)
 
-            if width < 200 or height < 200:
-                log(
-                    f"Skipping tiny image: "
-                    f"{width}x{height}"
-                )
+        if not image_signature:
+            log(
+                f"REJECTED IMAGE {number}: "
+                "could not create image signature"
+            )
 
-                path.unlink(
-                    missing_ok=True
-                )
+            path.unlink(
+                missing_ok=True
+            )
 
-                return None
+            return None
 
-        return path
+        log(
+            f"ACCEPTED IMAGE {number}: "
+            f"{path.name}"
+        )
+
+        return {
+            "path": path,
+            "url": url,
+            "hash": image_signature
+        }
 
     except Exception as exc:
         log(
@@ -531,10 +698,29 @@ def download_image(url, number):
         return None
 
 
+def clean_old_source_images():
+    for item in SOURCE_DIR.glob("story_image_*.jpg"):
+        try:
+            item.unlink()
+        except Exception:
+            pass
+
+    compatibility = SOURCE_DIR / "story_image.jpg"
+
+    try:
+        compatibility.unlink(
+            missing_ok=True
+        )
+    except Exception:
+        pass
+
+
 def download_story_images(story):
     section(
         "SELECTING REAL ARTICLE PHOTOS"
     )
+
+    clean_old_source_images()
 
     urls = collect_image_urls(story)
 
@@ -549,26 +735,46 @@ def download_story_images(story):
             "explicit article image URLs."
         )
 
-    images = []
+    accepted = []
+    accepted_hashes = set()
 
     for number, url in enumerate(
         urls,
         start=1
     ):
-        path = download_image(
+        result = download_image(
             url,
             number
         )
 
-        if path:
-            images.append(path)
+        if not result:
+            continue
 
-    if not images:
+        signature = result["hash"]
+
+        if signature in accepted_hashes:
+            log(
+                "REJECTED DUPLICATE IMAGE: "
+                f"{result['path'].name}"
+            )
+
+            result["path"].unlink(
+                missing_ok=True
+            )
+
+            continue
+
+        accepted_hashes.add(signature)
+        accepted.append(result)
+
+        if len(accepted) >= MAX_SCENES:
+            break
+
+    if not accepted:
         raise RuntimeError(
             "No genuine article photos could be downloaded."
         )
 
-    # Compatibility file for the existing workflow.
     compatibility = (
         SOURCE_DIR /
         "story_image.jpg"
@@ -576,23 +782,28 @@ def download_story_images(story):
 
     try:
         shutil.copy2(
-            images[0],
+            accepted[0]["path"],
             compatibility
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        log(
+            f"Compatibility image copy failed: {exc}"
+        )
 
     log(
         f"VALID ARTICLE PHOTOS: "
-        f"{len(images)}"
+        f"{len(accepted)}"
     )
 
-    for image in images:
+    for item in accepted:
         log(
-            f"PHOTO: {image.name}"
+            f"PHOTO: {item['path'].name}"
         )
 
-    return images
+    return [
+        item["path"]
+        for item in accepted
+    ]
 
 
 # ============================================================
@@ -606,6 +817,7 @@ def get_font(size, bold=False):
             "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
             "C:/Windows/Fonts/arialbd.ttf"
         ]
+
     else:
         candidates = [
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -622,6 +834,7 @@ def get_font(size, bold=False):
                     str(path),
                     size
                 )
+
             except Exception:
                 pass
 
@@ -692,7 +905,10 @@ def resize_inside(image, width, height):
     )
 
     return image.resize(
-        (new_width, new_height),
+        (
+            new_width,
+            new_height
+        ),
         Image.Resampling.LANCZOS
     )
 
@@ -718,6 +934,7 @@ def wrap_text(text, font, max_width, draw):
 
         if box[2] - box[0] <= max_width:
             current = candidate
+
         else:
             if current:
                 lines.append(current)
@@ -739,8 +956,6 @@ def make_scene_frame(
     with Image.open(image_path) as source:
         source = source.convert("RGB")
 
-        # Full-screen blurred version of the same
-        # genuine article photograph.
         background = resize_cover(
             source,
             WIDTH,
@@ -753,10 +968,12 @@ def make_scene_frame(
 
         canvas = background.copy()
 
-        # Darken background slightly.
         dark = Image.new(
             "RGBA",
-            (WIDTH, HEIGHT),
+            (
+                WIDTH,
+                HEIGHT
+            ),
             (0, 0, 0, 85)
         )
 
@@ -765,7 +982,6 @@ def make_scene_frame(
             dark
         )
 
-        # Main photo remains entirely visible.
         photo = resize_inside(
             source,
             WIDTH - 70,
@@ -822,7 +1038,6 @@ def make_scene_frame(
             canvas
         )
 
-        # Branding bar.
         draw.rectangle(
             (
                 0,
@@ -839,13 +1054,15 @@ def make_scene_frame(
         )
 
         draw.text(
-            (45, 35),
+            (
+                45,
+                35
+            ),
             "RIFT VALLEY WATCH",
             font=brand_font,
             fill=(255, 255, 255)
         )
 
-        # Scene number.
         if scene_total > 1:
             scene_font = get_font(
                 25,
@@ -858,7 +1075,10 @@ def make_scene_frame(
             )
 
             box = draw.textbbox(
-                (0, 0),
+                (
+                    0,
+                    0
+                ),
                 label,
                 font=scene_font
             )
@@ -890,7 +1110,6 @@ def make_scene_frame(
                 fill=(255, 255, 255)
             )
 
-        # Headline panel.
         panel_top = HEIGHT - 470
 
         draw.rounded_rectangle(
@@ -920,7 +1139,10 @@ def make_scene_frame(
 
         for line in lines[:5]:
             draw.text(
-                (58, y),
+                (
+                    58,
+                    y
+                ),
                 line,
                 font=headline_font,
                 fill=(255, 255, 255)
@@ -968,6 +1190,7 @@ def audio_duration(path):
 
     try:
         return float(value)
+
     except Exception:
         raise RuntimeError(
             "Could not determine narration duration."
@@ -1121,8 +1344,10 @@ def clean_work_directory():
         try:
             if item.is_file():
                 item.unlink()
+
             elif item.is_dir():
                 shutil.rmtree(item)
+
         except Exception:
             pass
 
@@ -1137,10 +1362,8 @@ def prepare_scene_frames(
 
     clean_work_directory()
 
-    selected = images[:4]
+    selected = images[:MAX_SCENES]
 
-    # If only one real article image exists,
-    # reuse that same real image.
     if len(selected) == 1:
         selected = [
             selected[0],
@@ -1191,7 +1414,9 @@ def scene_durations(
     number
 ):
     if number <= 1:
-        return [total_duration]
+        return [
+            total_duration
+        ]
 
     base = (
         total_duration /
@@ -1203,8 +1428,6 @@ def scene_durations(
         for _ in range(number)
     ]
 
-    # Small variation without changing
-    # total duration.
     if number >= 3:
         durations[0] += 0.3
         durations[-1] -= 0.3
@@ -1430,6 +1653,7 @@ def final_qc():
         info = json.loads(
             result.stdout
         )
+
     except Exception as exc:
         raise RuntimeError(
             f"Could not parse ffprobe: {exc}"
@@ -1576,10 +1800,6 @@ def main():
         "ffprobe"
     )
 
-    # --------------------------------------------------------
-    # Load story.
-    # --------------------------------------------------------
-
     section(
         "LOADING SELECTED STORY"
     )
@@ -1595,6 +1815,7 @@ def main():
             script = load_json(
                 SCRIPT_FILE
             )
+
         except Exception as exc:
             log(
                 f"Warning: selected_script.json "
@@ -1637,10 +1858,6 @@ def main():
         f"{county or 'Not specified'}"
     )
 
-    # --------------------------------------------------------
-    # Narration.
-    # --------------------------------------------------------
-
     section(
         "PREPARING NARRATION"
     )
@@ -1682,17 +1899,9 @@ def main():
             f"{duration:.2f}s"
         )
 
-    # --------------------------------------------------------
-    # Images.
-    # --------------------------------------------------------
-
     images = download_story_images(
         story
     )
-
-    # --------------------------------------------------------
-    # Frames.
-    # --------------------------------------------------------
 
     frames = prepare_scene_frames(
         images,
@@ -1704,18 +1913,10 @@ def main():
             "No video scenes were created."
         )
 
-    # --------------------------------------------------------
-    # Silent video.
-    # --------------------------------------------------------
-
     silent_video = build_silent_video(
         frames,
         duration
     )
-
-    # --------------------------------------------------------
-    # Final MP4.
-    # --------------------------------------------------------
 
     combine_audio(
         silent_video,
@@ -1723,15 +1924,7 @@ def main():
         duration
     )
 
-    # --------------------------------------------------------
-    # QC.
-    # --------------------------------------------------------
-
     final_qc()
-
-    # --------------------------------------------------------
-    # Success.
-    # --------------------------------------------------------
 
     section(
         "GENERATION COMPLETE"
