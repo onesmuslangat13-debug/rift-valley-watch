@@ -1,29 +1,30 @@
 # ============================================================
 # RIFT VALLEY WATCH
 # MAIN ORCHESTRATOR
-# VERSION: RVW_MAIN_V33_REAL_PHOTO_HANDOFF
+# VERSION: RVW_MAIN_V34_REAL_PHOTO_RECOVERY
 #
 # PURPOSE
 # - Run the real-time news engine
 # - Read data/story.json
-# - Select ONE story for the reel
-# - Use the exact real photographs belonging to that story
+# - Select ONE story
+# - Recover the exact photographs belonging to that story
+# - Normalize valid source images when necessary
 # - Generate narration
+# - Write selected_story.json / selected_script.json
 # - Run the video renderer
 # - Validate the final MP4
 #
 # IMPORTANT
-# - Uses data/selected_story.json
-# - Uses data/selected_script.json
-# - Uses assets/source
-# - Uses assets/video_work
-# - Uses audio
-# - Uses output
+# - Never mixes unrelated source photographs
+# - Rejects Citizen / World Cup / avatar / placeholder visuals
+# - Handles .jpg files containing PNG/WebP/other valid image data
+# - Handles path separator and escaped-path problems
 # ============================================================
 
 from pathlib import Path
+from io import BytesIO
+import hashlib
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -31,8 +32,7 @@ import sys
 import time
 import traceback
 
-import requests
-from PIL import Image
+from PIL import Image, ImageOps
 from gtts import gTTS
 
 
@@ -43,65 +43,41 @@ from gtts import gTTS
 BASE_DIR = Path(__file__).resolve().parent
 
 DATA_DIR = BASE_DIR / "data"
-
 SOURCE_DIR = BASE_DIR / "assets" / "source"
-
 VIDEO_WORK_DIR = BASE_DIR / "assets" / "video_work"
-
 AUDIO_DIR = BASE_DIR / "audio"
-
 OUTPUT_DIR = BASE_DIR / "output"
 
 STORY_FILE = DATA_DIR / "story.json"
-
 SCRIPT_FILE = DATA_DIR / "script.json"
 
-SELECTED_STORY_FILE = (
-    DATA_DIR / "selected_story.json"
-)
+SELECTED_STORY_FILE = DATA_DIR / "selected_story.json"
+SELECTED_SCRIPT_FILE = DATA_DIR / "selected_script.json"
 
-SELECTED_SCRIPT_FILE = (
-    DATA_DIR / "selected_script.json"
-)
+NARRATION_FILE = AUDIO_DIR / "narration.mp3"
 
-NARRATION_FILE = (
-    AUDIO_DIR / "narration.mp3"
-)
+RENDERER_FILE = BASE_DIR / "rift_valley_video_generator.py"
+NEWS_ENGINE = BASE_DIR / "scripts" / "news_engine.py"
 
-RENDERER_FILE = (
-    BASE_DIR / "rift_valley_video_generator.py"
-)
-
-NEWS_ENGINE = (
-    BASE_DIR / "scripts" / "news_engine.py"
-)
-
-FINAL_VIDEO = (
-    OUTPUT_DIR / "rift_valley_watch_reel.mp4"
-)
+FINAL_VIDEO = OUTPUT_DIR / "rift_valley_watch_reel.mp4"
 
 
 # ============================================================
 # SETTINGS
 # ============================================================
 
-MIN_IMAGE_BYTES = 10000
-
+MIN_IMAGE_BYTES = 5000
 MIN_IMAGE_WIDTH = 300
-
 MIN_IMAGE_HEIGHT = 200
 
 MIN_AUDIO_BYTES = 1000
-
 MIN_VIDEO_BYTES = 100000
 
 MAX_IMAGES = 6
 
-REQUEST_TIMEOUT = 30
-
 
 # ============================================================
-# FORBIDDEN TERMS
+# FORBIDDEN STORY TERMS
 # ============================================================
 
 FORBIDDEN_TERMS = [
@@ -110,17 +86,28 @@ FORBIDDEN_TERMS = [
 ]
 
 
+# ============================================================
+# FORBIDDEN VISUAL TERMS
+# ============================================================
+
 FORBIDDEN_VISUAL_TERMS = [
     "citizen",
     "citizen digital",
     "citizen tv",
+    "ctv",
     "world cup",
     "worldcup",
     "avatar",
     "placeholder",
     "default image",
+    "default_image",
     "generic avatar",
     "profile picture",
+    "profile_picture",
+    "dummy",
+    "generic",
+    "logo",
+    "icon",
 ]
 
 
@@ -137,9 +124,6 @@ SUPPORTED_IMAGE_EXTENSIONS = {
 # LOGGING
 # ============================================================
 
-# IMPORTANT:
-# message is optional because the orchestrator intentionally
-# uses log() to create blank separator lines.
 def log(message=""):
     print(
         f"[MAIN] {message}",
@@ -148,49 +132,33 @@ def log(message=""):
 
 
 # ============================================================
-# DIRECTORY SETUP
+# DIRECTORIES
 # ============================================================
 
 def ensure_directories():
-    DATA_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    SOURCE_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    VIDEO_WORK_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    AUDIO_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    OUTPUT_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    for directory in [
+        DATA_DIR,
+        SOURCE_DIR,
+        VIDEO_WORK_DIR,
+        AUDIO_DIR,
+        OUTPUT_DIR,
+    ]:
+        directory.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
 
 
 # ============================================================
-# CLEAN WORKING OUTPUT
+# CLEAN WORKING FILES
 # ============================================================
 
 def clean_working_files():
     log("Cleaning temporary working files...")
 
-    # Do NOT delete source photos here.
-    # The news engine creates them immediately before
-    # selection.
-
+    # Never delete source photographs here.
     if VIDEO_WORK_DIR.exists():
-        for item in VIDEO_WORK_DIR.iterdir():
+        for item in list(VIDEO_WORK_DIR.iterdir()):
             try:
                 if item.is_dir():
                     shutil.rmtree(
@@ -201,43 +169,23 @@ def clean_working_files():
                     item.unlink(
                         missing_ok=True,
                     )
-
             except Exception as exc:
                 log(
-                    f"Could not remove "
-                    f"{item}: {exc}"
+                    f"Could not remove {item}: {exc}"
                 )
 
-    # Remove old narration.
-    try:
-        NARRATION_FILE.unlink(
-            missing_ok=True,
-        )
-    except Exception:
-        pass
-
-    # Remove old selected files.
-    try:
-        SELECTED_STORY_FILE.unlink(
-            missing_ok=True,
-        )
-    except Exception:
-        pass
-
-    try:
-        SELECTED_SCRIPT_FILE.unlink(
-            missing_ok=True,
-        )
-    except Exception:
-        pass
-
-    # Remove previous final video.
-    try:
-        FINAL_VIDEO.unlink(
-            missing_ok=True,
-        )
-    except Exception:
-        pass
+    for file_path in [
+        NARRATION_FILE,
+        SELECTED_STORY_FILE,
+        SELECTED_SCRIPT_FILE,
+        FINAL_VIDEO,
+    ]:
+        try:
+            file_path.unlink(
+                missing_ok=True,
+            )
+        except Exception:
+            pass
 
 
 # ============================================================
@@ -247,14 +195,12 @@ def clean_working_files():
 def load_json(path):
     if not path.exists():
         raise RuntimeError(
-            f"Required JSON file does not exist: "
-            f"{path}"
+            f"Required JSON file does not exist: {path}"
         )
 
     if path.stat().st_size == 0:
         raise RuntimeError(
-            f"Required JSON file is empty: "
-            f"{path}"
+            f"Required JSON file is empty: {path}"
         )
 
     try:
@@ -262,14 +208,11 @@ def load_json(path):
             "r",
             encoding="utf-8",
         ) as handle:
-            return json.load(
-                handle
-            )
+            return json.load(handle)
 
     except Exception as exc:
         raise RuntimeError(
-            f"Could not parse JSON file "
-            f"{path}: {exc}"
+            f"Could not parse JSON file {path}: {exc}"
         )
 
 
@@ -294,9 +237,7 @@ def save_json(path, data):
             indent=2,
         )
 
-    temporary.replace(
-        path
-    )
+    temporary.replace(path)
 
 
 # ============================================================
@@ -307,9 +248,7 @@ def clean_text(value):
     if value is None:
         return ""
 
-    text = str(
-        value
-    )
+    text = str(value)
 
     text = text.replace(
         "\r",
@@ -331,129 +270,274 @@ def clean_text(value):
 
 
 def contains_forbidden_text(text):
-    lowered = clean_text(
-        text
-    ).lower()
+    lowered = clean_text(text).lower()
 
-    for term in FORBIDDEN_TERMS:
-        if term in lowered:
-            return True
-
-    return False
+    return any(
+        term in lowered
+        for term in FORBIDDEN_TERMS
+    )
 
 
 def contains_forbidden_visual_text(text):
-    lowered = clean_text(
-        text
-    ).lower()
+    lowered = clean_text(text).lower()
 
-    for term in FORBIDDEN_VISUAL_TERMS:
-        if term in lowered:
-            return True
+    return any(
+        term in lowered
+        for term in FORBIDDEN_VISUAL_TERMS
+    )
 
-    return False
+
+# ============================================================
+# NORMALIZE IMAGE REFERENCE
+# ============================================================
+
+def normalize_image_reference(value):
+    if value is None:
+        return ""
+
+    if isinstance(value, dict):
+        value = (
+            value.get("local_path")
+            or value.get("local_file")
+            or value.get("path")
+            or value.get("file")
+            or value.get("image_path")
+            or value.get("image")
+            or value.get("photo")
+            or ""
+        )
+
+    if not isinstance(value, str):
+        value = str(value)
+
+    value = value.strip()
+
+    # Some generated JSON/log output has escaped underscores.
+    value = value.replace(
+        r"\_",
+        "_",
+    )
+
+    value = value.replace(
+        "\\",
+        "/",
+    )
+
+    value = value.replace(
+        "\r",
+        "",
+    ).replace(
+        "\n",
+        "",
+    )
+
+    while value.startswith("./"):
+        value = value[2:]
+
+    return value.strip()
 
 
 # ============================================================
 # IMAGE PATH RESOLUTION
 # ============================================================
 
-def resolve_image_path(
-    image_value
-):
-    if not image_value:
-        return None
-
-    if isinstance(
-        image_value,
-        dict,
-    ):
-        image_value = (
-            image_value.get("path")
-            or image_value.get("file")
-            or image_value.get("image")
-            or image_value.get("image_path")
-            or ""
-        )
-
-    image_value = clean_text(
+def resolve_image_path(image_value):
+    cleaned = normalize_image_reference(
         image_value
     )
 
-    if not image_value:
+    if not cleaned:
         return None
 
     # --------------------------------------------------------
-    # Absolute path.
+    # 1. Absolute path
     # --------------------------------------------------------
 
-    candidate = Path(
-        image_value
-    )
+    candidate = Path(cleaned)
 
     if candidate.is_absolute():
         if candidate.exists():
-            return candidate
+            return candidate.resolve()
 
     # --------------------------------------------------------
-    # Normal repository-relative path.
+    # 2. Repository-relative path
     # --------------------------------------------------------
-
-    candidate = (
-        BASE_DIR / image_value
-    )
-
-    if candidate.exists():
-        return candidate
-
-    # --------------------------------------------------------
-    # Handle paths beginning with ./.
-    # --------------------------------------------------------
-
-    cleaned = image_value
-
-    if cleaned.startswith(
-        "./"
-    ):
-        cleaned = cleaned[2:]
 
     candidate = (
         BASE_DIR / cleaned
     )
 
     if candidate.exists():
-        return candidate
+        return candidate.resolve()
 
     # --------------------------------------------------------
-    # Handle assets/source filename only.
+    # 3. Source-relative path
     # --------------------------------------------------------
-
-    filename = Path(
-        cleaned
-    ).name
 
     candidate = (
-        SOURCE_DIR / filename
+        SOURCE_DIR / cleaned
     )
 
     if candidate.exists():
-        return candidate
+        return candidate.resolve()
 
     # --------------------------------------------------------
-    # Search source directory recursively.
+    # 4. Filename only
     # --------------------------------------------------------
 
-    if SOURCE_DIR.exists():
-        matches = list(
-            SOURCE_DIR.rglob(
-                filename
-            )
+    filename = Path(cleaned).name
+
+    if filename:
+        candidate = (
+            SOURCE_DIR / filename
         )
 
-        if matches:
-            return matches[0]
+        if candidate.exists():
+            return candidate.resolve()
+
+    # --------------------------------------------------------
+    # 5. Recursive exact filename search
+    # --------------------------------------------------------
+
+    if SOURCE_DIR.exists() and filename:
+        try:
+            for match in SOURCE_DIR.rglob(filename):
+                if match.is_file():
+                    return match.resolve()
+        except Exception:
+            pass
+
+    # --------------------------------------------------------
+    # 6. Same stem with another extension
+    #
+    # Example:
+    # story_1_image.jpg
+    # actual file:
+    # story_1_image.webp
+    # --------------------------------------------------------
+
+    stem = Path(filename).stem
+
+    if SOURCE_DIR.exists() and stem:
+        try:
+            for match in SOURCE_DIR.rglob("*"):
+                if not match.is_file():
+                    continue
+
+                if match.stem.lower() != stem.lower():
+                    continue
+
+                if match.suffix.lower() not in (
+                    SUPPORTED_IMAGE_EXTENSIONS
+                ):
+                    continue
+
+                return match.resolve()
+
+        except Exception:
+            pass
 
     return None
+
+
+# ============================================================
+# IMAGE NORMALIZATION
+# ============================================================
+
+def normalize_image_file(path):
+    """
+    Opens the actual image bytes.
+
+    If a valid image has been saved with the wrong extension,
+    convert it to a genuine JPEG and replace the original.
+
+    This specifically protects against cases where the news
+    engine saves WebP/PNG bytes into a .jpg filename.
+    """
+
+    if path is None:
+        return None
+
+    path = Path(path)
+
+    if not path.exists():
+        return None
+
+    try:
+        with Image.open(path) as source:
+            width, height = source.size
+
+            if (
+                width < MIN_IMAGE_WIDTH
+                or height < MIN_IMAGE_HEIGHT
+            ):
+                return None
+
+            source.load()
+
+            image = ImageOps.exif_transpose(
+                source
+            ).convert("RGB")
+
+            # Always create a genuine JPEG for renderer stability.
+            temporary = path.with_name(
+                path.name + ".normalized.jpg"
+            )
+
+            image.save(
+                temporary,
+                format="JPEG",
+                quality=92,
+                optimize=True,
+            )
+
+        if (
+            not temporary.exists()
+            or temporary.stat().st_size < MIN_IMAGE_BYTES
+        ):
+            temporary.unlink(
+                missing_ok=True
+            )
+            return None
+
+        # If already a .jpg/.jpeg, replace it.
+        # Otherwise retain original and return normalized JPEG.
+        if path.suffix.lower() in {
+            ".jpg",
+            ".jpeg",
+        }:
+            temporary.replace(path)
+            return path.resolve()
+
+        normalized = path.with_name(
+            path.stem + "_normalized.jpg"
+        )
+
+        if normalized.exists():
+            normalized.unlink(
+                missing_ok=True
+            )
+
+        temporary.replace(normalized)
+
+        return normalized.resolve()
+
+    except Exception as exc:
+        log(
+            f"Image normalization failed for {path}: {exc}"
+        )
+
+        try:
+            temporary = path.with_name(
+                path.name + ".normalized.jpg"
+            )
+            temporary.unlink(
+                missing_ok=True
+            )
+        except Exception:
+            pass
+
+        return None
 
 
 # ============================================================
@@ -461,12 +545,15 @@ def resolve_image_path(
 # ============================================================
 
 def image_is_valid(
-    path
+    path,
+    normalize=False,
 ):
-    try:
-        if path is None:
-            return False
+    if path is None:
+        return False
 
+    path = Path(path)
+
+    try:
         if not path.exists():
             return False
 
@@ -476,24 +563,17 @@ def image_is_valid(
         if path.stat().st_size < MIN_IMAGE_BYTES:
             return False
 
-        suffix = path.suffix.lower()
-
-        if suffix not in SUPPORTED_IMAGE_EXTENSIONS:
-            return False
-
-        # Reject forbidden filename signals.
         if contains_forbidden_visual_text(
             path.name
         ):
             return False
 
         # ----------------------------------------------------
-        # PIL verification.
+        # Direct PIL validation.
+        # This does NOT trust the extension.
         # ----------------------------------------------------
 
-        with Image.open(
-            path
-        ) as image:
+        with Image.open(path) as image:
             width, height = image.size
 
             if width < MIN_IMAGE_WIDTH:
@@ -502,12 +582,22 @@ def image_is_valid(
             if height < MIN_IMAGE_HEIGHT:
                 return False
 
-            # Force image decoding.
             image.load()
 
         return True
 
     except Exception:
+        if normalize:
+            normalized = normalize_image_file(
+                path
+            )
+
+            return (
+                normalized is not None
+                and normalized.exists()
+                and normalized.stat().st_size >= MIN_IMAGE_BYTES
+            )
+
         return False
 
 
@@ -515,92 +605,151 @@ def image_is_valid(
 # IMAGE SIGNATURE
 # ============================================================
 
-def image_signature(
-    path
-):
+def image_signature(path):
     try:
-        import hashlib
+        with Image.open(path) as image:
+            image = ImageOps.exif_transpose(
+                image
+            ).convert("RGB")
 
-        digest = hashlib.sha256()
+            image.thumbnail(
+                (96, 96)
+            )
 
-        with path.open(
-            "rb"
-        ) as handle:
-            while True:
-                chunk = handle.read(
-                    1024 * 1024
-                )
+            digest = hashlib.sha256(
+                image.tobytes()
+            )
 
-                if not chunk:
-                    break
-
-                digest.update(
-                    chunk
-                )
-
-        return digest.hexdigest()
+            return digest.hexdigest()
 
     except Exception:
         return ""
 
 
 # ============================================================
-# COLLECT ONLY THE SELECTED STORY'S PHOTOS
+# STORY IMAGE REFERENCES
 # ============================================================
 
-def collect_story_images(
-    story
-):
-    images = []
+def extract_story_image_values(story):
+    values = []
 
-    seen_paths = set()
-
-    seen_signatures = set()
-
-    # --------------------------------------------------------
-    # PRIMARY SOURCE:
-    # exact "images" list from story.json.
-    # --------------------------------------------------------
-
-    explicit_images = story.get(
+    # Primary list.
+    images = story.get(
         "images",
         [],
     )
 
-    if not isinstance(
-        explicit_images,
+    if isinstance(
+        images,
         list,
     ):
-        explicit_images = [
-            explicit_images
-        ]
+        values.extend(images)
 
-    log(
-        "Explicit images in selected story: "
-        f"{len(explicit_images)}"
+    elif images:
+        values.append(images)
+
+    # Secondary fields.
+    for field in [
+        "image",
+        "image_path",
+        "local_image",
+        "photo",
+        "photo_path",
+    ]:
+        value = story.get(field)
+
+        if value:
+            values.append(value)
+
+    # Remove duplicate textual references while
+    # preserving order.
+    output = []
+    seen = set()
+
+    for value in values:
+        normalized = normalize_image_reference(
+            value
+        )
+
+        if not normalized:
+            continue
+
+        if normalized in seen:
+            continue
+
+        seen.add(normalized)
+        output.append(value)
+
+    return output
+
+
+# ============================================================
+# COLLECT EXACT STORY PHOTOS
+# ============================================================
+
+def collect_story_images(story):
+    values = extract_story_image_values(
+        story
     )
 
-    for image_value in explicit_images:
+    log(
+        f"Explicit story image references: {len(values)}"
+    )
+
+    images = []
+    seen_paths = set()
+    seen_signatures = set()
+
+    for value in values:
+        log(
+            f"IMAGE REFERENCE: {value}"
+        )
+
         path = resolve_image_path(
-            image_value
+            value
         )
 
         if path is None:
             log(
-                f"Image path not found: "
-                f"{image_value}"
+                f"IMAGE NOT RESOLVED: {value}"
             )
-
             continue
 
-        if not image_is_valid(
-            path
-        ):
+        log(
+            f"IMAGE RESOLVED: {path}"
+        )
+
+        # First attempt direct validation.
+        valid = image_is_valid(
+            path,
+            normalize=False,
+        )
+
+        if not valid:
             log(
-                f"Image failed validation: "
-                f"{path}"
+                f"IMAGE REQUIRES NORMALIZATION: {path}"
             )
 
+            normalized = normalize_image_file(
+                path
+            )
+
+            if normalized is None:
+                log(
+                    f"IMAGE NORMALIZATION FAILED: {path}"
+                )
+                continue
+
+            path = normalized
+
+        # Final validation.
+        if not image_is_valid(
+            path,
+            normalize=False,
+        ):
+            log(
+                f"IMAGE FAILED FINAL VALIDATION: {path}"
+            )
             continue
 
         resolved = str(
@@ -618,6 +767,9 @@ def collect_story_images(
             signature
             and signature in seen_signatures
         ):
+            log(
+                f"DUPLICATE PHOTO SKIPPED: {path}"
+            )
             continue
 
         seen_paths.add(
@@ -633,82 +785,15 @@ def collect_story_images(
             path
         )
 
+        log(
+            f"REAL PHOTO ACCEPTED: {path}"
+        )
+
         if len(images) >= MAX_IMAGES:
             break
 
-    # --------------------------------------------------------
-    # SECONDARY FIELDS.
-    # --------------------------------------------------------
-
-    if len(images) < MAX_IMAGES:
-        fallback_fields = [
-            "image",
-            "image_path",
-        ]
-
-        for field in fallback_fields:
-            value = story.get(
-                field
-            )
-
-            if not value:
-                continue
-
-            path = resolve_image_path(
-                value
-            )
-
-            if path is None:
-                continue
-
-            if not image_is_valid(
-                path
-            ):
-                continue
-
-            resolved = str(
-                path.resolve()
-            )
-
-            if resolved in seen_paths:
-                continue
-
-            signature = image_signature(
-                path
-            )
-
-            if (
-                signature
-                and signature in seen_signatures
-            ):
-                continue
-
-            seen_paths.add(
-                resolved
-            )
-
-            if signature:
-                seen_signatures.add(
-                    signature
-                )
-
-            images.append(
-                path
-            )
-
-            if len(images) >= MAX_IMAGES:
-                break
-
-    # --------------------------------------------------------
-    # IMPORTANT:
-    # Do NOT indiscriminately collect every image from
-    # assets/source. That can mix photographs belonging
-    # to different stories.
-    # --------------------------------------------------------
-
     log(
-        f"Validated selected-story photographs: "
-        f"{len(images)}"
+        f"Validated selected-story photographs: {len(images)}"
     )
 
     for index, path in enumerate(
@@ -716,20 +801,17 @@ def collect_story_images(
         start=1,
     ):
         log(
-            f"PHOTO {index}: "
-            f"{path}"
+            f"PHOTO {index}: {path}"
         )
 
     return images
 
 
 # ============================================================
-# STORY QUALITY SCORE
+# STORY SCORE
 # ============================================================
 
-def story_score(
-    story
-):
+def story_score(story):
     title = clean_text(
         story.get("title")
     )
@@ -772,9 +854,9 @@ def story_score(
         "INFRASTRUCTURE": 18,
         "BUSINESS & ECONOMY": 17,
         "AGRICULTURE": 15,
+        "SECURITY": 14,
         "HEALTH": 13,
         "EDUCATION": 13,
-        "SECURITY": 14,
     }
 
     score += category_weights.get(
@@ -800,12 +882,10 @@ def story_score(
 
 
 # ============================================================
-# SELECT STORY
+# SELECT ONE STORY
 # ============================================================
 
-def select_story(
-    story_payload
-):
+def select_story(story_payload):
     if isinstance(
         story_payload,
         dict,
@@ -815,9 +895,9 @@ def select_story(
             [],
         )
 
-        # Some engines may produce a single story object.
-        if not stories and story_payload.get(
-            "title"
+        if (
+            not stories
+            and story_payload.get("title")
         ):
             stories = [
                 story_payload
@@ -839,16 +919,12 @@ def select_story(
         stories = []
 
     log(
-        f"Stories available: "
-        f"{len(stories)}"
+        f"Stories available: {len(stories)}"
     )
 
     candidates = []
 
-    for index, story in enumerate(
-        stories,
-        start=1,
-    ):
+    for story in stories:
         if not isinstance(
             story,
             dict,
@@ -866,10 +942,8 @@ def select_story(
             title
         ):
             log(
-                f"Rejected forbidden story: "
-                f"{title}"
+                f"Rejected forbidden story: {title}"
             )
-
             continue
 
         source = story.get(
@@ -891,10 +965,8 @@ def select_story(
             source_name
         ):
             log(
-                f"Rejected forbidden source: "
-                f"{source_name}"
+                f"Rejected forbidden source: {source_name}"
             )
-
             continue
 
         images = collect_story_images(
@@ -903,15 +975,10 @@ def select_story(
 
         if not images:
             log(
-                f"Rejected story with no "
-                f"validated photographs: "
-                f"{title}"
+                f"Rejected story with no valid photographs: {title}"
             )
-
             continue
 
-        # Create a clean copy so the selected story
-        # contains only the exact valid image paths.
         selected = dict(
             story
         )
@@ -933,15 +1000,8 @@ def select_story(
             selected["images"][0]
         )
 
-        selected["_resolved_images"] = [
-            str(path)
-            for path in images
-        ]
-
-        selected["_score"] = (
-            story_score(
-                selected
-            )
+        selected["_score"] = story_score(
+            selected
         )
 
         candidates.append(
@@ -957,8 +1017,7 @@ def select_story(
 
     if not candidates:
         raise RuntimeError(
-            "No valid real article "
-            "photographs found"
+            "No valid real article photographs found"
         )
 
     candidates.sort(
@@ -970,12 +1029,6 @@ def select_story(
     )
 
     selected = candidates[0]
-
-    # Remove internal fields before writing JSON.
-    selected.pop(
-        "_resolved_images",
-        None,
-    )
 
     selected.pop(
         "_score",
@@ -989,52 +1042,30 @@ def select_story(
 
     log(
         clean_text(
-            selected.get(
-                "title"
-            )
+            selected.get("title")
         )
     )
 
     log(
-        "County: "
-        + clean_text(
-            selected.get(
-                "county"
-            )
-        )
+        f"County: {clean_text(selected.get('county'))}"
     )
 
     log(
-        "Category: "
-        + clean_text(
-            selected.get(
-                "category"
-            )
-        )
+        f"Category: {clean_text(selected.get('category'))}"
     )
 
     log(
-        "Photos: "
-        + str(
-            len(
-                selected.get(
-                    "images",
-                    [],
-                )
-            )
-        )
+        f"Photos: {len(selected.get('images', []))}"
     )
 
     return selected
 
 
 # ============================================================
-# NARRATION TEXT
+# NARRATION
 # ============================================================
 
-def build_narration_text(
-    story
-):
+def build_narration_text(story):
     title = clean_text(
         story.get("title")
     )
@@ -1080,15 +1111,12 @@ def build_narration_text(
 
     if county:
         pieces.append(
-            f"The latest development "
-            f"is from {county}."
+            f"The latest development is from {county}."
         )
 
     if category:
         pieces.append(
-            f"This is a "
-            f"{category.lower()} update "
-            f"from Rift Valley Watch."
+            f"This is a {category.lower()} update from Rift Valley Watch."
         )
 
     if source_name:
@@ -1096,40 +1124,29 @@ def build_narration_text(
             f"Source: {source_name}."
         )
 
-    narration = " ".join(
-        pieces
-    )
-
     narration = clean_text(
-        narration
-    )
-
-    if contains_forbidden_text(
-        narration
-    ):
-        raise RuntimeError(
-            "Selected narration contains "
-            "a forbidden person/topic."
-        )
-
-    return narration
-
-
-# ============================================================
-# GENERATE NARRATION
-# ============================================================
-
-def generate_narration(
-    story
-):
-    narration = build_narration_text(
-        story
+        " ".join(pieces)
     )
 
     if not narration:
         raise RuntimeError(
             "Narration text is empty."
         )
+
+    if contains_forbidden_text(
+        narration
+    ):
+        raise RuntimeError(
+            "Selected narration contains a forbidden person/topic."
+        )
+
+    return narration
+
+
+def generate_narration(story):
+    narration = build_narration_text(
+        story
+    )
 
     log(
         "Generating narration..."
@@ -1143,15 +1160,12 @@ def generate_narration(
         )
 
         tts.save(
-            str(
-                NARRATION_FILE
-            )
+            str(NARRATION_FILE)
         )
 
     except Exception as exc:
         raise RuntimeError(
-            "Text-to-speech generation "
-            f"failed: {exc}"
+            f"Text-to-speech generation failed: {exc}"
         )
 
     if not NARRATION_FILE.exists():
@@ -1159,20 +1173,31 @@ def generate_narration(
             "Narration file was not created."
         )
 
-    if (
-        NARRATION_FILE.stat().st_size
-        < MIN_AUDIO_BYTES
-    ):
+    if NARRATION_FILE.stat().st_size < MIN_AUDIO_BYTES:
         raise RuntimeError(
             "Narration file is too small."
         )
 
     log(
-        "Narration created: "
-        f"{NARRATION_FILE}"
+        f"Narration created: {NARRATION_FILE}"
     )
 
     return narration
+
+
+# ============================================================
+# SELECTED STORY
+# ============================================================
+
+def create_selected_story(story):
+    save_json(
+        SELECTED_STORY_FILE,
+        story,
+    )
+
+    log(
+        f"Selected story written: {SELECTED_STORY_FILE}"
+    )
 
 
 # ============================================================
@@ -1199,27 +1224,22 @@ def create_selected_script(
             "id",
             "",
         ),
-
         "title": story.get(
             "title",
             "",
         ),
-
         "county": story.get(
             "county",
             "",
         ),
-
         "category": story.get(
             "category",
             "",
         ),
-
         "date": story.get(
             "date",
             "",
         ),
-
         "source": {
             "name": source.get(
                 "name",
@@ -1230,15 +1250,12 @@ def create_selected_script(
                 "",
             ),
         },
-
         "narration": narration,
-
         "audio": str(
             NARRATION_FILE.relative_to(
                 BASE_DIR
             )
         ),
-
         "images": story.get(
             "images",
             [],
@@ -1251,28 +1268,7 @@ def create_selected_script(
     )
 
     log(
-        "Selected script written: "
-        f"{SELECTED_SCRIPT_FILE}"
-    )
-
-    return script
-
-
-# ============================================================
-# SELECTED STORY FILE
-# ============================================================
-
-def create_selected_story(
-    story
-):
-    save_json(
-        SELECTED_STORY_FILE,
-        story,
-    )
-
-    log(
-        "Selected story written: "
-        f"{SELECTED_STORY_FILE}"
+        f"Selected script written: {SELECTED_SCRIPT_FILE}"
     )
 
 
@@ -1283,71 +1279,131 @@ def create_selected_story(
 def validate_selected_data():
     log()
     log(
-        "Validating selected story data..."
+        "=" * 72
+    )
+
+    log(
+        "VERIFYING SELECTED REAL STORY IMAGES"
+    )
+
+    log(
+        "=" * 72
     )
 
     selected_story = load_json(
         SELECTED_STORY_FILE
     )
 
-    images = selected_story.get(
-        "images",
-        [],
+    references = extract_story_image_values(
+        selected_story
     )
 
-    if not isinstance(
-        images,
-        list,
-    ):
+    if not references:
         raise RuntimeError(
-            "selected_story.json images "
-            "field is not a list."
-        )
-
-    if not images:
-        raise RuntimeError(
-            "selected_story.json contains "
-            "no images."
+            "selected_story.json contains no image references."
         )
 
     valid = []
 
-    for image in images:
+    seen = set()
+
+    for reference in references:
+        log(
+            f"VERIFY IMAGE REFERENCE: {reference}"
+        )
+
         path = resolve_image_path(
-            image
+            reference
         )
 
         if path is None:
             log(
-                f"Selected image missing: "
-                f"{image}"
+                f"VERIFY IMAGE NOT FOUND: {reference}"
             )
-
             continue
 
         if not image_is_valid(
-            path
+            path,
+            normalize=False,
         ):
             log(
-                f"Selected image invalid: "
-                f"{path}"
+                f"VERIFY IMAGE NORMALIZING: {path}"
             )
 
+            normalized = normalize_image_file(
+                path
+            )
+
+            if normalized is None:
+                log(
+                    f"VERIFY IMAGE FAILED: {path}"
+                )
+                continue
+
+            path = normalized
+
+        if not image_is_valid(
+            path,
+            normalize=False,
+        ):
+            log(
+                f"VERIFY IMAGE INVALID: {path}"
+            )
             continue
+
+        resolved = str(
+            path.resolve()
+        )
+
+        if resolved in seen:
+            continue
+
+        seen.add(
+            resolved
+        )
 
         valid.append(
             path
         )
 
-    if not valid:
-        raise RuntimeError(
-            "No valid real article "
-            "photographs found"
+        log(
+            f"VERIFY IMAGE PASSED: {path}"
         )
 
+        if len(valid) >= MAX_IMAGES:
+            break
+
+    if not valid:
+        raise RuntimeError(
+            "No real story images found."
+        )
+
+    # Rewrite selected story with the actual resolved
+    # repository-relative JPEG paths.
+    selected_story["images"] = [
+        str(
+            path.relative_to(
+                BASE_DIR
+            )
+        )
+        for path in valid
+    ]
+
+    selected_story["image"] = (
+        selected_story["images"][0]
+    )
+
+    selected_story["image_path"] = (
+        selected_story["images"][0]
+    )
+
+    save_json(
+        SELECTED_STORY_FILE,
+        selected_story,
+    )
+
     log(
-        f"Selected story has "
-        f"{len(valid)} valid photograph(s)."
+        f"Real story images found: {len(valid)}"
     )
 
     for index, path in enumerate(
@@ -1355,8 +1411,7 @@ def validate_selected_data():
         start=1,
     ):
         log(
-            f"VALID PHOTO {index}: "
-            f"{path}"
+            f"REAL STORY IMAGE {index}: {path}"
         )
 
     return selected_story, valid
@@ -1369,8 +1424,7 @@ def validate_selected_data():
 def run_news_engine():
     if not NEWS_ENGINE.exists():
         raise RuntimeError(
-            "News engine not found: "
-            f"{NEWS_ENGINE}"
+            f"News engine not found: {NEWS_ENGINE}"
         )
 
     log()
@@ -1379,25 +1433,19 @@ def run_news_engine():
     )
 
     log(
-        "RUNNING REAL-TIME NEWS ENGINE V7"
+        "RUNNING REAL-TIME NEWS ENGINE"
     )
 
     log(
         "=" * 72
     )
 
-    command = [
-        sys.executable,
-        str(
-            NEWS_ENGINE
-        ),
-    ]
-
     result = subprocess.run(
-        command,
-        cwd=str(
-            BASE_DIR
-        ),
+        [
+            sys.executable,
+            str(NEWS_ENGINE),
+        ],
+        cwd=str(BASE_DIR),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -1406,14 +1454,11 @@ def run_news_engine():
         check=False,
     )
 
-    engine_output = (
-        result.stdout
-        or ""
-    )
+    output = result.stdout or ""
 
-    if engine_output:
+    if output:
         print(
-            engine_output,
+            output,
             flush=True,
         )
 
@@ -1422,19 +1467,17 @@ def run_news_engine():
             "News engine failed with "
             f"exit code {result.returncode}.\n\n"
             "FULL NEWS ENGINE OUTPUT:\n"
-            f"{engine_output[-16000:]}"
+            f"{output[-20000:]}"
         )
 
     if not STORY_FILE.exists():
         raise RuntimeError(
-            "News engine completed but "
-            "data/story.json was not created."
+            "News engine completed but data/story.json was not created."
         )
 
     if STORY_FILE.stat().st_size == 0:
         raise RuntimeError(
-            "News engine created an empty "
-            "data/story.json."
+            "News engine created an empty data/story.json."
         )
 
     log(
@@ -1443,14 +1486,13 @@ def run_news_engine():
 
 
 # ============================================================
-# RUN RENDERER
+# RUN VIDEO RENDERER
 # ============================================================
 
 def run_renderer():
     if not RENDERER_FILE.exists():
         raise RuntimeError(
-            "Video renderer not found: "
-            f"{RENDERER_FILE}"
+            f"Video renderer not found: {RENDERER_FILE}"
         )
 
     log()
@@ -1466,18 +1508,12 @@ def run_renderer():
         "=" * 72
     )
 
-    command = [
-        sys.executable,
-        str(
-            RENDERER_FILE
-        ),
-    ]
-
     result = subprocess.run(
-        command,
-        cwd=str(
-            BASE_DIR
-        ),
+        [
+            sys.executable,
+            str(RENDERER_FILE),
+        ],
+        cwd=str(BASE_DIR),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -1486,14 +1522,11 @@ def run_renderer():
         check=False,
     )
 
-    renderer_output = (
-        result.stdout
-        or ""
-    )
+    output = result.stdout or ""
 
-    if renderer_output:
+    if output:
         print(
-            renderer_output,
+            output,
             flush=True,
         )
 
@@ -1502,7 +1535,7 @@ def run_renderer():
             "Video renderer failed with "
             f"exit code {result.returncode}.\n\n"
             "FULL VIDEO RENDERER OUTPUT:\n"
-            f"{renderer_output[-20000:]}"
+            f"{output[-25000:]}"
         )
 
     log(
@@ -1514,34 +1547,28 @@ def run_renderer():
 # FFPROBE
 # ============================================================
 
-def run_ffprobe(
-    path
-):
+def run_ffprobe(path):
     ffprobe = shutil.which(
         "ffprobe"
     )
 
     if not ffprobe:
         log(
-            "ffprobe not found; skipping "
-            "detailed MP4 probe."
+            "ffprobe not found; skipping detailed MP4 probe."
         )
-
         return True
 
-    command = [
-        ffprobe,
-        "-v",
-        "error",
-        "-show_entries",
-        "format=duration,size",
-        "-of",
-        "default=noprint_wrappers=1",
-        str(path),
-    ]
-
     result = subprocess.run(
-        command,
+        [
+            ffprobe,
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration,size",
+            "-of",
+            "default=noprint_wrappers=1",
+            str(path),
+        ],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -1550,20 +1577,15 @@ def run_ffprobe(
         check=False,
     )
 
-    output = (
-        result.stdout
-        or ""
-    )
+    output = result.stdout or ""
 
     if result.returncode != 0:
         log(
             "ffprobe validation failed:"
         )
-
         log(
             output
         )
-
         return False
 
     log(
@@ -1578,7 +1600,7 @@ def run_ffprobe(
 
 
 # ============================================================
-# VALIDATE FINAL VIDEO
+# FINAL VIDEO VALIDATION
 # ============================================================
 
 def validate_final_video():
@@ -1589,15 +1611,13 @@ def validate_final_video():
 
     if not FINAL_VIDEO.exists():
         raise RuntimeError(
-            "Final MP4 was not created: "
-            f"{FINAL_VIDEO}"
+            f"Final MP4 was not created: {FINAL_VIDEO}"
         )
 
     size = FINAL_VIDEO.stat().st_size
 
     log(
-        f"Final MP4 size: "
-        f"{size} bytes"
+        f"Final MP4 size: {size} bytes"
     )
 
     if size < MIN_VIDEO_BYTES:
@@ -1609,8 +1629,7 @@ def validate_final_video():
         FINAL_VIDEO
     ):
         raise RuntimeError(
-            "Final MP4 failed ffprobe "
-            "validation."
+            "Final MP4 failed ffprobe validation."
         )
 
     log(
@@ -1643,8 +1662,7 @@ def print_final_summary(
     )
 
     print(
-        "RIFT VALLEY WATCH GENERATOR "
-        "COMPLETED SUCCESSFULLY"
+        "RIFT VALLEY WATCH GENERATOR COMPLETED SUCCESSFULLY"
     )
 
     print(
@@ -1659,9 +1677,7 @@ def print_final_summary(
 
     print(
         clean_text(
-            story.get(
-                "title"
-            )
+            story.get("title")
         )
     )
 
@@ -1670,27 +1686,21 @@ def print_final_summary(
     print(
         "COUNTY: "
         + clean_text(
-            story.get(
-                "county"
-            )
+            story.get("county")
         )
     )
 
     print(
         "CATEGORY: "
         + clean_text(
-            story.get(
-                "category"
-            )
+            story.get("category")
         )
     )
 
     print(
         "SOURCE: "
         + clean_text(
-            source.get(
-                "name"
-            )
+            source.get("name")
         )
     )
 
@@ -1752,13 +1762,13 @@ def main():
         clean_working_files()
 
         # ----------------------------------------------------
-        # 1. Fetch fresh news + photographs.
+        # 1. Fetch fresh news and photographs.
         # ----------------------------------------------------
 
         run_news_engine()
 
         # ----------------------------------------------------
-        # 2. Load story JSON.
+        # 2. Load story data.
         # ----------------------------------------------------
 
         story_payload = load_json(
@@ -1766,7 +1776,7 @@ def main():
         )
 
         # ----------------------------------------------------
-        # 3. Select one story.
+        # 3. Select ONE story with real photographs.
         # ----------------------------------------------------
 
         selected_story = select_story(
@@ -1782,7 +1792,7 @@ def main():
         )
 
         # ----------------------------------------------------
-        # 5. Write selected story/script.
+        # 5. Write selected files.
         # ----------------------------------------------------
 
         create_selected_story(
@@ -1795,7 +1805,7 @@ def main():
         )
 
         # ----------------------------------------------------
-        # 6. Validate exact selected assets.
+        # 6. Re-resolve and normalize exact selected photos.
         # ----------------------------------------------------
 
         selected_story, images = (
@@ -1803,13 +1813,23 @@ def main():
         )
 
         # ----------------------------------------------------
-        # 7. Render video.
+        # 7. Rebuild selected script so it contains the
+        #    final normalized photo paths.
+        # ----------------------------------------------------
+
+        create_selected_script(
+            selected_story,
+            narration,
+        )
+
+        # ----------------------------------------------------
+        # 8. Render final video.
         # ----------------------------------------------------
 
         run_renderer()
 
         # ----------------------------------------------------
-        # 8. Validate final MP4.
+        # 9. Validate final MP4.
         # ----------------------------------------------------
 
         validate_final_video()
@@ -1825,8 +1845,7 @@ def main():
         )
 
         print(
-            f"Elapsed time: "
-            f"{elapsed:.1f} seconds"
+            f"Elapsed time: {elapsed:.1f} seconds"
         )
 
         return 0
@@ -1834,10 +1853,8 @@ def main():
     except KeyboardInterrupt:
         print()
         print(
-            "RIFT VALLEY WATCH GENERATOR "
-            "INTERRUPTED"
+            "RIFT VALLEY WATCH GENERATOR INTERRUPTED"
         )
-
         return 130
 
     except Exception as exc:
@@ -1847,8 +1864,7 @@ def main():
         )
 
         print(
-            "RIFT VALLEY WATCH "
-            "VIDEO GENERATOR FAILED"
+            "RIFT VALLEY WATCH VIDEO GENERATOR FAILED"
         )
 
         print(
