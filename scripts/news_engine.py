@@ -1,13 +1,11 @@
 from pathlib import Path
-from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
-from urllib.parse import quote_plus, urljoin, urlparse, parse_qs, unquote
-from html import unescape
-import hashlib
 import json
 import re
+import html
+import hashlib
 import shutil
-import xml.etree.ElementTree as ET
+from datetime import datetime, timezone, timedelta
+from urllib.parse import urljoin, urlparse, unquote
 
 import requests
 from PIL import Image
@@ -15,48 +13,99 @@ from PIL import Image
 
 # ============================================================
 # RIFT VALLEY WATCH
-# OFFICIAL PRIMARY NEWS ENGINE V26
+# REAL-TIME OFFICIAL / PRIMARY NEWS ENGINE
+# VERSION: V27_STABLE_OFFICIAL_PHOTOS
 #
 # PURPOSE
-# - Discover fresh official/primary-source developments
-# - Cover the entire Rift Valley
-# - Cover major national developments involving President Ruto
-# - Use official government / institutional sources only
-# - Allow official President William Ruto social accounts
-# - Download REAL photographs from official pages
-# - Reject media publishers
-# - Reject Google/Bing search pages as sources
-# - Reject Gachagua stories
-# - Create:
-#       data/story.json
-#       data/selected_story.json
-#       data/script.json
-#       data/selected_script.json
-#
-# IMPORTANT
-# Google News is used ONLY as a discovery mechanism.
-# Google News is NEVER accepted as the final source.
+# - Official / primary sources only
+# - Rift Valley developments
+# - President William Ruto national activities
+# - Real article / official photographs
+# - Multiple photographs where available
+# - No media publishers
+# - No Google/Bing screenshots
+# - No Gachagua-focused stories
+# - Creates story + script + selected files
 # ============================================================
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 DATA_DIR = BASE_DIR / "data"
-ASSETS_DIR = BASE_DIR / "assets" / "source"
+
+ASSETS_DIR = (
+    BASE_DIR
+    / "assets"
+    / "source"
+)
+
+STORY_FILE = (
+    DATA_DIR
+    / "story.json"
+)
+
+SELECTED_STORY_FILE = (
+    DATA_DIR
+    / "selected_story.json"
+)
+
+SCRIPT_FILE = (
+    DATA_DIR
+    / "script.json"
+)
+
+SELECTED_SCRIPT_FILE = (
+    DATA_DIR
+    / "selected_script.json"
+)
+
+
+# ============================================================
+# SETTINGS
+# ============================================================
 
 TIMEOUT = 25
 
 MAX_ITEMS = 220
-MAX_TEST = 160
+
+MAX_TEST = 140
+
 MAX_PHOTOS = 6
 
 MIN_BYTES = 7000
+
 MIN_WIDTH = 300
+
 MIN_HEIGHT = 200
+
+RECENT_HOURS = 168
+
+
+USER_AGENT = (
+    "Mozilla/5.0 "
+    "(Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 "
+    "(KHTML, like Gecko) "
+    "Chrome/131.0.0.0 "
+    "Safari/537.36"
+)
+
+
+HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+
+session = requests.Session()
+
+session.headers.update(
+    HEADERS
+)
 
 
 # ============================================================
-# RIFT VALLEY COUNTIES
+# RIFT VALLEY COVERAGE
 # ============================================================
 
 COUNTIES = [
@@ -77,587 +126,620 @@ COUNTIES = [
 
 
 # ============================================================
-# BLOCKED STORIES
+# BLOCKED CONTENT
 # ============================================================
 
-BLOCKED_STORIES = [
-    "rigathi gachagua",
+BLOCKED_TERMS = [
     "gachagua",
+    "rigathi",
 ]
 
 
-# ============================================================
-# BLOCKED SOURCE DOMAINS
-#
-# These are deliberately blocked.
-# The project must NOT use media publishers.
-# ============================================================
-
-BLOCKED_SOURCE_DOMAINS = [
+BLOCKED_SOURCE_DOMAINS = {
     "k24tv.co.ke",
-    "k24",
-
     "citizen.digital",
-    "citizentv",
-    "royalmedia",
-
-    "nation.africa",
-    "nationmedia",
-
     "standardmedia.co.ke",
-    "standardmedia",
-
+    "nation.africa",
     "the-star.co.ke",
-    "the-star",
-
     "capitalfm.co.ke",
-    "capitalfm",
-
     "ntvkenya.co.ke",
-    "ntvkenya",
-
-    "kbc.co.ke",
-    "kbc",
-
-    "kenyanews.go.ke",
-    "kna",
-
-    "tuko.co.ke",
-    "tuko",
-
     "kenyans.co.ke",
-
-    "pulse.co.ke",
-
+    "tuko.co.ke",
     "mpasho.co.ke",
-
+    "pulselive.co.ke",
     "people.co.ke",
-    "peopledaily.digital",
+    "thekenyatimes.com",
+    "kbc.co.ke",
+    "kenyanews.go.ke",
 
-    "kenyatimes.co.ke",
-
-    "southriftmedia",
-    "bometnewswire",
-
+    # Search / discovery domains
+    "news.google.com",
     "google.com",
-    "googleusercontent.com",
-
+    "google.co.ke",
     "bing.com",
-]
+}
 
-
-# ============================================================
-# BLOCKED IMAGE TERMS
-# ============================================================
 
 BLOCKED_IMAGE_TERMS = [
-    "k24",
-    "citizen",
-    "ctv",
-
-    "nation.africa",
-    "standardmedia",
-    "the-star.co.ke",
-    "capitalfm",
-    "ntvkenya",
-    "kbc.co.ke",
-
+    "news.google.com",
     "google.com/search",
     "googleusercontent.com",
-    "bing.com",
-
+    "bing.com/images",
     "search-result",
-    "search_result",
     "searchresults",
-
     "screenshot",
-
+    "citizen",
+    "ctv",
+    "k24",
+    "world-cup",
+    "avatar",
     "placeholder",
+    "default-image",
     "no-image",
     "no_image",
-
-    "avatar",
     "favicon",
-    "sprite",
-
-    "logo",
-
-    "advert",
+    "advertisement",
     "adsense",
-
-    "world-cup",
+    "advert",
 ]
 
 
 # ============================================================
-# OFFICIAL NON-GO.KE DOMAINS
+# APPROVED OFFICIAL DOMAINS
 # ============================================================
 
 OFFICIAL_EXTRA_HOSTS = {
     "president.go.ke",
     "statehousekenya.go.ke",
+    "mygov.go.ke",
+    "hudumakenya.go.ke",
 
-    "kenyaforestservice.org",
-    "redcross.or.ke",
-
-    "meteo.go.ke",
-    "ndma.go.ke",
-    "nema.go.ke",
+    "kra.go.ke",
     "kws.go.ke",
+    "nema.go.ke",
+    "kmd.go.ke",
+    "ndma.go.ke",
 
     "kenha.co.ke",
     "kplc.co.ke",
     "epra.go.ke",
+
+    "health.go.ke",
+    "education.go.ke",
+    "interior.go.ke",
+    "transport.go.ke",
+    "roads.go.ke",
 }
 
 
 # ============================================================
-# DISCOVERY SEARCHES
-#
-# Google News is only the discovery layer.
+# SOCIAL SOURCES
 # ============================================================
 
-SEARCHES = [
+SOCIAL_HOSTS = {
+    "x.com",
+    "twitter.com",
+    "facebook.com",
+    "www.facebook.com",
+    "www.x.com",
+    "www.twitter.com",
+}
+
+
+# ============================================================
+# GOOGLE NEWS DISCOVERY QUERIES
+#
+# Google is ONLY used for discovery.
+# Final source MUST be official / primary.
+# ============================================================
+
+GOOGLE_RSS = (
+    "https://news.google.com/rss/search"
+)
+
+
+SEARCH_QUERIES = [
 
     # --------------------------------------------------------
-    # PRESIDENT RUTO / STATE HOUSE
+    # PRESIDENT WILLIAM RUTO
     # --------------------------------------------------------
 
-    'site:president.go.ke "President William Ruto"',
-    'site:president.go.ke "William Ruto" tour Kenya',
-    'site:president.go.ke "William Ruto" visit',
-    'site:president.go.ke "William Ruto" launch',
-    'site:president.go.ke "William Ruto" commission',
-    'site:president.go.ke "William Ruto" development',
-    'site:president.go.ke "President Ruto" September 2026',
-    'site:president.go.ke "State House" September 2026',
+    'site:president.go.ke "William Ruto"',
+
+    'site:president.go.ke "President Ruto"',
+
+    'site:statehousekenya.go.ke "William Ruto"',
+
+    'site:x.com/WilliamsRuto "Ruto"',
+
+    'site:twitter.com/WilliamsRuto "Ruto"',
+
+    'site:facebook.com/WilliamsRuto "Ruto"',
+
 
     # --------------------------------------------------------
-    # PRESIDENT RUTO X
+    # RIFT VALLEY COUNTIES
     # --------------------------------------------------------
 
-    'site:x.com/WilliamsRuto/status "Ruto"',
-    'site:x.com/WilliamsRuto "Kenya"',
-    'site:x.com/WilliamsRuto "tour"',
-    'site:x.com/WilliamsRuto "President Ruto"',
-    'site:x.com/WilliamsRuto "September 2026"',
+    'site:go.ke "Bomet" "2026"',
+
+    'site:go.ke "Kericho" "2026"',
+
+    'site:go.ke "Nakuru" "2026"',
+
+    'site:go.ke "Nandi" "2026"',
+
+    'site:go.ke "Uasin Gishu" "2026"',
+
+    'site:go.ke "Elgeyo-Marakwet" "2026"',
+
+    'site:go.ke "West Pokot" "2026"',
+
+    'site:go.ke "Narok" "2026"',
+
+    'site:go.ke "Trans Nzoia" "2026"',
+
+    'site:go.ke "Samburu" "2026"',
+
+    'site:go.ke "Turkana" "2026"',
+
+    'site:go.ke "Laikipia" "2026"',
+
+    'site:go.ke "Kajiado" "2026"',
+
+    'site:go.ke "Rift Valley" "2026"',
+
 
     # --------------------------------------------------------
-    # PRESIDENT RUTO FACEBOOK
+    # OFFICIAL GOVERNMENT AGENCIES
     # --------------------------------------------------------
 
-    'site:facebook.com/williamsamoeiruto "William Ruto"',
-    'site:facebook.com/williamsamoeiruto Kenya',
-    'site:facebook.com/williamsamoeiruto "President Ruto"',
+    'site:kws.go.ke "Rift Valley"',
 
-    # --------------------------------------------------------
-    # GENERAL OFFICIAL GOVERNMENT
-    # --------------------------------------------------------
+    'site:kmd.go.ke "Rift Valley"',
 
-    'site:go.ke "September 2026" Kenya',
-    'site:go.ke "2026" "county government" project',
-    'site:go.ke "September 2026" government Kenya',
+    'site:ndma.go.ke "Rift Valley"',
 
-    # --------------------------------------------------------
-    # COUNTY SOURCES
-    # --------------------------------------------------------
+    'site:nema.go.ke "Rift Valley"',
 
-    'site:go.ke "2026" "Bomet County"',
-    'site:go.ke "2026" "Kericho County"',
-    'site:go.ke "2026" "Nakuru County"',
-    'site:go.ke "2026" "Nandi County"',
-    'site:go.ke "2026" "Uasin Gishu County"',
-    'site:go.ke "2026" "Elgeyo-Marakwet County"',
-    'site:go.ke "2026" "West Pokot County"',
-    'site:go.ke "2026" "Narok County"',
-    'site:go.ke "2026" "Trans Nzoia County"',
-    'site:go.ke "2026" "Samburu County"',
-    'site:go.ke "2026" "Turkana County"',
-    'site:go.ke "2026" "Laikipia County"',
-    'site:go.ke "2026" "Kajiado County"',
+    'site:kenha.co.ke "Rift Valley"',
 
-    'site:go.ke "September 2026" Bomet',
-    'site:go.ke "September 2026" Kericho',
-    'site:go.ke "September 2026" Nakuru',
-    'site:go.ke "September 2026" Nandi',
-    'site:go.ke "September 2026" "Uasin Gishu"',
-    'site:go.ke "September 2026" Narok',
-    'site:go.ke "September 2026" "Trans Nzoia"',
-    'site:go.ke "September 2026" Samburu',
-    'site:go.ke "September 2026" Turkana',
-    'site:go.ke "September 2026" Laikipia',
-    'site:go.ke "September 2026" Kajiado',
+    'site:health.go.ke "Rift Valley"',
 
-    # --------------------------------------------------------
-    # SECURITY
-    # --------------------------------------------------------
+    'site:interior.go.ke "Rift Valley"',
 
-    'site:police.go.ke Kenya September 2026',
-    'site:dci.go.ke Kenya September 2026',
-    'site:interior.go.ke Kenya September 2026',
-
-    # --------------------------------------------------------
-    # HEALTH
-    # --------------------------------------------------------
-
-    'site:health.go.ke Kenya September 2026',
-
-    # --------------------------------------------------------
-    # ROADS / TRANSPORT
-    # --------------------------------------------------------
-
-    'site:transport.go.ke Kenya September 2026',
-    'site:roads.go.ke Kenya September 2026',
-    'site:kenha.co.ke Kenya September 2026',
-    'site:kenyarevenueauthority.go.ke Kenya September 2026',
-
-    # --------------------------------------------------------
-    # ENERGY
-    # --------------------------------------------------------
-
-    'site:energy.go.ke Kenya September 2026',
-    'site:kplc.co.ke Kenya September 2026',
-    'site:epra.go.ke Kenya September 2026',
-
-    # --------------------------------------------------------
-    # EDUCATION
-    # --------------------------------------------------------
-
-    'site:education.go.ke Kenya September 2026',
-
-    # --------------------------------------------------------
-    # AGRICULTURE
-    # --------------------------------------------------------
-
-    'site:agriculture.go.ke Kenya September 2026',
-    'site:kephis.org Kenya September 2026',
-
-    # --------------------------------------------------------
-    # ENVIRONMENT / WEATHER / DISASTER
-    # --------------------------------------------------------
-
-    'site:environment.go.ke Kenya September 2026',
-    'site:kws.go.ke Kenya September 2026',
-    'site:meteo.go.ke Kenya September 2026',
-    'site:ndma.go.ke Kenya September 2026',
-    'site:nema.go.ke Kenya September 2026',
-    'site:kenyaforestservice.org Kenya September 2026',
-
-    # --------------------------------------------------------
-    # TREASURY / ECONOMY
-    # --------------------------------------------------------
-
-    'site:treasury.go.ke Kenya September 2026',
-
-    # --------------------------------------------------------
-    # WATER
-    # --------------------------------------------------------
-
-    'site:water.go.ke Kenya September 2026',
+    'site:transport.go.ke "Rift Valley"',
 ]
 
 
 # ============================================================
-# REQUEST SESSION
+# LOGGING
 # ============================================================
 
-session = requests.Session()
-
-session.headers.update({
-    "User-Agent": (
-        "Mozilla/5.0 (X11; Linux x86_64) "
-        "AppleWebKit/537.36 "
-        "(KHTML, like Gecko) "
-        "Chrome/140.0 Safari/537.36"
-    ),
-    "Accept-Language": "en-US,en;q=0.9",
-})
+def log(message):
+    print(
+        f"[NEWS ENGINE] {message}",
+        flush=True,
+    )
 
 
 # ============================================================
-# TEXT HELPERS
+# FILE CLEANING
 # ============================================================
 
-def clean_text(value):
-    value = unescape(str(value or ""))
+def clean_directory(path):
+
+    path.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    for item in path.iterdir():
+
+        try:
+
+            if (
+                item.is_file()
+                or item.is_symlink()
+            ):
+                item.unlink()
+
+            elif item.is_dir():
+                shutil.rmtree(item)
+
+        except Exception as exc:
+
+            log(
+                f"Could not clean {item}: {exc}"
+            )
+
+
+# ============================================================
+# URL NORMALIZATION
+# ============================================================
+
+def normalize_url(url):
+
+    if not url:
+        return ""
+
+    url = html.unescape(
+        str(url)
+    ).strip()
+
+    url = url.replace(
+        "\\/",
+        "/",
+    )
+
+    url = url.replace(
+        "\\u0026",
+        "&",
+    )
+
+    url = unquote(
+        url
+    )
+
+    if url.startswith("//"):
+        url = "https:" + url
+
+    if not re.match(
+        r"^https?://",
+        url,
+        re.I,
+    ):
+        return ""
+
+    return url
+
+
+# ============================================================
+# HOST
+# ============================================================
+
+def host_of(url):
+
+    try:
+
+        return (
+            urlparse(
+                normalize_url(url)
+            )
+            .netloc
+            .lower()
+            .split(":")[0]
+        )
+
+    except Exception:
+        return ""
+
+
+# ============================================================
+# DOMAIN MATCH
+# ============================================================
+
+def domain_matches(
+    host,
+    domain,
+):
+
+    host = (
+        host
+        or ""
+    ).lower().strip(".")
+
+    domain = (
+        domain
+        or ""
+    ).lower().strip(".")
+
+    return (
+        host == domain
+        or host.endswith(
+            "." + domain
+        )
+    )
+
+
+# ============================================================
+# BLOCKED DOMAIN
+# ============================================================
+
+def is_blocked_domain(url):
+
+    host = host_of(
+        url
+    )
+
+    if not host:
+        return True
+
+    for domain in BLOCKED_SOURCE_DOMAINS:
+
+        if domain_matches(
+            host,
+            domain,
+        ):
+            return True
+
+    return False
+
+
+# ============================================================
+# OFFICIAL GOVERNMENT HOST
+# ============================================================
+
+def is_official_government_host(
+    url
+):
+
+    host = host_of(
+        url
+    )
+
+    if not host:
+        return False
+
+    if is_blocked_domain(
+        url
+    ):
+        return False
+
+    # Kenyan government domains.
+    if host.endswith(
+        ".go.ke"
+    ):
+        return True
+
+    # Approved official organizations.
+    for domain in OFFICIAL_EXTRA_HOSTS:
+
+        if domain_matches(
+            host,
+            domain,
+        ):
+            return True
+
+    return False
+
+
+# ============================================================
+# OFFICIAL SOCIAL
+# ============================================================
+
+def is_official_social_url(
+    url
+):
+
+    url = normalize_url(
+        url
+    )
+
+    parsed = urlparse(
+        url
+    )
+
+    host = (
+        parsed.netloc
+        .lower()
+        .split(":")[0]
+    )
+
+    path = (
+        parsed.path
+        .lower()
+    )
+
+    if host not in SOCIAL_HOSTS:
+        return False
+
+    if (
+        "williamsruto"
+        in path
+    ):
+        return True
+
+    if (
+        "statehousekenya"
+        in path
+    ):
+        return True
+
+    return False
+
+
+# ============================================================
+# ALLOWED PRIMARY URL
+# ============================================================
+
+def is_allowed_primary_url(
+    url
+):
+
+    url = normalize_url(
+        url
+    )
+
+    if not url:
+        return False
+
+    if is_blocked_domain(
+        url
+    ):
+        return False
+
+    return (
+        is_official_government_host(
+            url
+        )
+        or is_official_social_url(
+            url
+        )
+    )
+
+
+# ============================================================
+# BLOCKED STORY TERMS
+# ============================================================
+
+def contains_blocked_term(
+    text
+):
+
+    value = str(
+        text or ""
+    ).lower()
+
+    return any(
+        term in value
+        for term in BLOCKED_TERMS
+    )
+
+
+# ============================================================
+# TITLE CLEANING
+# ============================================================
+
+def clean_title(
+    title
+):
+
+    title = html.unescape(
+        str(
+            title or ""
+        )
+    )
+
+    title = re.sub(
+        r"\s+",
+        " ",
+        title,
+    ).strip()
+
+    title = re.sub(
+        r"\s+-\s+"
+        r"(K24|Citizen TV|Citizen Digital|"
+        r"Nation|The Star|Standard Media|"
+        r"People Daily|KBC|NTV Kenya)"
+        r"\s*$",
+        "",
+        title,
+        flags=re.I,
+    )
+
+    return title.strip()
+
+
+# ============================================================
+# TITLE KEY
+# ============================================================
+
+def title_key(
+    title
+):
+
+    value = clean_title(
+        title
+    ).lower()
 
     value = re.sub(
-        r"<[^>]+>",
+        r"[^a-z0-9\s]",
         " ",
-        value
+        value,
     )
 
     value = re.sub(
         r"\s+",
         " ",
-        value
+        value,
     )
 
     return value.strip()
 
 
 # ============================================================
-# URL HELPERS
+# HASH
 # ============================================================
 
-def host_of(url):
-    try:
-        return (
-            urlparse(url)
-            .hostname
-            or ""
-        ).lower().lstrip("www.")
-    except Exception:
-        return ""
+def hash_text(
+    text
+):
 
-
-def domain_matches(host, domain):
-    return (
-        host == domain
-        or host.endswith("." + domain)
-    )
-
-
-def is_blocked_domain(url):
-    host = host_of(url)
-
-    if not host:
-        return True
-
-    for item in BLOCKED_SOURCE_DOMAINS:
-
-        item = item.lower().lstrip("www.")
-
-        if item in host:
-            return True
-
-    return False
+    return hashlib.sha256(
+        str(text).encode(
+            "utf-8",
+            errors="ignore",
+        )
+    ).hexdigest()[:16]
 
 
 # ============================================================
-# OFFICIAL GOVERNMENT HOST CHECK
+# COUNTY
 # ============================================================
 
-def is_official_government_host(url):
+def detect_county(
+    text
+):
 
-    host = host_of(url)
-
-    if not host:
-        return False
-
-    if is_blocked_domain(url):
-        return False
-
-    # Kenya government domains.
-    if host.endswith(".go.ke"):
-        return True
-
-    # Selected official institutions.
-    for domain in OFFICIAL_EXTRA_HOSTS:
-
-        if domain_matches(host, domain):
-            return True
-
-    return False
-
-
-# ============================================================
-# PRESIDENT RUTO SOCIAL CHECK
-# ============================================================
-
-def is_official_social_url(url):
-
-    try:
-
-        parsed = urlparse(url)
-
-        host = (
-            parsed.hostname
-            or ""
-        ).lower()
-
-        path = (
-            parsed.path
-            or ""
-        ).lower().rstrip("/")
-
-        # X / Twitter
-        if host in {
-            "x.com",
-            "www.x.com",
-            "twitter.com",
-            "www.twitter.com",
-        }:
-
-            return (
-                path.startswith("/williamsruto")
-                or
-                path.startswith("/williamsamoeiruto")
-                or
-                path.startswith("/presidentruto")
-            )
-
-        # Facebook
-        if host in {
-            "facebook.com",
-            "www.facebook.com",
-            "m.facebook.com",
-        }:
-
-            return (
-                "williamsamoeiruto" in path
-                or
-                "williamsruto" in path
-                or
-                "presidentwilliamruto" in path
-            )
-
-    except Exception:
-        pass
-
-    return False
-
-
-# ============================================================
-# FINAL SOURCE VALIDATION
-# ============================================================
-
-def is_allowed_primary_url(url):
-
-    if not url:
-        return False
-
-    if is_blocked_domain(url):
-        return False
-
-    if is_official_government_host(url):
-        return True
-
-    if is_official_social_url(url):
-        return True
-
-    return False
-
-
-# ============================================================
-# STORY BLOCKING
-# ============================================================
-
-def blocked_story(title, text=""):
-
-    blob = (
-        f"{title} {text}"
+    value = str(
+        text or ""
     ).lower()
 
-    for blocked in BLOCKED_STORIES:
+    for county in COUNTIES:
 
-        if blocked in blob:
-            return True
+        if (
+            county.lower()
+            in value
+        ):
+            return county
 
-    return False
-
-
-# ============================================================
-# IMAGE BLOCKING
-# ============================================================
-
-def blocked_image_url(url):
-
-    value = (
-        unescape(str(url or ""))
-        .lower()
-    )
-
-    if not value.startswith(
-        (
-            "http://",
-            "https://",
-        )
+    if (
+        "rift valley"
+        in value
     ):
-        return True
+        return "Rift Valley"
 
-    for term in BLOCKED_IMAGE_TERMS:
-
-        if term in value:
-            return True
-
-    return False
-
-
-# ============================================================
-# NORMALIZE URL
-# ============================================================
-
-def normalize_url(url, base=None):
-
-    if not url:
-        return ""
-
-    url = unescape(
-        str(url).strip()
-    )
-
-    url = (
-        url
-        .replace("\\/", "/")
-        .replace("\\u003d", "=")
-        .replace("\\u0026", "&")
-    )
-
-    url = re.sub(
-        r"^url\((.*)\)$",
-        r"\1",
-        url,
-        flags=re.I,
-    ).strip("'\" ")
-
-    if base:
-        url = urljoin(
-            base,
-            url
-        )
-
-    return url
+    return ""
 
 
 # ============================================================
 # DATE PARSER
 # ============================================================
 
-def parse_date(value):
+def parse_date(
+    value
+):
 
     if not value:
         return None
 
-    try:
+    value = str(
+        value
+    ).strip()
 
-        dt = parsedate_to_datetime(
-            value
-        )
+    formats = [
 
-        if dt.tzinfo is None:
+        "%a, %d %b %Y %H:%M:%S %z",
 
-            dt = dt.replace(
-                tzinfo=timezone.utc
-            )
+        "%a, %d %b %Y %H:%M:%S GMT",
 
-        return dt.astimezone(
-            timezone.utc
-        )
+        "%a, %d %b %Y %H:%M GMT",
 
-    except Exception:
-        pass
-
-    for fmt in [
         "%Y-%m-%dT%H:%M:%S%z",
-        "%Y-%m-%dT%H:%M:%S.%f%z",
-        "%Y-%m-%d",
-    ]:
+
+        "%Y-%m-%dT%H:%M:%S",
+
+        "%Y-%m-%dT%H:%M",
+
+    ]
+
+    for fmt in formats:
 
         try:
 
             dt = datetime.strptime(
-                value.strip(),
+                value,
                 fmt,
             )
 
@@ -671,291 +753,418 @@ def parse_date(value):
                 timezone.utc
             )
 
-        except Exception:
+        except ValueError:
             continue
 
     return None
 
 
 # ============================================================
-# HTML URL EXTRACTION
+# RECENT CHECK
 # ============================================================
 
-def html_candidates(
-    html,
-    base_url
+def recent(
+    value
 ):
 
-    text = unescape(
-        html or ""
+    dt = parse_date(
+        value
     )
 
-    text = (
-        text
-        .replace("\\u003d", "=")
-        .replace("\\u0026", "&")
-        .replace("\\/", "/")
-    )
+    if not dt:
+        return True
 
-    found = []
-
-    patterns = [
-
-        r'<link[^>]+rel=["\']canonical["\'][^>]+href=["\']([^"\']+)',
-
-        r'<meta[^>]+property=["\']og:url["\'][^>]+content=["\']([^"\']+)',
-
-        r'<meta[^>]+name=["\']twitter:url["\'][^>]+content=["\']([^"\']+)',
-
-        r'<a[^>]+href=["\'](https?://[^"\']+)',
-
-        r'"url"\s*:\s*"([^"]+)"',
-
-        r'"canonical"\s*:\s*"([^"]+)"',
-
-        r'data-url=["\']([^"\']+)',
-
-        r'data-n-au=["\']([^"\']+)',
-
-        r'href=([\'"])(https?://[^\'"]+)\1',
-    ]
-
-    for pattern in patterns:
-
-        for match in re.finditer(
-            pattern,
-            text,
-            flags=re.I,
-        ):
-
-            try:
-                value = match.group(
-                    match.lastindex
-                )
-            except Exception:
-                continue
-
-            value = normalize_url(
-                value,
-                base_url,
-            )
-
-            if value.startswith(
-                (
-                    "http://",
-                    "https://",
-                )
-            ):
-
-                found.append(
-                    value
-                )
-
-    # Raw URLs embedded in JavaScript/JSON.
-    for match in re.finditer(
-        r'https?://[^\s"\'<>\\]+',
-        text,
-        flags=re.I,
-    ):
-
-        value = normalize_url(
-            match.group(0),
-            base_url,
+    cutoff = (
+        datetime.now(
+            timezone.utc
         )
-
-        if value.startswith(
-            (
-                "http://",
-                "https://",
-            )
-        ):
-
-            found.append(
-                value
-            )
-
-    output = []
-    seen = set()
-
-    for url in found:
-
-        url = url.split(
-            "#",
-            1
-        )[0]
-
-        if url not in seen:
-
-            seen.add(url)
-            output.append(url)
-
-    return output
-
-
-# ============================================================
-# RSS SOURCE URL
-# ============================================================
-
-def source_url_from_item(item):
-
-    for key in [
-        "source_url",
-        "source",
-    ]:
-
-        value = item.get(
-            key,
-            "",
+        - timedelta(
+            hours=RECENT_HOURS
         )
-
-        if value:
-            return normalize_url(
-                value
-            )
-
-    return ""
-
-
-# ============================================================
-# GOOGLE NEWS RSS
-# ============================================================
-
-def google_rss(query):
-
-    url = (
-        "https://news.google.com/rss/search?q="
-        +
-        quote_plus(query)
-        +
-        "&hl=en-KE&gl=KE&ceid=KE:en"
     )
+
+    return dt >= cutoff
+
+
+# ============================================================
+# HTTP REQUEST
+# ============================================================
+
+def request_url(
+    url,
+    *,
+    allow_redirects=True,
+    timeout=TIMEOUT,
+):
 
     try:
 
-        response = session.get(
-            url,
-            timeout=TIMEOUT,
+        return session.get(
+            normalize_url(url),
+            timeout=timeout,
+            allow_redirects=allow_redirects,
         )
-
-        response.raise_for_status()
-
-        return response.text
 
     except Exception as exc:
 
-        print(
-            f"RSS ERROR: {exc}"
+        log(
+            f"REQUEST FAILED: {url} | {exc}"
         )
 
-        return ""
+        return None
+
+
+# ============================================================
+# GOOGLE RSS URL
+# ============================================================
+
+def google_feed_url(
+    query
+):
+
+    from urllib.parse import quote_plus
+
+    return (
+        GOOGLE_RSS
+        + "?q="
+        + quote_plus(query)
+        + "&hl=en-KE"
+        + "&gl=KE"
+        + "&ceid=KE:en"
+    )
+
+
+# ============================================================
+# XML CLEANING
+# ============================================================
+
+def strip_xml(
+    text
+):
+
+    text = html.unescape(
+        str(
+            text or ""
+        )
+    )
+
+    text = re.sub(
+        r"<!\[CDATA\[(.*?)\]\]>",
+        r"\1",
+        text,
+        flags=re.S,
+    )
+
+    return text.strip()
 
 
 # ============================================================
 # RSS PARSER
 # ============================================================
 
-def parse_feed(xml_text):
+def parse_rss(
+    xml_text
+):
 
     items = []
 
     if not xml_text:
         return items
 
-    try:
+    matches = re.findall(
+        r"<item\b.*?</item>",
+        xml_text,
+        flags=re.I | re.S,
+    )
 
-        root = ET.fromstring(
-            xml_text
-        )
+    for block in matches:
 
-    except Exception:
+        def field(name):
 
-        return items
-
-    for node in root.findall(
-        ".//item"
-    ):
-
-        def txt(tag):
-
-            child = node.find(
-                tag
+            match = re.search(
+                rf"<{name}\b[^>]*>"
+                r"(.*?)"
+                rf"</{name}>",
+                block,
+                flags=re.I | re.S,
             )
 
-            if child is None:
+            if not match:
                 return ""
 
-            return clean_text(
-                child.text
+            return strip_xml(
+                match.group(1)
             )
 
-        link = txt("link")
-        title = txt("title")
-        description = txt("description")
-        published = txt("pubDate")
-
-        source_node = node.find(
-            "source"
+        title = field(
+            "title"
         )
 
-        source_name = clean_text(
-            source_node.text
-            if source_node is not None
-            else ""
+        link = field(
+            "link"
+        )
+
+        pub_date = field(
+            "pubDate"
+        )
+
+        description = field(
+            "description"
+        )
+
+        source = field(
+            "source"
         )
 
         source_url = ""
 
-        if source_node is not None:
+        source_match = re.search(
+            r"<source\b[^>]*"
+            r"url=[\"']([^\"']+)"
+            r"[\"'][^>]*>",
+            block,
+            flags=re.I,
+        )
+
+        if source_match:
 
             source_url = normalize_url(
-                source_node.attrib.get(
-                    "url",
-                    "",
+                source_match.group(1)
+            )
+
+        image_urls = []
+
+        for match in re.findall(
+            r"(?:url|href)"
+            r"=[\"']"
+            r"([^\"']+"
+            r"\.(?:jpg|jpeg|png|webp)"
+            r"(?:\?[^\"']*)?)"
+            r"[\"']",
+            block,
+            flags=re.I,
+        ):
+
+            image_urls.append(
+                normalize_url(
+                    match
                 )
             )
 
-        if not title or not link:
-            continue
-
-        items.append({
-
-            "title": title,
-
-            "description": description,
-
-            "published": published,
-
-            "source_name": source_name,
-
-            "source_url": source_url,
-
-            "google_url": link,
-        })
+        items.append(
+            {
+                "title": clean_title(
+                    title
+                ),
+                "link": normalize_url(
+                    link
+                ),
+                "pub_date": pub_date,
+                "description": description,
+                "source": source,
+                "source_url": source_url,
+                "rss_images": image_urls,
+            }
+        )
 
     return items
 
 
 # ============================================================
-# GOOGLE NEWS ARTICLE RESOLUTION
+# FETCH RSS
 # ============================================================
 
-def direct_official_candidates_from_google(
-    google_url
+def fetch_feed(
+    query
 ):
+
+    url = google_feed_url(
+        query
+    )
+
+    response = request_url(
+        url
+    )
+
+    if not response:
+        return []
+
+    if response.status_code != 200:
+
+        log(
+            "Google RSS HTTP "
+            f"{response.status_code}: "
+            f"{query}"
+        )
+
+        return []
+
+    return parse_rss(
+        response.text
+    )
+
+
+# ============================================================
+# EXTRACT URLS FROM HTML
+# ============================================================
+
+def extract_urls(
+    text
+):
+
+    if not text:
+        return []
+
+    text = html.unescape(
+        str(text)
+    )
+
+    text = text.replace(
+        "\\/",
+        "/",
+    )
 
     candidates = []
 
-    try:
+    patterns = [
 
-        response = session.get(
-            google_url,
-            timeout=TIMEOUT,
-            allow_redirects=True,
-            headers={
-                "Referer":
-                    "https://news.google.com/"
-            },
+        r'https?://[^\s"\'<>\\]+',
+
+        r'https?%3A%2F%2F'
+        r'[^"\'<>\\ ]+',
+
+    ]
+
+    for pattern in patterns:
+
+        candidates.extend(
+            re.findall(
+                pattern,
+                text,
+                flags=re.I,
+            )
         )
+
+    decoded = unquote(
+        text
+    )
+
+    if decoded != text:
+
+        candidates.extend(
+            re.findall(
+                r'https?://'
+                r'[^\s"\'<>\\]+',
+                decoded,
+                flags=re.I,
+            )
+        )
+
+    cleaned = []
+
+    for candidate in candidates:
+
+        candidate = normalize_url(
+            candidate.rstrip(
+                ".,);]}>"
+            )
+        )
+
+        if candidate:
+            cleaned.append(
+                candidate
+            )
+
+    return list(
+        dict.fromkeys(
+            cleaned
+        )
+    )
+
+
+# ============================================================
+# GOOGLE URL CHECK
+# ============================================================
+
+def is_google_url(
+    url
+):
+
+    host = host_of(
+        url
+    )
+
+    return (
+        domain_matches(
+            host,
+            "news.google.com",
+        )
+        or domain_matches(
+            host,
+            "google.com",
+        )
+        or domain_matches(
+            host,
+            "google.co.ke",
+        )
+    )
+
+
+# ============================================================
+# DIRECT SOURCE FROM RSS SOURCE FIELD
+# ============================================================
+
+def direct_official_from_source(
+    item
+):
+
+    source_url = normalize_url(
+        item.get(
+            "source_url",
+            "",
+        )
+    )
+
+    if is_allowed_primary_url(
+        source_url
+    ):
+        return source_url
+
+    return ""
+
+
+# ============================================================
+# GOOGLE LINK RESOLVER
+# ============================================================
+
+def resolve_google_link(
+    link,
+    title="",
+):
+
+    link = normalize_url(
+        link
+    )
+
+    if not link:
+        return ""
+
+    if is_allowed_primary_url(
+        link
+    ):
+        return link
+
+    if not is_google_url(
+        link
+    ):
+        return ""
+
+    response = request_url(
+        link,
+        allow_redirects=True,
+    )
+
+    if response:
 
         final_url = normalize_url(
             response.url
@@ -964,324 +1173,368 @@ def direct_official_candidates_from_google(
         if is_allowed_primary_url(
             final_url
         ):
+            return final_url
 
-            candidates.append(
-                final_url
-            )
-
-        html = (
+        urls = extract_urls(
             response.text
-            or ""
         )
 
-        for url in html_candidates(
-            html,
-            final_url,
-        ):
+        for candidate in urls:
 
             if is_allowed_primary_url(
-                url
+                candidate
             ):
+                return candidate
 
-                candidates.append(
-                    url
-                )
-
-        # Look directly for official URLs
-        # inside Google HTML.
-        for domain in [
-            "president.go.ke",
-            "statehousekenya.go.ke",
-            ".go.ke",
-            "williamsruto",
-            "williamsamoeiruto",
-        ]:
-
-            if domain not in html.lower():
-                continue
-
-            raw_urls = re.findall(
-                r'https?://[^\s"\'<>\\]+',
-                html,
-                flags=re.I,
-            )
-
-            for raw_url in raw_urls:
-
-                url = normalize_url(
-                    raw_url
-                )
-
-                if is_allowed_primary_url(
-                    url
-                ):
-
-                    candidates.append(
-                        url
-                    )
-
-    except Exception as exc:
-
-        print(
-            f"GOOGLE RESOLVE ERROR: {exc}"
-        )
-
-    # Try query parameters.
-    try:
-
-        query = parse_qs(
-            urlparse(
-                google_url
-            ).query
-        )
-
-        for key in [
-            "url",
-            "u",
-            "q",
-            "target",
-            "dest",
-            "destination",
-        ]:
-
-            for value in query.get(
-                key,
-                [],
-            ):
-
-                value = unquote(
-                    value
-                )
-
-                if is_allowed_primary_url(
-                    value
-                ):
-
-                    candidates.append(
-                        value
-                    )
-
-    except Exception:
-        pass
-
-    return unique_urls(
-        candidates
-    )
-
-
-# ============================================================
-# EXACT TITLE OFFICIAL REDISCOVERY
-# ============================================================
-
-def search_official_by_title(
-    title,
-    source_url=""
-):
-
-    searches = []
-
-    host = host_of(
-        source_url
-    )
-
-    if (
-        host
-        and
-        is_official_government_host(
-            source_url
-        )
-    ):
-
-        searches.append(
-            f'site:{host} "{title}"'
-        )
-
-    elif is_official_social_url(
-        source_url
-    ):
-
-        searches.append(
-            f'"{title}" site:x.com/WilliamsRuto'
-        )
-
-        searches.append(
-            f'"{title}" site:facebook.com/williamsamoeiruto'
-        )
-
-    else:
-
-        searches.append(
-            f'"{title}" site:president.go.ke'
-        )
-
-        searches.append(
-            f'"{title}" site:go.ke'
-        )
-
-    for query in searches[:3]:
-
-        feed = google_rss(
-            query
-        )
-
-        items = parse_feed(
-            feed
-        )
-
-        for item in items:
-
-            candidates = []
-
-            if item.get(
-                "source_url"
-            ):
-
-                candidates.append(
-                    item["source_url"]
-                )
-
-            candidates.extend(
-                direct_official_candidates_from_google(
-                    item["google_url"]
-                )
-            )
-
-            for candidate in candidates:
-
-                if is_allowed_primary_url(
-                    candidate
-                ):
-
-                    return candidate
-
-    return ""
-
-
-# ============================================================
-# RESOLVE ARTICLE
-# ============================================================
-
-def resolve_article(item):
-
-    google_url = item.get(
-        "google_url",
-        ""
-    )
-
-    source_url = source_url_from_item(
-        item
-    )
-
-    candidates = []
-
-    # RSS source can already be official.
-    if is_allowed_primary_url(
-        source_url
-    ):
-
-        candidates.append(
-            source_url
-        )
-
-    # Direct URL if already official.
-    if is_allowed_primary_url(
-        google_url
-    ):
-
-        candidates.append(
-            google_url
-        )
-
-    # Resolve opaque Google RSS article URL.
-    candidates.extend(
-        direct_official_candidates_from_google(
-            google_url
-        )
-    )
-
-    for candidate in unique_urls(
-        candidates
+    # Sometimes the target is encoded
+    # directly inside the RSS link.
+    for candidate in extract_urls(
+        link
     ):
 
         if is_allowed_primary_url(
             candidate
         ):
-
             return candidate
-
-    # Final recovery:
-    # search the exact title against the official domain.
-    recovered = search_official_by_title(
-        item.get(
-            "title",
-            ""
-        ),
-        source_url,
-    )
-
-    if recovered:
-        return recovered
 
     return ""
 
 
 # ============================================================
-# FETCH OFFICIAL PAGE
+# OFFICIAL TITLE REDISCOVERY
 # ============================================================
 
-def fetch_page(url):
+def search_official_by_title(
+    title
+):
 
-    try:
+    title = clean_title(
+        title
+    )
 
-        response = session.get(
-            url,
-            timeout=TIMEOUT,
-            allow_redirects=True,
-            headers={
-                "Referer":
-                    "https://www.google.com/"
-            },
+    if not title:
+        return ""
+
+    query = (
+        '"'
+        + title.replace(
+            '"',
+            "",
+        )
+        + '"'
+    )
+
+    feed = fetch_feed(
+        query
+    )
+
+    for item in feed[:20]:
+
+        direct = direct_official_from_source(
+            item
         )
 
-        response.raise_for_status()
+        if direct:
+            return direct
 
-        final_url = normalize_url(
-            response.url
+        resolved = resolve_google_link(
+            item.get(
+                "link",
+                "",
+            ),
+            item.get(
+                "title",
+                "",
+            ),
         )
 
-        # The final destination must remain official.
-        if not is_allowed_primary_url(
-            final_url
+        if resolved:
+            return resolved
+
+    return ""
+
+
+# ============================================================
+# ARTICLE RESOLUTION
+# ============================================================
+
+def resolve_article(
+    item
+):
+
+    title = clean_title(
+        item.get(
+            "title",
+            "",
+        )
+    )
+
+    direct = direct_official_from_source(
+        item
+    )
+
+    if direct:
+        return direct
+
+    link = normalize_url(
+        item.get(
+            "link",
+            "",
+        )
+    )
+
+    if is_allowed_primary_url(
+        link
+    ):
+        return link
+
+    resolved = resolve_google_link(
+        link,
+        title,
+    )
+
+    if resolved:
+        return resolved
+
+    # Exact-title rediscovery.
+    resolved = search_official_by_title(
+        title
+    )
+
+    if resolved:
+        return resolved
+
+    return ""
+
+
+# ============================================================
+# IMAGE BLOCK FILTER
+# ============================================================
+
+def image_blocked(
+    url
+):
+
+    url = normalize_url(
+        url
+    )
+
+    if not url:
+        return True
+
+    value = url.lower()
+
+    for term in BLOCKED_IMAGE_TERMS:
+
+        if term in value:
+            return True
+
+    image_host = host_of(
+        url
+    )
+
+    for domain in BLOCKED_SOURCE_DOMAINS:
+
+        if domain_matches(
+            image_host,
+            domain,
+        ):
+            return True
+
+    return False
+
+
+# ============================================================
+# META IMAGE EXTRACTION
+# ============================================================
+
+def extract_meta_images(
+    page_url,
+    text
+):
+
+    if not text:
+        return []
+
+    results = []
+
+    patterns = [
+
+        r'<meta[^>]+'
+        r'property=["\']og:image["\']'
+        r'[^>]+content=["\']([^"\']+)',
+
+        r'<meta[^>]+'
+        r'content=["\']([^"\']+)["\']'
+        r'[^>]+property=["\']og:image["\']',
+
+        r'<meta[^>]+'
+        r'name=["\']twitter:image["\']'
+        r'[^>]+content=["\']([^"\']+)',
+
+        r'<meta[^>]+'
+        r'content=["\']([^"\']+)["\']'
+        r'[^>]+name=["\']twitter:image["\']',
+
+        r'<meta[^>]+'
+        r'property=["\']og:image:url["\']'
+        r'[^>]+content=["\']([^"\']+)',
+
+    ]
+
+    for pattern in patterns:
+
+        for value in re.findall(
+            pattern,
+            text,
+            flags=re.I | re.S,
         ):
 
-            print(
-                f"FINAL SOURCE REJECTED: {final_url}"
+            results.append(
+                urljoin(
+                    page_url,
+                    html.unescape(
+                        value
+                    ),
+                )
             )
 
-            return None
+    return results
 
-        return {
 
-            "url": final_url,
+# ============================================================
+# IMG IMAGE EXTRACTION
+# ============================================================
 
-            "html":
-                response.text
-                or "",
+def extract_img_images(
+    page_url,
+    text
+):
 
-            "content_type":
-                response.headers.get(
-                    "content-type",
-                    "",
-                ),
-        }
+    if not text:
+        return []
 
-    except Exception as exc:
+    results = []
 
-        print(
-            f"PAGE ERROR {url}: {exc}"
+    tags = re.findall(
+        r"<img\b[^>]*>",
+        text,
+        flags=re.I | re.S,
+    )
+
+    attributes = [
+        "src",
+        "data-src",
+        "data-original",
+        "data-lazy-src",
+        "data-image",
+        "data-url",
+    ]
+
+    for tag in tags:
+
+        for attr in attributes:
+
+            match = re.search(
+                rf'{attr}\s*=\s*'
+                r'["\']([^"\']+)["\']',
+                tag,
+                flags=re.I,
+            )
+
+            if match:
+
+                results.append(
+                    urljoin(
+                        page_url,
+                        html.unescape(
+                            match.group(1)
+                        ),
+                    )
+                )
+
+        srcset_match = re.search(
+            r'srcset\s*=\s*'
+            r'["\']([^"\']+)["\']',
+            tag,
+            flags=re.I,
         )
 
-        return None
+        if srcset_match:
+
+            parts = (
+                srcset_match.group(
+                    1
+                ).split(",")
+            )
+
+            for part in parts:
+
+                candidate = (
+                    part
+                    .strip()
+                    .split(" ")[0]
+                )
+
+                if candidate:
+
+                    results.append(
+                        urljoin(
+                            page_url,
+                            html.unescape(
+                                candidate
+                            ),
+                        )
+                    )
+
+    return results
+
+
+# ============================================================
+# JSON-LD IMAGE EXTRACTION
+# ============================================================
+
+def extract_json_images(
+    page_url,
+    text
+):
+
+    if not text:
+        return []
+
+    results = []
+
+    matches = re.findall(
+        r'"(?:image|contentUrl|thumbnailUrl)"'
+        r'\s*:\s*"([^"]+)"',
+        text,
+        flags=re.I,
+    )
+
+    for match in matches:
+
+        value = (
+            match
+            .replace(
+                "\\/",
+                "/",
+            )
+            .replace(
+                '\\"',
+                '"',
+            )
+        )
+
+        results.append(
+            urljoin(
+                page_url,
+                html.unescape(
+                    value
+                ),
+            )
+        )
+
+    return results
 
 
 # ============================================================
@@ -1289,223 +1542,102 @@ def fetch_page(url):
 # ============================================================
 
 def image_candidates(
-    html,
-    page_url
+    page_url,
+    page_text,
+    rss_images=None,
 ):
 
-    text = unescape(
-        html or ""
+    results = []
+
+    results.extend(
+        rss_images or []
     )
 
-    text = (
-        text
-        .replace("\\u003d", "=")
-        .replace("\\u0026", "&")
-        .replace("\\/", "/")
-    )
-
-    found = []
-
-    patterns = [
-
-        # OpenGraph
-        r'<meta[^>]+property=["\']og:image(?::secure_url)?["\'][^>]+content=["\']([^"\']+)',
-
-        # Twitter
-        r'<meta[^>]+name=["\']twitter:image(?::src)?["\'][^>]+content=["\']([^"\']+)',
-
-        # Generic image metadata
-        r'<meta[^>]+itemprop=["\']image["\'][^>]+content=["\']([^"\']+)',
-
-        # image_src
-        r'<link[^>]+rel=["\']image_src["\'][^>]+href=["\']([^"\']+)',
-
-        # JSON
-        r'"image"\s*:\s*"([^"]+)"',
-
-        r'"imageUrl"\s*:\s*"([^"]+)"',
-
-        r'"contentUrl"\s*:\s*"([^"]+)"',
-    ]
-
-    for pattern in patterns:
-
-        for match in re.finditer(
-            pattern,
-            text,
-            flags=re.I,
-        ):
-
-            found.append(
-                match.group(1)
-            )
-
-    # IMG tags.
-    img_tags = re.findall(
-        r"<img\b[^>]*>",
-        text,
-        flags=re.I,
-    )
-
-    for tag in img_tags:
-
-        for attr in [
-            "src",
-            "data-src",
-            "data-original",
-            "data-lazy-src",
-            "data-image",
-            "data-lazy",
-            "srcset",
-            "data-srcset",
-        ]:
-
-            match = re.search(
-                rf'{attr}\s*=\s*["\']([^"\']+)["\']',
-                tag,
-                flags=re.I,
-            )
-
-            if not match:
-                continue
-
-            value = match.group(
-                1
-            )
-
-            if attr.endswith(
-                "srcset"
-            ):
-
-                value = (
-                    value
-                    .split(",")[0]
-                    .strip()
-                    .split(" ")[0]
-                )
-
-            found.append(
-                value
-            )
-
-    # JSON-LD image arrays.
-    for match in re.finditer(
-        r'"image"\s*:\s*\[\s*(.*?)\s*\]',
-        text,
-        flags=re.I | re.S,
-    ):
-
-        urls = re.findall(
-            r'"(https?://[^"]+)"',
-            match.group(1),
+    results.extend(
+        extract_meta_images(
+            page_url,
+            page_text,
         )
+    )
 
-        found.extend(
-            urls
+    results.extend(
+        extract_json_images(
+            page_url,
+            page_text,
         )
+    )
 
-    output = []
+    results.extend(
+        extract_img_images(
+            page_url,
+            page_text,
+        )
+    )
+
+    final = []
+
     seen = set()
 
-    for raw in found:
+    for url in results:
 
         url = normalize_url(
-            raw,
-            page_url,
+            url
         )
 
-        if not url.startswith(
-            (
-                "http://",
-                "https://",
-            )
-        ):
+        if not url:
             continue
 
-        if blocked_image_url(
+        if image_blocked(
             url
         ):
             continue
 
-        if url not in seen:
+        key = (
+            url
+            .lower()
+            .split("?")[0]
+        )
 
-            seen.add(url)
+        if key in seen:
+            continue
 
-            output.append(
-                url
-            )
+        seen.add(
+            key
+        )
 
-    return output
+        final.append(
+            url
+        )
+
+    return final
 
 
 # ============================================================
-# IMAGE VALIDATION AGAINST SOURCE
+# IMAGE VALIDATION
 # ============================================================
 
-def image_allowed_for_page(
-    image_url,
-    page_url
+def validate_image(
+    path
 ):
-
-    if blocked_image_url(
-        image_url
-    ):
-
-        return False
-
-    # For President Ruto social posts,
-    # images can legitimately come from
-    # X/Twitter/Facebook CDNs.
-    if is_official_social_url(
-        page_url
-    ):
-
-        image_host = host_of(
-            image_url
-        )
-
-        return (
-            image_host.endswith(
-                "twimg.com"
-            )
-            or
-            image_host.endswith(
-                "twitter.com"
-            )
-            or
-            image_host.endswith(
-                "fbcdn.net"
-            )
-            or
-            image_host.endswith(
-                "facebook.com"
-            )
-            or
-            bool(image_host)
-        )
-
-    return True
-
-
-# ============================================================
-# VALIDATE IMAGE FILE
-# ============================================================
-
-def validate_image(path):
 
     try:
 
         if not path.exists():
             return False
 
-        if path.stat().st_size < MIN_BYTES:
+        if (
+            path.stat().st_size
+            < MIN_BYTES
+        ):
             return False
 
         with Image.open(
             path
         ) as image:
 
-            width, height = image.size
+            width, height = (
+                image.size
+            )
 
             if width < MIN_WIDTH:
                 return False
@@ -1518,8 +1650,59 @@ def validate_image(path):
         return True
 
     except Exception:
-
         return False
+
+
+# ============================================================
+# IMAGE EXTENSION
+# ============================================================
+
+def image_extension(
+    url,
+    content_type=""
+):
+
+    value = (
+        urlparse(
+            normalize_url(url)
+        )
+        .path
+        .lower()
+    )
+
+    if value.endswith(
+        ".png"
+    ):
+        return ".png"
+
+    if value.endswith(
+        ".webp"
+    ):
+        return ".webp"
+
+    if value.endswith(
+        ".gif"
+    ):
+        return ".gif"
+
+    if (
+        value.endswith(".jpeg")
+        or value.endswith(".jpg")
+    ):
+        return ".jpg"
+
+    content_type = (
+        content_type
+        or ""
+    ).lower()
+
+    if "png" in content_type:
+        return ".png"
+
+    if "webp" in content_type:
+        return ".webp"
+
+    return ".jpg"
 
 
 # ============================================================
@@ -1528,21 +1711,28 @@ def validate_image(path):
 
 def download_image(
     url,
-    target
+    target,
 ):
 
     try:
 
         response = session.get(
-            url,
+            normalize_url(url),
             timeout=TIMEOUT,
             stream=True,
             allow_redirects=True,
             headers={
-                "Accept":
-                    "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-                "Referer":
-                    "https://www.google.com/",
+                "Accept": (
+                    "image/avif,"
+                    "image/webp,"
+                    "image/apng,"
+                    "image/svg+xml,"
+                    "image/*,"
+                    "*/*;q=0.8"
+                ),
+                "Referer": (
+                    "https://www.google.com/"
+                ),
             },
         )
 
@@ -1552,14 +1742,1132 @@ def download_image(
         content_type = (
             response.headers.get(
                 "content-type",
-                ""
+                "",
             )
             .lower()
         )
 
+        # Reject HTML pretending to be an image.
+        if (
+            "image" not in content_type
+            and not re.search(
+                r"\.(jpg|jpeg|png|webp)"
+                r"(?:$|\?)",
+                url,
+                flags=re.I,
+            )
+        ):
+            return False
+
         data = response.content
 
-        if len(data) < MIN_BYTES:
+        if (
+            len(data)
+            < MIN_BYTES
+        ):
             return False
 
         target.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        target.write_bytes(
+            data
+        )
+
+        if not validate_image(
+            target
+        ):
+
+            target.unlink(
+                missing_ok=True
+            )
+
+            return False
+
+        return True
+
+    except Exception as exc:
+
+        try:
+
+            target.unlink(
+                missing_ok=True
+            )
+
+        except Exception:
+            pass
+
+        log(
+            f"IMAGE ERROR: {exc}"
+        )
+
+        return False
+
+
+# ============================================================
+# DOWNLOAD MULTIPLE IMAGES
+# ============================================================
+
+def download_images(
+    page_url,
+    candidates,
+    story_id,
+):
+
+    story_dir = (
+        ASSETS_DIR
+        / story_id
+    )
+
+    story_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    photos = []
+
+    seen_hashes = set()
+
+    for index, url in enumerate(
+        candidates
+    ):
+
+        if (
+            len(photos)
+            >= MAX_PHOTOS
+        ):
+            break
+
+        filename_base = (
+            f"photo_{index + 1:02d}"
+        )
+
+        target = (
+            story_dir
+            / (
+                filename_base
+                + image_extension(
+                    url
+                )
+            )
+        )
+
+        if not download_image(
+            url,
+            target,
+        ):
+            continue
+
+        try:
+
+            data_hash = (
+                hashlib.sha256(
+                    target.read_bytes()
+                ).hexdigest()
+            )
+
+            if data_hash in seen_hashes:
+
+                target.unlink(
+                    missing_ok=True
+                )
+
+                continue
+
+            seen_hashes.add(
+                data_hash
+            )
+
+            with Image.open(
+                target
+            ) as image:
+
+                width, height = (
+                    image.size
+                )
+
+            photos.append(
+                {
+                    "path": str(
+                        target.relative_to(
+                            BASE_DIR
+                        )
+                    ).replace(
+                        "\\",
+                        "/",
+                    ),
+                    "url": url,
+                    "width": width,
+                    "height": height,
+                }
+            )
+
+        except Exception:
+
+            target.unlink(
+                missing_ok=True
+            )
+
+    return photos
+
+
+# ============================================================
+# PAGE RELEVANCE
+# ============================================================
+
+def page_relevant(
+    page_text,
+    title,
+):
+
+    if not page_text:
+        return False
+
+    title_words = [
+        word.lower()
+        for word in re.findall(
+            r"[A-Za-z]{4,}",
+            title,
+        )
+    ]
+
+    if not title_words:
+        return True
+
+    lower = page_text.lower()
+
+    matches = sum(
+        1
+        for word in set(
+            title_words
+        )
+        if word in lower
+    )
+
+    return matches >= min(
+        4,
+        max(
+            2,
+            len(
+                set(
+                    title_words
+                )
+            )
+            // 3,
+        ),
+    )
+
+
+# ============================================================
+# FETCH OFFICIAL PAGE
+# ============================================================
+
+def fetch_official_page(
+    url
+):
+
+    response = request_url(
+        url,
+        allow_redirects=True,
+    )
+
+    if not response:
+        return None
+
+    if response.status_code != 200:
+        return None
+
+    final_url = normalize_url(
+        response.url
+    )
+
+    if not is_allowed_primary_url(
+        final_url
+    ):
+        return None
+
+    return response
+
+
+# ============================================================
+# BUILD STORY
+# ============================================================
+
+def build_story(
+    item,
+    official_url,
+    photos,
+):
+
+    title = clean_title(
+        item.get(
+            "title",
+            "",
+        )
+    )
+
+    description = re.sub(
+        r"<[^>]+>",
+        " ",
+        str(
+            item.get(
+                "description",
+                "",
+            )
+        ),
+    )
+
+    description = html.unescape(
+        description
+    )
+
+    description = re.sub(
+        r"\s+",
+        " ",
+        description,
+    ).strip()
+
+    county = detect_county(
+        title
+        + " "
+        + description
+    )
+
+    host = host_of(
+        official_url
+    )
+
+    combined = (
+        title
+        + " "
+        + description
+    ).lower()
+
+    national = (
+        "ruto" in combined
+        or "president" in combined
+        or "state house" in combined
+        or "william ruto" in combined
+    )
+
+    if national:
+
+        story_type = (
+            "National Presidential Activity"
+        )
+
+        region = "Kenya"
+
+    else:
+
+        story_type = (
+            "Rift Valley Development"
+        )
+
+        region = "Rift Valley"
+
+    return {
+        "id": hash_text(
+            title
+            + official_url
+        ),
+
+        "title": title,
+
+        "description": description,
+
+        "source": host,
+
+        "source_url": official_url,
+
+        "publisher": host,
+
+        "county": county,
+
+        "region": region,
+
+        "story_type": story_type,
+
+        "published": item.get(
+            "pub_date",
+            "",
+        ),
+
+        "photos": photos,
+
+        "image_count": len(
+            photos
+        ),
+
+        "real_photos": True,
+
+        "primary_source": True,
+
+        "generated_at": datetime.now(
+            timezone.utc
+        ).isoformat(),
+    }
+
+
+# ============================================================
+# PROCESS ONE ITEM
+# ============================================================
+
+def process_item(
+    item
+):
+
+    title = clean_title(
+        item.get(
+            "title",
+            "",
+        )
+    )
+
+    if not title:
+        return None
+
+    if contains_blocked_term(
+        title
+    ):
+        return None
+
+    if not recent(
+        item.get(
+            "pub_date",
+            "",
+        )
+    ):
+        return None
+
+    official_url = resolve_article(
+        item
+    )
+
+    if not official_url:
+        return None
+
+    if contains_blocked_term(
+        official_url
+    ):
+        return None
+
+    response = fetch_official_page(
+        official_url
+    )
+
+    if not response:
+        return None
+
+    page_url = normalize_url(
+        response.url
+    )
+
+    page_text = response.text
+
+    if not page_relevant(
+        page_text,
+        title,
+    ):
+
+        # Social pages can be difficult
+        # to parse reliably.
+        if not is_official_social_url(
+            page_url
+        ):
+            return None
+
+    candidates = image_candidates(
+        page_url,
+        page_text,
+        item.get(
+            "rss_images",
+            [],
+        ),
+    )
+
+    if not candidates:
+        return None
+
+    story_id = hash_text(
+        title
+        + page_url
+    )
+
+    photos = download_images(
+        page_url,
+        candidates,
+        story_id,
+    )
+
+    if not photos:
+        return None
+
+    return build_story(
+        item,
+        page_url,
+        photos,
+    )
+
+
+# ============================================================
+# STORY SCORE
+# ============================================================
+
+def story_score(
+    story
+):
+
+    score = 0
+
+    title = (
+        story.get(
+            "title",
+            "",
+        )
+        .lower()
+    )
+
+    if story.get(
+        "primary_source"
+    ):
+        score += 50
+
+    score += min(
+        30,
+        story.get(
+            "image_count",
+            0,
+        )
+        * 5,
+    )
+
+    if story.get(
+        "county"
+    ):
+        score += 15
+
+    if (
+        "ruto" in title
+        or "president" in title
+    ):
+        score += 10
+
+    published = parse_date(
+        story.get(
+            "published",
+            "",
+        )
+    )
+
+    if published:
+
+        age_hours = (
+            datetime.now(
+                timezone.utc
+            )
+            - published
+        ).total_seconds() / 3600
+
+        score += max(
+            0,
+            int(
+                24
+                - min(
+                    24,
+                    age_hours,
+                )
+            ),
+        )
+
+    return score
+
+
+# ============================================================
+# STORY SORT KEY
+# ============================================================
+
+def story_sort_key(
+    story
+):
+
+    published = parse_date(
+        story.get(
+            "published",
+            "",
+        )
+    )
+
+    timestamp = (
+        published.timestamp()
+        if published
+        else 0
+    )
+
+    return (
+        story_score(
+            story
+        ),
+        timestamp,
+    )
+
+
+# ============================================================
+# SHORTEN
+# ============================================================
+
+def shorten(
+    text,
+    limit=240,
+):
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        str(
+            text or ""
+        ),
+    ).strip()
+
+    if len(text) <= limit:
+        return text
+
+    return (
+        text[
+            :limit - 1
+        ].rstrip()
+        + "…"
+    )
+
+
+# ============================================================
+# SCRIPT
+# ============================================================
+
+def make_script(
+    story
+):
+
+    title = story.get(
+        "title",
+        "Latest development",
+    )
+
+    description = story.get(
+        "description",
+        "",
+    )
+
+    source = story.get(
+        "source",
+        "official source",
+    )
+
+    county = story.get(
+        "county",
+        "",
+    )
+
+    story_type = story.get(
+        "story_type",
+        "Rift Valley Development",
+    )
+
+    if (
+        story_type
+        == "National Presidential Activity"
+    ):
+
+        opening = (
+            "Rift Valley Watch breaking news. "
+            "President William Ruto is at the "
+            "centre of the latest national "
+            "development."
+        )
+
+    else:
+
+        opening = (
+            "Rift Valley Watch breaking news. "
+            "A major development has emerged "
+            "from the Rift Valley."
+        )
+
+    location_line = ""
+
+    if county:
+
+        location_line = (
+            f"The latest update comes from "
+            f"{county}. "
+        )
+
+    body = shorten(
+        description,
+        360,
+    )
+
+    if not body:
+
+        body = (
+            "Officials have released an "
+            "update on the development."
+        )
+
+    narration = (
+        f"{opening} "
+        f"{location_line}"
+        f"{title}. "
+        f"{body} "
+        f"The information comes from "
+        f"the official source, {source}."
+    )
+
+    return {
+        "title": title,
+        "headline": title,
+        "narration": narration,
+        "source": source,
+        "source_url": story.get(
+            "source_url",
+            "",
+        ),
+        "county": county,
+        "story_type": story_type,
+        "image_count": story.get(
+            "image_count",
+            0,
+        ),
+    }
+
+
+# ============================================================
+# WRITE JSON
+# ============================================================
+
+def write_json(
+    path,
+    data
+):
+
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    path.write_text(
+        json.dumps(
+            data,
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+
+    log("=" * 72)
+
+    log(
+        "RIFT VALLEY WATCH "
+        "OFFICIAL NEWS ENGINE V27"
+    )
+
+    log("=" * 72)
+
+    DATA_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    # Clean previous downloaded
+    # source photographs.
+    clean_directory(
+        ASSETS_DIR
+    )
+
+    all_items = []
+
+    seen_titles = set()
+
+    log(
+        "Running "
+        f"{len(SEARCH_QUERIES)} "
+        "official discovery searches..."
+    )
+
+    # --------------------------------------------------------
+    # DISCOVERY
+    # --------------------------------------------------------
+
+    for query in SEARCH_QUERIES:
+
+        try:
+
+            feed_items = fetch_feed(
+                query
+            )
+
+            for item in feed_items:
+
+                title = clean_title(
+                    item.get(
+                        "title",
+                        "",
+                    )
+                )
+
+                key = title_key(
+                    title
+                )
+
+                if not key:
+                    continue
+
+                if key in seen_titles:
+                    continue
+
+                if contains_blocked_term(
+                    title
+                ):
+                    continue
+
+                seen_titles.add(
+                    key
+                )
+
+                all_items.append(
+                    item
+                )
+
+                if (
+                    len(all_items)
+                    >= MAX_ITEMS
+                ):
+                    break
+
+        except Exception as exc:
+
+            log(
+                f"SEARCH ERROR: {exc}"
+            )
+
+        if (
+            len(all_items)
+            >= MAX_ITEMS
+        ):
+            break
+
+    log(
+        "Discovery items collected: "
+        f"{len(all_items)}"
+    )
+
+    if not all_items:
+
+        raise RuntimeError(
+            "No discovery items were found."
+        )
+
+    # --------------------------------------------------------
+    # NEWEST FIRST
+    # --------------------------------------------------------
+
+    all_items.sort(
+        key=lambda item: (
+            parse_date(
+                item.get(
+                    "pub_date",
+                    "",
+                )
+            )
+            or datetime(
+                1970,
+                1,
+                1,
+                tzinfo=timezone.utc,
+            )
+        ),
+        reverse=True,
+    )
+
+    valid_stories = []
+
+    tested = 0
+
+    official_resolved = 0
+
+    # --------------------------------------------------------
+    # PROCESS ITEMS
+    # --------------------------------------------------------
+
+    for item in all_items:
+
+        if (
+            tested
+            >= MAX_TEST
+        ):
+            break
+
+        tested += 1
+
+        title = clean_title(
+            item.get(
+                "title",
+                "",
+            )
+        )
+
+        log(
+            f"[{tested}/"
+            f"{min(MAX_TEST, len(all_items))}] "
+            f"Testing: {title}"
+        )
+
+        try:
+
+            official_url = resolve_article(
+                item
+            )
+
+            if official_url:
+
+                official_resolved += 1
+
+            story = process_item(
+                item
+            )
+
+            if not story:
+                continue
+
+            duplicate = False
+
+            for existing in valid_stories:
+
+                if (
+                    title_key(
+                        existing.get(
+                            "title",
+                            "",
+                        )
+                    )
+                    ==
+                    title_key(
+                        story.get(
+                            "title",
+                            "",
+                        )
+                    )
+                ):
+
+                    duplicate = True
+
+                    break
+
+            if duplicate:
+                continue
+
+            valid_stories.append(
+                story
+            )
+
+            log(
+                "VALID STORY FOUND: "
+                f"{story['title']} | "
+                f"{story['source']} | "
+                f"{story['image_count']} photos"
+            )
+
+            if (
+                len(valid_stories)
+                >= 8
+            ):
+                break
+
+        except Exception as exc:
+
+            log(
+                f"ITEM ERROR: {exc}"
+            )
+
+    # --------------------------------------------------------
+    # FAILURE DIAGNOSTICS
+    # --------------------------------------------------------
+
+    if not valid_stories:
+
+        log("=" * 72)
+
+        log(
+            "NEWS ENGINE FAILED"
+        )
+
+        log(
+            f"Discovery items: "
+            f"{len(all_items)}"
+        )
+
+        log(
+            f"Items tested: "
+            f"{tested}"
+        )
+
+        log(
+            f"Official URLs resolved: "
+            f"{official_resolved}"
+        )
+
+        log(
+            "No valid official/primary "
+            "story with a real photograph "
+            "was found."
+        )
+
+        log("=" * 72)
+
+        raise RuntimeError(
+            "No valid official primary "
+            "stories with real photographs "
+            "were found."
+        )
+
+    # --------------------------------------------------------
+    # RANK STORIES
+    # --------------------------------------------------------
+
+    valid_stories.sort(
+        key=story_sort_key,
+        reverse=True,
+    )
+
+    selected = valid_stories[0]
+
+    # --------------------------------------------------------
+    # SELECTED STORY LOG
+    # --------------------------------------------------------
+
+    log("=" * 72)
+
+    log(
+        "SELECTED STORY"
+    )
+
+    log("=" * 72)
+
+    log(
+        selected.get(
+            "title",
+            "",
+        )
+    )
+
+    log(
+        "Source: "
+        + selected.get(
+            "source",
+            "",
+        )
+    )
+
+    log(
+        "Photos: "
+        + str(
+            selected.get(
+                "image_count",
+                0,
+            )
+        )
+    )
+
+    log(
+        "URL: "
+        + selected.get(
+            "source_url",
+            "",
+        )
+    )
+
+    log("=" * 72)
+
+    # --------------------------------------------------------
+    # SCRIPT
+    # --------------------------------------------------------
+
+    script = make_script(
+        selected
+    )
+
+    # --------------------------------------------------------
+    # WRITE FILES
+    # --------------------------------------------------------
+
+    write_json(
+        STORY_FILE,
+        valid_stories,
+    )
+
+    write_json(
+        SELECTED_STORY_FILE,
+        selected,
+    )
+
+    write_json(
+        SCRIPT_FILE,
+        [
+            make_script(
+                story
+            )
+            for story in valid_stories
+        ],
+    )
+
+    write_json(
+        SELECTED_SCRIPT_FILE,
+        script,
+    )
+
+    # --------------------------------------------------------
+    # FINAL STATUS
+    # --------------------------------------------------------
+
+    log(
+        f"Wrote {STORY_FILE}"
+    )
+
+    log(
+        f"Wrote {SELECTED_STORY_FILE}"
+    )
+
+    log(
+        f"Wrote {SCRIPT_FILE}"
+    )
+
+    log(
+        f"Wrote {SELECTED_SCRIPT_FILE}"
+    )
+
+    log(
+        "REAL-TIME NEWS ENGINE "
+        "COMPLETED SUCCESSFULLY"
+    )
+
+    return 0
+
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
+
+if __name__ == "__main__":
+
+    raise SystemExit(
+        main()
+    )
