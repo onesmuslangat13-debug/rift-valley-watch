@@ -21,7 +21,6 @@
 # - Uses output
 # ============================================================
 
-
 from pathlib import Path
 import json
 import os
@@ -138,7 +137,10 @@ SUPPORTED_IMAGE_EXTENSIONS = {
 # LOGGING
 # ============================================================
 
-def log(message):
+# IMPORTANT:
+# message is optional because the orchestrator intentionally
+# uses log() to create blank separator lines.
+def log(message=""):
     print(
         f"[MAIN] {message}",
         flush=True,
