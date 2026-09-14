@@ -14,15 +14,29 @@ jobs:
 
     steps:
 
+      # ==========================================================
+      # CHECKOUT
+      # ==========================================================
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+
+      # ==========================================================
+      # PYTHON
+      # ==========================================================
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+
+      # ==========================================================
+      # FFMPEG
+      # ==========================================================
 
       - name: Install FFmpeg
         run: |
@@ -31,8 +45,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ffmpeg
 
+          echo "FFmpeg:"
           ffmpeg -version | head -n 1
+
+          echo "FFprobe:"
           ffprobe -version | head -n 1
+
+
+      # ==========================================================
+      # PYTHON PACKAGES
+      # ==========================================================
 
       - name: Install Python packages
         run: |
@@ -42,113 +64,53 @@ jobs:
 
           python -m pip install \
             requests \
-            feedparser \
-            beautifulsoup4 \
-            gTTS \
             Pillow \
-            moviepy \
-            numpy
+            gTTS
 
-      - name: Test gTTS
+          echo ""
+          echo "Installed packages:"
+          python -m pip show requests Pillow gTTS
+
+
+      # ==========================================================
+      # DIRECTORY PREPARATION
+      # ==========================================================
+
+      - name: Prepare directories
         run: |
           set -e
 
+          mkdir -p data
           mkdir -p audio
+          mkdir -p assets/source
+          mkdir -p assets/video_work
+          mkdir -p output
 
-          python - <<'PY'
-          from pathlib import Path
-          from gtts import gTTS
-
-          output = Path("audio/gtts_test.mp3")
-
-          tts = gTTS(
-              text="Rift Valley Watch narration test.",
-              lang="en",
-              slow=False
-          )
-
-          tts.save(str(output))
-
-          if not output.exists():
-              raise RuntimeError("gTTS test failed.")
-
-          if output.stat().st_size < 1000:
-              raise RuntimeError("gTTS output is too small.")
-
-          print("gTTS TEST SUCCESSFUL")
-          PY
-
-          rm -f audio/gtts_test.mp3
-
-      - name: Inspect repository renderer
-        run: |
-          set -e
-
-          echo "============================================================"
-          echo "ACTUAL RENDERER IN GITHUB RUNNER"
-          echo "============================================================"
-
+          echo "Repository:"
           pwd
 
           echo ""
-          echo "Git commit:"
-          git rev-parse HEAD
+          echo "Directories:"
+          find . -maxdepth 2 -type d | sort
 
-          echo ""
-          echo "Renderer:"
-          ls -lh rift_valley_video_generator.py
 
-          echo ""
-          echo "Renderer line count:"
-          wc -l rift_valley_video_generator.py
-
-          echo ""
-          echo "Renderer first 20 lines:"
-          sed -n '1,20p' rift_valley_video_generator.py
-
-          echo ""
-          echo "Renderer last 20 lines:"
-          tail -n 20 rift_valley_video_generator.py
-
-          echo ""
-          echo "Checking for old broken renderer..."
-
-          if grep -n "y_top = (" rift_valley_video_generator.py; then
-            echo ""
-            echo "============================================================"
-            echo "FATAL ERROR"
-            echo "============================================================"
-            echo ""
-            echo "The OLD BROKEN renderer is still committed to GitHub."
-            echo ""
-            echo "This workflow intentionally stopped before py_compile."
-            echo ""
-            exit 1
-          fi
-
-          echo ""
-          echo "OLD BROKEN y_top CODE NOT FOUND."
-
-          echo ""
-          echo "Checking for fixed-five-scene code..."
-
-          if grep -n "SCENE_COUNT = 5" rift_valley_video_generator.py; then
-            echo ""
-            echo "FATAL ERROR: Old fixed-five-scene renderer detected."
-            exit 1
-          fi
-
-          echo ""
-          echo "OLD FIXED-FIVE-SCENE CODE NOT FOUND."
+      # ==========================================================
+      # CLEAN PREVIOUS GENERATED FILES
+      # ==========================================================
 
       - name: Clean generated files
         run: |
           set -e
 
+          echo "============================================================"
+          echo "CLEANING PREVIOUS GENERATED FILES"
+          echo "============================================================"
+
           rm -f output/rift_valley_watch_reel.mp4
 
           rm -f audio/narration.mp3
           rm -f audio/narration_temp.mp3
+          rm -f audio/gtts_test.mp3
 
           rm -f assets/video_work/narration.mp3
 
@@ -157,15 +119,123 @@ jobs:
           rm -f assets/source/story_image_*.jpeg
           rm -f assets/source/story_image_*.png
           rm -f assets/source/story_image_*.webp
+          rm -f assets/source/story_image_*.avif
 
+          rm -f data/story.json
+          rm -f data/script.json
           rm -f data/selected_story.json
           rm -f data/selected_script.json
 
-          mkdir -p output
+          mkdir -p data
           mkdir -p audio
           mkdir -p assets/source
           mkdir -p assets/video_work
-          mkdir -p data
+          mkdir -p output
+
+          echo ""
+          echo "CLEANUP COMPLETE"
+
+
+      # ==========================================================
+      # VERIFY REQUIRED FILES
+      # ==========================================================
+
+      - name: Verify repository files
+        run: |
+          set -e
+
+          echo "============================================================"
+          echo "VERIFYING REQUIRED REPOSITORY FILES"
+          echo "============================================================"
+
+          if [ ! -f rift_valley_main.py ]; then
+            echo "ERROR: rift_valley_main.py is missing."
+            exit 1
+          fi
+
+          if [ ! -f rift_valley_video_generator.py ]; then
+            echo "ERROR: rift_valley_video_generator.py is missing."
+            exit 1
+          fi
+
+          echo ""
+          echo "Main:"
+          ls -lh rift_valley_main.py
+
+          echo ""
+          echo "Renderer:"
+          ls -lh rift_valley_video_generator.py
+
+          echo ""
+          echo "Required repository files found."
+
+
+      # ==========================================================
+      # VERIFY RENDERER
+      # ==========================================================
+
+      - name: Inspect renderer
+        run: |
+          set -e
+
+          echo "============================================================"
+          echo "INSPECTING RIFT VALLEY WATCH RENDERER"
+          echo "============================================================"
+
+          echo ""
+          echo "Git commit:"
+          git rev-parse HEAD
+
+          echo ""
+          echo "Renderer line count:"
+          wc -l rift_valley_video_generator.py
+
+          echo ""
+          echo "Renderer header:"
+          sed -n '1,25p' rift_valley_video_generator.py
+
+          echo ""
+          echo "Renderer ending:"
+          tail -n 25 rift_valley_video_generator.py
+
+          echo ""
+          echo "Checking for old broken renderer signature..."
+
+          if grep -n "y_top = (" rift_valley_video_generator.py; then
+            echo ""
+            echo "============================================================"
+            echo "FATAL ERROR"
+            echo "============================================================"
+            echo "OLD BROKEN RENDERER DETECTED."
+            exit 1
+          fi
+
+          echo ""
+          echo "Old broken renderer signature not found."
+
+          echo ""
+          echo "Checking for obsolete fixed-five-scene renderer..."
+
+          if grep -n "SCENE_COUNT = 5" rift_valley_video_generator.py; then
+            echo ""
+            echo "============================================================"
+            echo "FATAL ERROR"
+            echo "============================================================"
+            echo "OLD FIXED-FIVE-SCENE RENDERER DETECTED."
+            echo "This renderer can falsely repeat one image."
+            exit 1
+          fi
+
+          echo ""
+          echo "Obsolete fixed-five-scene renderer not found."
+
+          echo ""
+          echo "Renderer inspection passed."
+
+
+      # ==========================================================
+      # PYTHON SYNTAX
+      # ==========================================================
 
       - name: Check Python syntax
         run: |
@@ -188,43 +258,236 @@ jobs:
           echo "PYTHON SYNTAX CHECK PASSED"
           echo "============================================================"
 
-      - name: Generate Rift Valley Watch video
+
+      # ==========================================================
+      # TEST GTTS
+      # ==========================================================
+
+      - name: Test gTTS
         run: |
           set -e
 
           echo "============================================================"
-          echo "STARTING RIFT VALLEY WATCH"
+          echo "TESTING GTTS"
+          echo "============================================================"
+
+          python - <<'PY'
+          from pathlib import Path
+          from gtts import gTTS
+
+          output = Path("audio/gtts_test.mp3")
+
+          tts = gTTS(
+              text="Rift Valley Watch narration test.",
+              lang="en",
+              slow=False
+          )
+
+          tts.save(str(output))
+
+          if not output.exists():
+              raise RuntimeError("gTTS test failed.")
+
+          if output.stat().st_size < 1000:
+              raise RuntimeError("gTTS output is too small.")
+
+          print("gTTS TEST SUCCESSFUL")
+          print("File:", output)
+          print("Size:", output.stat().st_size)
+          PY
+
+          rm -f audio/gtts_test.mp3
+
+
+      # ==========================================================
+      # RUN REAL-TIME NEWS ENGINE
+      # ==========================================================
+
+      - name: Run Rift Valley Watch news engine
+        run: |
+          set -e
+
+          echo "============================================================"
+          echo "STARTING RIFT VALLEY WATCH NEWS ENGINE"
           echo "============================================================"
 
           python -u rift_valley_main.py
 
-      - name: Verify selected story
+          echo ""
+          echo "============================================================"
+          echo "NEWS ENGINE FINISHED"
+          echo "============================================================"
+
+
+      # ==========================================================
+      # VERIFY NEWS ENGINE OUTPUT
+      # ==========================================================
+
+      - name: Verify news engine output
         run: |
           set -e
 
-          test -f data/selected_story.json
+          echo "============================================================"
+          echo "VERIFYING NEWS ENGINE OUTPUT"
+          echo "============================================================"
 
+          echo ""
+          echo "Data directory:"
+          find data -maxdepth 1 -type f -print -exec ls -lh {} \; || true
+
+          if [ ! -f data/story.json ]; then
+            echo ""
+            echo "ERROR: data/story.json was not generated."
+            exit 1
+          fi
+
+          if [ ! -f data/script.json ]; then
+            echo ""
+            echo "ERROR: data/script.json was not generated."
+            exit 1
+          fi
+
+          echo ""
+          echo "story.json found:"
+          ls -lh data/story.json
+
+          echo ""
+          echo "script.json found:"
+          ls -lh data/script.json
+
+
+      # ==========================================================
+      # PROMOTE NEWS ENGINE OUTPUT TO RENDERER INPUT
+      # ==========================================================
+
+      - name: Prepare selected story and script
+        run: |
+          set -e
+
+          echo "============================================================"
+          echo "PREPARING RENDERER INPUT"
+          echo "============================================================"
+
+          cp data/story.json data/selected_story.json
+          cp data/script.json data/selected_script.json
+
+          echo ""
+          echo "selected_story.json:"
+          ls -lh data/selected_story.json
+
+          echo ""
+          echo "selected_script.json:"
+          ls -lh data/selected_script.json
+
+          echo ""
           echo "============================================================"
           echo "SELECTED STORY"
           echo "============================================================"
 
           cat data/selected_story.json
 
-      - name: Verify selected script
-        run: |
-          set -e
-
-          test -f data/selected_script.json
-
+          echo ""
           echo "============================================================"
           echo "SELECTED SCRIPT"
           echo "============================================================"
 
           cat data/selected_script.json
 
+
+      # ==========================================================
+      # VERIFY STORY STRUCTURE
+      # ==========================================================
+
+      - name: Validate selected story structure
+        run: |
+          set -e
+
+          echo "============================================================"
+          echo "VALIDATING SELECTED STORY JSON"
+          echo "============================================================"
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("data/selected_story.json")
+
+          with path.open("r", encoding="utf-8") as f:
+              data = json.load(f)
+
+          if not isinstance(data, dict):
+              raise RuntimeError("selected_story.json is not a JSON object.")
+
+          stories = data.get("stories")
+
+          if not isinstance(stories, list):
+              raise RuntimeError("selected_story.json has no valid stories list.")
+
+          if not stories:
+              raise RuntimeError("selected_story.json contains zero stories.")
+
+          print("Stories:", len(stories))
+
+          for i, story in enumerate(stories, start=1):
+              title = story.get("title", "")
+              county = story.get("county", "")
+              source = story.get("source", "")
+
+              if not title:
+                  raise RuntimeError(f"Story {i} has no title.")
+
+              if not county:
+                  raise RuntimeError(f"Story {i} has no county.")
+
+              if not source:
+                  raise RuntimeError(f"Story {i} has no source.")
+
+              print()
+              print(f"Story {i}:")
+              print("Title:", title)
+              print("County:", county)
+              print("Category:", story.get("category", ""))
+              print("Source:", source)
+              print("Currentness:", story.get("currentness", ""))
+              print("Image URL:", story.get("image_url", ""))
+              print("Image path:", story.get("image_path", ""))
+
+          print()
+          print("SELECTED STORY JSON VALIDATION PASSED")
+          PY
+
+
+      # ==========================================================
+      # RUN VIDEO RENDERER
+      # ==========================================================
+
+      - name: Render Rift Valley Watch video
+        run: |
+          set -e
+
+          echo "============================================================"
+          echo "STARTING VIDEO RENDERER"
+          echo "============================================================"
+
+          python -u rift_valley_video_generator.py
+
+          echo ""
+          echo "============================================================"
+          echo "VIDEO RENDERER FINISHED"
+          echo "============================================================"
+
+
+      # ==========================================================
+      # VERIFY NARRATION
+      # ==========================================================
+
       - name: Verify narration
         run: |
           set -e
+
+          echo "============================================================"
+          echo "VERIFYING NARRATION"
+          echo "============================================================"
 
           AUDIO_FILE=""
 
@@ -235,32 +498,49 @@ jobs:
           fi
 
           if [ -z "$AUDIO_FILE" ]; then
+            echo ""
             echo "ERROR: Narration MP3 was not generated."
             exit 1
           fi
 
           SIZE=$(stat -c%s "$AUDIO_FILE")
 
-          echo "Narration: $AUDIO_FILE"
-          echo "Size: $SIZE bytes"
+          echo ""
+          echo "Narration:"
+          echo "$AUDIO_FILE"
+
+          echo ""
+          echo "Size:"
+          echo "$SIZE bytes"
 
           if [ "$SIZE" -lt 1000 ]; then
+            echo ""
             echo "ERROR: Narration is too small."
             exit 1
           fi
 
+          echo ""
+          echo "FFprobe:"
           ffprobe -v error \
             -show_entries format=duration,size \
             -show_entries stream=codec_name,codec_type,sample_rate,channels \
             -of default=noprint_wrappers=1 \
             "$AUDIO_FILE"
 
+          echo ""
+          echo "NARRATION VERIFICATION PASSED"
+
+
+      # ==========================================================
+      # VERIFY REAL STORY PHOTOS
+      # ==========================================================
+
       - name: Verify story images
         run: |
           set -e
 
           echo "============================================================"
-          echo "VERIFYING STORY IMAGES"
+          echo "VERIFYING REAL STORY IMAGES"
           echo "============================================================"
 
           COUNT=0
@@ -268,9 +548,11 @@ jobs:
           for IMAGE in assets/source/story_image*.jpg \
                        assets/source/story_image*.jpeg \
                        assets/source/story_image*.png \
-                       assets/source/story_image*.webp; do
+                       assets/source/story_image*.webp \
+                       assets/source/story_image*.avif; do
 
             if [ -f "$IMAGE" ]; then
+
               COUNT=$((COUNT + 1))
 
               SIZE=$(stat -c%s "$IMAGE")
@@ -278,22 +560,62 @@ jobs:
               echo ""
               echo "Image $COUNT:"
               echo "$IMAGE"
-              echo "Size: $SIZE bytes"
+
+              echo "Size:"
+              echo "$SIZE bytes"
 
               if [ "$SIZE" -lt 10000 ]; then
-                echo "ERROR: Image is too small."
+                echo ""
+                echo "ERROR: Image is too small:"
+                echo "$IMAGE"
                 exit 1
               fi
+
             fi
+
           done
 
+          echo ""
+          echo "Real story images found:"
+          echo "$COUNT"
+
           if [ "$COUNT" -lt 1 ]; then
-            echo "ERROR: No story images found."
+            echo ""
+            echo "ERROR: No real story images found."
             exit 1
           fi
 
           echo ""
-          echo "Story images found: $COUNT"
+          echo "STORY IMAGE VERIFICATION PASSED"
+
+
+      # ==========================================================
+      # CHECK FOR FORBIDDEN VISUALS
+      # ==========================================================
+
+      - name: Check downloaded image filenames
+        run: |
+          set -e
+
+          echo "============================================================"
+          echo "CHECKING FOR FORBIDDEN IMAGE FILENAMES"
+          echo "============================================================"
+
+          if find assets/source -type f | grep -Ei \
+            "citizen|ctv|world.?cup|avatar|placeholder|default.?image|generic.?avatar|profile.?picture"; then
+
+            echo ""
+            echo "ERROR: Forbidden/generic image detected."
+            exit 1
+          fi
+
+          echo ""
+          echo "No forbidden/generic image filenames detected."
+
+
+      # ==========================================================
+      # VERIFY FINAL MP4
+      # ==========================================================
 
       - name: Verify final MP4
         run: |
@@ -306,16 +628,23 @@ jobs:
           echo "============================================================"
 
           if [ ! -f "$FILE" ]; then
+            echo ""
             echo "ERROR: Final MP4 was not generated."
             exit 1
           fi
 
           SIZE=$(stat -c%s "$FILE")
 
-          echo "File: $FILE"
-          echo "Size: $SIZE bytes"
+          echo ""
+          echo "File:"
+          echo "$FILE"
+
+          echo ""
+          echo "Size:"
+          echo "$SIZE bytes"
 
           if [ "$SIZE" -lt 100000 ]; then
+            echo ""
             echo "ERROR: MP4 is too small."
             exit 1
           fi
@@ -356,23 +685,39 @@ jobs:
             "$FILE")
 
           echo ""
-          echo "Width: $WIDTH"
-          echo "Height: $HEIGHT"
-          echo "Duration: $DURATION"
-          echo "Video codec: $VIDEO_CODEC"
-          echo "Audio codec: $AUDIO_CODEC"
+          echo "Width:"
+          echo "$WIDTH"
+
+          echo ""
+          echo "Height:"
+          echo "$HEIGHT"
+
+          echo ""
+          echo "Duration:"
+          echo "$DURATION seconds"
+
+          echo ""
+          echo "Video codec:"
+          echo "$VIDEO_CODEC"
+
+          echo ""
+          echo "Audio codec:"
+          echo "$AUDIO_CODEC"
 
           if [ "$WIDTH" != "1080" ]; then
+            echo ""
             echo "ERROR: Width is not 1080."
             exit 1
           fi
 
           if [ "$HEIGHT" != "1920" ]; then
+            echo ""
             echo "ERROR: Height is not 1920."
             exit 1
           fi
 
           if [ -z "$HAS_AUDIO" ]; then
+            echo ""
             echo "ERROR: Final video has no audio."
             exit 1
           fi
@@ -381,6 +726,11 @@ jobs:
           echo "============================================================"
           echo "FINAL MP4 VERIFICATION PASSED"
           echo "============================================================"
+
+
+      # ==========================================================
+      # SHOW GENERATED FILES
+      # ==========================================================
 
       - name: Show generated files
         if: always()
@@ -409,6 +759,11 @@ jobs:
           echo "DATA:"
           find data -type f -print -exec ls -lh {} \; || true
 
+
+      # ==========================================================
+      # UPLOAD MP4 AS GITHUB ARTIFACT
+      # ==========================================================
+
       - name: Upload generated MP4
         uses: actions/upload-artifact@v4
         with:
@@ -417,9 +772,18 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+
+      # ==========================================================
+      # COMMIT FINAL MP4
+      # ==========================================================
+
       - name: Commit generated MP4
         run: |
           set -e
+
+          echo "============================================================"
+          echo "COMMITTING GENERATED MP4"
+          echo "============================================================"
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -433,6 +797,11 @@ jobs:
             git push
           fi
 
+
+      # ==========================================================
+      # FINAL STATUS
+      # ==========================================================
+
       - name: Final status
         run: |
           echo ""
@@ -440,10 +809,23 @@ jobs:
           echo "RIFT VALLEY WATCH GENERATION SUCCESSFUL"
           echo "============================================================"
           echo ""
-          echo "MP4:"
-          echo "output/rift_valley_watch_reel.mp4"
+
+          echo "News engine:"
+          echo "data/story.json"
+          echo "data/script.json"
+
           echo ""
-          echo "Artifact:"
+          echo "Renderer input:"
+          echo "data/selected_story.json"
+          echo "data/selected_script.json"
+
+          echo ""
+          echo "Final MP4:"
+          echo "output/rift_valley_watch_reel.mp4"
+
+          echo ""
+          echo "GitHub Artifact:"
           echo "rift-valley-watch-video"
+
           echo ""
           echo "============================================================"
