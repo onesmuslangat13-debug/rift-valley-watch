@@ -29,7 +29,7 @@ MIN_BYTES = 8000
 MIN_WIDTH = 240
 MIN_HEIGHT = 160
 
-USER_AGENT = "Mozilla/5.0 Chrome/131.0 Safari/537.36"
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36"
 
 
 COUNTIES = [
@@ -121,9 +121,8 @@ def normalize_url(value):
     if url.startswith("//"):
         url = "https:" + url
 
-    if not url.startswith("http://"):
-        if not url.startswith("https://"):
-            return ""
+    if not url.startswith("http://") and not url.startswith("https://"):
+        return ""
 
     return url
 
@@ -194,12 +193,19 @@ def request_url(url, image=False, referer=""):
     headers = {
         "User-Agent": USER_AGENT,
         "Accept-Language": "en-US,en;q=0.9",
+        "Connection": "keep-alive",
     }
 
     if image:
-        headers["Accept"] = "image/*,*/*;q=0.8"
+        headers["Accept"] = (
+            "image/avif,image/webp,image/apng,"
+            "image/svg+xml,image/*,*/*;q=0.8"
+        )
     else:
-        headers["Accept"] = "text/html,application/xhtml+xml,*/*;q=0.8"
+        headers["Accept"] = (
+            "text/html,application/xhtml+xml,"
+            "application/xml;q=0.9,*/*;q=0.8"
+        )
 
     if referer:
         headers["Referer"] = referer
@@ -213,6 +219,12 @@ def request_url(url, image=False, referer=""):
         )
 
         if response.status_code >= 400:
+            log(
+                "HTTP "
+                + str(response.status_code)
+                + ": "
+                + url
+            )
             return None
 
         return response
@@ -276,21 +288,62 @@ def parse_feed(text):
             elif tag == "link":
                 item["link"] = normalize_url(value)
 
-            elif tag in ["pubdate", "published", "updated"]:
+            elif tag in [
+                "pubdate",
+                "published",
+                "updated",
+                "date",
+            ]:
                 if not item["pubdate"]:
                     item["pubdate"] = clean(value)
 
             elif tag == "source":
                 item["source"] = clean(value)
 
-            elif tag in ["content", "thumbnail", "enclosure"]:
+            elif tag in [
+                "content",
+                "thumbnail",
+                "enclosure",
+                "image",
+                "media",
+            ]:
 
                 media_url = normalize_url(
                     child.attrib.get("url", "")
                 )
 
+                if not media_url:
+                    media_url = normalize_url(
+                        child.attrib.get("href", "")
+                    )
+
+                if not media_url:
+                    media_url = normalize_url(
+                        child.attrib.get("src", "")
+                    )
+
                 if media_url:
                     item["media"].append(media_url)
+
+            else:
+
+                for attribute_name in [
+                    "url",
+                    "href",
+                    "src",
+                ]:
+
+                    attribute_value = normalize_url(
+                        child.attrib.get(
+                            attribute_name,
+                            "",
+                        )
+                    )
+
+                    if attribute_value:
+                        item["media"].append(
+                            attribute_value
+                        )
 
         if item["title"] and item["link"]:
             items.append(item)
@@ -343,8 +396,13 @@ def add_candidate(images, value, base_url):
 
     value = unescape(str(value)).strip()
 
+    value = value.replace("\\/", "/")
+
     if value.startswith("data:"):
         return
+
+    if value.startswith("//"):
+        value = "https:" + value
 
     value = urljoin(base_url, value)
     value = normalize_url(value)
@@ -368,10 +426,22 @@ def html_images(html, page_url):
     patterns = [
         r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)',
         r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
+        r'<meta[^>]+property=["\']og:image:url["\'][^>]+content=["\']([^"\']+)',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image:url["\']',
         r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:image["\']',
+        r'<meta[^>]+name=["\']twitter:image:src["\'][^>]+content=["\']([^"\']+)',
+        r'<link[^>]+rel=["\'][^"\']*image_src[^"\']*["\'][^>]+href=["\']([^"\']+)',
+        r'<link[^>]+href=["\']([^"\']+)["\'][^>]+rel=["\'][^"\']*image_src[^"\']*["\']',
         r'<img[^>]+src=["\']([^"\']+)["\']',
         r'<img[^>]+data-src=["\']([^"\']+)["\']',
         r'<img[^>]+data-original=["\']([^"\']+)["\']',
+        r'<img[^>]+data-lazy-src=["\']([^"\']+)["\']',
+        r'<img[^>]+data-lazyload=["\']([^"\']+)["\']',
+        r'<img[^>]+data-image=["\']([^"\']+)["\']',
+        r'<source[^>]+src=["\']([^"\']+)["\']',
+        r'<source[^>]+srcset=["\']([^"\']+)["\']',
+        r'<img[^>]+srcset=["\']([^"\']+)["\']',
     ]
 
     for pattern in patterns:
@@ -387,14 +457,44 @@ def html_images(html, page_url):
 
         for value in matches:
 
-            if "," in value and " " in value:
-                value = value.split(",", 1)[0]
+            if not value:
+                continue
 
-            add_candidate(
-                images,
-                value,
-                page_url,
-            )
+            if "," in value:
+
+                pieces = value.split(",")
+
+                for piece in pieces:
+
+                    candidate = piece.strip()
+
+                    if " " in candidate:
+                        candidate = candidate.split(
+                            " ",
+                            1,
+                        )[0]
+
+                    add_candidate(
+                        images,
+                        candidate,
+                        page_url,
+                    )
+
+            else:
+
+                if " " in value and (
+                    "srcset" in pattern.lower()
+                ):
+                    value = value.split(
+                        " ",
+                        1,
+                    )[0]
+
+                add_candidate(
+                    images,
+                    value,
+                    page_url,
+                )
 
     return images
 
@@ -410,46 +510,70 @@ def rss_images(item):
             item.get("link", ""),
         )
 
-    description = item.get("description", "")
+    description_raw = item.get(
+        "description",
+        "",
+    )
+
+    description = unescape(
+        str(description_raw)
+    )
 
     urls = re.findall(
-        r"https?://[^\"'<>\\\s]+",
+        r'https?://[^"\'<>\s]+',
         description,
         flags=re.IGNORECASE,
     )
 
     for value in urls:
 
-        value = value.rstrip("\"'<>),;")
+        value = value.rstrip(
+            "\"'<>),;"
+        )
+
+        add_candidate(
+            images,
+            value,
+            item.get("link", ""),
+        )
+
+    return images
+
+
+def extract_absolute_image_urls(text, base_url):
+    images = []
+
+    if not text:
+        return images
+
+    values = re.findall(
+        r'https?://[^"\'<>\s]+',
+        unescape(str(text)),
+        flags=re.IGNORECASE,
+    )
+
+    for value in values:
+
+        value = value.rstrip(
+            "\"'<>),;"
+        )
 
         lower = value.lower()
 
-        if ".jpg" in lower:
+        if any(
+            extension in lower
+            for extension in [
+                ".jpg",
+                ".jpeg",
+                ".png",
+                ".webp",
+                ".avif",
+            ]
+        ):
             add_candidate(
                 images,
                 value,
-                item.get("link", ""),
-            )
-
-        elif ".jpeg" in lower:
-            add_candidate(
-                images,
-                value,
-                item.get("link", ""),
-            )
-
-        elif ".png" in lower:
-            add_candidate(
-                images,
-                value,
-                item.get("link", ""),
-            )
-
-        elif ".webp" in lower:
-            add_candidate(
-                images,
-                value,
-                item.get("link", ""),
+                base_url,
             )
 
     return images
@@ -494,10 +618,70 @@ def image_extension(url):
     if ".jpeg" in lower:
         return ".jpeg"
 
+    if ".avif" in lower:
+        return ".avif"
+
     return ".jpg"
 
 
-def download_images(story_id, urls, article_url):
+def response_is_real_image(response):
+    if response is None:
+        return False
+
+    content = response.content
+
+    if not content:
+        return False
+
+    if len(content) < MIN_BYTES:
+        return False
+
+    content_type = response.headers.get(
+        "content-type",
+        "",
+    ).lower()
+
+    if "text/html" in content_type:
+        return False
+
+    if content.startswith(b"<!DOCTYPE"):
+        return False
+
+    if content.startswith(b"<html"):
+        return False
+
+    if content.startswith(b"<HTML"):
+        return False
+
+    return True
+
+
+def save_response_image(
+    response,
+    path,
+):
+    try:
+
+        if not response_is_real_image(
+            response
+        ):
+            return False
+
+        path.write_bytes(
+            response.content
+        )
+
+        return valid_image(path)
+
+    except Exception:
+        return False
+
+
+def download_images(
+    story_id,
+    urls,
+    article_url,
+):
     folder = SOURCE_DIR / story_id
 
     if folder.exists():
@@ -509,24 +693,48 @@ def download_images(story_id, urls, article_url):
     )
 
     accepted = []
+    seen_urls = set()
 
     for url in urls:
 
         if len(accepted) >= MAX_PHOTOS:
             break
 
+        url = normalize_url(url)
+
+        if not url:
+            continue
+
+        if url in seen_urls:
+            continue
+
+        seen_urls.add(url)
+
         if blocked_image(url):
+            log(
+                "BLOCKED IMAGE: "
+                + url
+            )
             continue
 
         number = len(accepted) + 1
 
+        extension = image_extension(
+            url
+        )
+
         path = folder / (
             "photo_"
             + str(number)
-            + image_extension(url)
+            + extension
         )
 
-        log("PHOTO: " + url)
+        log(
+            "PHOTO ATTEMPT "
+            + str(number)
+            + ": "
+            + url
+        )
 
         response = request_url(
             url,
@@ -535,7 +743,17 @@ def download_images(story_id, urls, article_url):
         )
 
         if response is None:
-            log("REJECTED")
+            log("REJECTED REQUEST")
+            continue
+
+        final_url = normalize_url(
+            response.url
+        )
+
+        if final_url and blocked_image(
+            final_url
+        ):
+            log("REJECTED BLOCKED FINAL URL")
             continue
 
         content_type = response.headers.get(
@@ -543,27 +761,35 @@ def download_images(story_id, urls, article_url):
             "",
         ).lower()
 
-        if "text/html" in content_type:
-            log("REJECTED HTML")
+        log(
+            "CONTENT TYPE: "
+            + content_type
+        )
+
+        log(
+            "IMAGE BYTES: "
+            + str(len(response.content))
+        )
+
+        if not response_is_real_image(
+            response
+        ):
+            log(
+                "REJECTED NOT IMAGE"
+            )
             continue
 
-        if len(response.content) < MIN_BYTES:
-            log("REJECTED SMALL")
-            continue
-
-        try:
-            path.write_bytes(response.content)
-        except Exception:
-            log("REJECTED WRITE")
-            continue
-
-        if not valid_image(path):
-
+        if not save_response_image(
+            response,
+            path,
+        ):
             path.unlink(
                 missing_ok=True
             )
 
-            log("REJECTED INVALID IMAGE")
+            log(
+                "REJECTED INVALID IMAGE"
+            )
             continue
 
         relative = str(
@@ -573,7 +799,7 @@ def download_images(story_id, urls, article_url):
         accepted.append(
             {
                 "path": relative,
-                "url": url,
+                "url": final_url or url,
             }
         )
 
@@ -614,36 +840,78 @@ def process_item(item):
         return None
 
     if blocked_story(title):
-        log("BLOCKED STORY: " + title)
+        log(
+            "BLOCKED STORY: "
+            + title
+        )
         return None
 
     if not recent(published):
-        log("OLD STORY: " + title)
+        log(
+            "OLD STORY: "
+            + title
+        )
         return None
 
     log("")
-    log("TESTING: " + title)
+    log(
+        "============================================================"
+    )
+    log(
+        "TESTING STORY: "
+        + title
+    )
+    log(
+        "============================================================"
+    )
 
-    article_url = resolve_article(link)
+    article_url = resolve_article(
+        link
+    )
 
-    response = request_url(article_url)
+    response = request_url(
+        article_url
+    )
 
     html = ""
 
     if response is not None:
-        final_url = normalize_url(response.url)
+
+        final_url = normalize_url(
+            response.url
+        )
 
         if final_url:
             article_url = final_url
 
         html = response.text
 
+        log(
+            "ARTICLE URL: "
+            + article_url
+        )
+
+    else:
+
+        log(
+            "ARTICLE PAGE REQUEST FAILED"
+        )
+
     page_images = html_images(
         html,
         article_url,
     )
 
-    feed_images = rss_images(item)
+    feed_images = rss_images(
+        item
+    )
+
+    embedded_images = (
+        extract_absolute_image_urls(
+            html,
+            article_url,
+        )
+    )
 
     candidates = []
 
@@ -653,6 +921,11 @@ def process_item(item):
             candidates.append(value)
 
     for value in feed_images:
+
+        if value not in candidates:
+            candidates.append(value)
+
+    for value in embedded_images:
 
         if value not in candidates:
             candidates.append(value)
@@ -668,15 +941,26 @@ def process_item(item):
     )
 
     log(
+        "EMBEDDED IMAGE CANDIDATES: "
+        + str(len(embedded_images))
+    )
+
+    log(
         "TOTAL IMAGE CANDIDATES: "
         + str(len(candidates))
     )
 
     if not candidates:
-        log("NO IMAGE URL FOUND")
+
+        log(
+            "NO IMAGE URL FOUND"
+        )
+
         return None
 
-    story_id = hash_text(title)
+    story_id = hash_text(
+        title
+    )
 
     photos = download_images(
         story_id,
@@ -685,7 +969,11 @@ def process_item(item):
     )
 
     if not photos:
-        log("NO VALID REAL ARTICLE PHOTO")
+
+        log(
+            "NO VALID REAL ARTICLE PHOTO"
+        )
+
         return None
 
     county = detect_county(
@@ -717,7 +1005,10 @@ def date_sort(item):
     try:
 
         value = parsedate_to_datetime(
-            item.get("pubdate", "")
+            item.get(
+                "pubdate",
+                "",
+            )
         )
 
         if value.tzinfo is None:
@@ -731,7 +1022,10 @@ def date_sort(item):
         return 0
 
 
-def shorten(text, maximum=260):
+def shorten(
+    text,
+    maximum=260,
+):
     text = clean(text)
 
     if len(text) <= maximum:
@@ -740,19 +1034,30 @@ def shorten(text, maximum=260):
     text = text[:maximum]
 
     if " " in text:
-        text = text.rsplit(" ", 1)[0]
+        text = text.rsplit(
+            " ",
+            1,
+        )[0]
 
-    return text.rstrip(".,;:") + "."
+    return text.rstrip(
+        ".,;:"
+    ) + "."
 
 
 def make_script(story):
 
     title = clean(
-        story.get("title", "")
+        story.get(
+            "title",
+            "",
+        )
     )
 
     description = clean(
-        story.get("description", "")
+        story.get(
+            "description",
+            "",
+        )
     )
 
     county = clean(
@@ -763,7 +1068,10 @@ def make_script(story):
     )
 
     source = clean(
-        story.get("source", "")
+        story.get(
+            "source",
+            "",
+        )
     )
 
     if not source:
@@ -791,7 +1099,9 @@ def make_script(story):
     if description:
 
         parts.append(
-            shorten(description)
+            shorten(
+                description
+            )
         )
 
     parts.append(
@@ -806,7 +1116,9 @@ def make_script(story):
         [],
     )
 
-    for index, photo in enumerate(images):
+    for index, photo in enumerate(
+        images
+    ):
 
         scenes.append(
             {
@@ -820,7 +1132,9 @@ def make_script(story):
             }
         )
 
-    narration = " ".join(parts)
+    narration = " ".join(
+        parts
+    )
 
     return {
         "story_id": story.get(
@@ -838,10 +1152,18 @@ def make_script(story):
 def main():
 
     log("")
-    log("============================================================")
-    log("RIFT VALLEY WATCH NEWS ENGINE")
-    log("VERSION V20")
-    log("============================================================")
+    log(
+        "============================================================"
+    )
+    log(
+        "RIFT VALLEY WATCH NEWS ENGINE"
+    )
+    log(
+        "VERSION V21 REAL PHOTO RECOVERY"
+    )
+    log(
+        "============================================================"
+    )
     log("")
 
     DATA_DIR.mkdir(
@@ -854,7 +1176,9 @@ def main():
         exist_ok=True,
     )
 
-    for child in list(SOURCE_DIR.iterdir()):
+    for child in list(
+        SOURCE_DIR.iterdir()
+    ):
 
         try:
 
@@ -880,11 +1204,17 @@ def main():
         for item in items:
 
             title = clean(
-                item.get("title", "")
+                item.get(
+                    "title",
+                    "",
+                )
             )
 
             link = normalize_url(
-                item.get("link", "")
+                item.get(
+                    "link",
+                    "",
+                )
             )
 
             title_key = title.lower()
@@ -899,10 +1229,17 @@ def main():
             if link_key in seen_links:
                 continue
 
-            seen_titles.add(title_key)
-            seen_links.add(link_key)
+            seen_titles.add(
+                title_key
+            )
 
-            all_items.append(item)
+            seen_links.add(
+                link_key
+            )
+
+            all_items.append(
+                item
+            )
 
             if len(all_items) >= MAX_ITEMS:
                 break
@@ -911,7 +1248,10 @@ def main():
             break
 
     log("")
-    log("TOTAL RSS STORIES: " + str(len(all_items)))
+    log(
+        "TOTAL RSS STORIES: "
+        + str(len(all_items))
+    )
     log("")
 
     all_items.sort(
@@ -930,12 +1270,16 @@ def main():
 
         tested += 1
 
-        story = process_item(item)
+        story = process_item(
+            item
+        )
 
         if story is None:
             continue
 
-        valid.append(story)
+        valid.append(
+            story
+        )
 
         if len(valid) >= 8:
             break
@@ -943,10 +1287,18 @@ def main():
     if not valid:
 
         log("")
-        log("============================================================")
-        log("NEWS ENGINE FAILED")
-        log("============================================================")
-        log("No valid story with a real article photograph was found.")
+        log(
+            "============================================================"
+        )
+        log(
+            "NEWS ENGINE FAILED"
+        )
+        log(
+            "============================================================"
+        )
+        log(
+            "No valid story with a real article photograph was found."
+        )
         log("")
 
         raise RuntimeError(
@@ -963,7 +1315,9 @@ def main():
 
     selected = valid[0]
 
-    script = make_script(selected)
+    script = make_script(
+        selected
+    )
 
     with open(
         STORY_FILE,
@@ -992,25 +1346,48 @@ def main():
         )
 
     log("")
-    log("============================================================")
-    log("NEWS ENGINE SUCCESS")
-    log("============================================================")
-    log("STORY: " + selected["title"])
-    log("COUNTY: " + selected["county"])
-    log("SOURCE: " + selected["source"])
+    log(
+        "============================================================"
+    )
+    log(
+        "NEWS ENGINE SUCCESS"
+    )
+    log(
+        "============================================================"
+    )
+    log(
+        "STORY: "
+        + selected["title"]
+    )
+    log(
+        "COUNTY: "
+        + selected["county"]
+    )
+    log(
+        "SOURCE: "
+        + selected["source"]
+    )
     log(
         "REAL PHOTOS: "
-        + str(selected["image_count"])
+        + str(
+            selected["image_count"]
+        )
     )
     log(
         "STORY JSON: "
-        + str(STORY_FILE)
+        + str(
+            STORY_FILE
+        )
     )
     log(
         "SCRIPT JSON: "
-        + str(SCRIPT_FILE)
+        + str(
+            SCRIPT_FILE
+        )
     )
-    log("============================================================")
+    log(
+        "============================================================"
+    )
 
 
 if __name__ == "__main__":
