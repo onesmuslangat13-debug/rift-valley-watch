@@ -8,6 +8,7 @@ import hashlib
 import time
 
 import requests
+from bs4 import BeautifulSoup
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 from gtts import gTTS
 
@@ -15,11 +16,12 @@ from gtts import gTTS
 # ============================================================
 # RIFT VALLEY WATCH
 # VIDEO GENERATOR
-# VERSION: RVW_VIDEO_V24_NO_SOURCE_AUDIO_OR_VIDEO
+# VERSION: RVW_VIDEO_V25_ARTICLE_IMAGE_RESOLVER
 #
 # PURPOSE
 # - One selected real news story
 # - Multiple real article photos/scenes when available
+# - Correctly resolves article URLs into real article images
 # - No generic avatars/placeholders/logos
 # - Professional 1080x1920 vertical news reel
 # - NO SOURCE DISPLAYED ON VIDEO
@@ -145,9 +147,12 @@ SESSION.headers.update(
             "Chrome/128.0 Safari/537.36"
         ),
         "Accept": (
-            "image/avif,image/webp,image/apng,image/svg+xml,"
-            "image/*,*/*;q=0.8"
+            "text/html,application/xhtml+xml,"
+            "application/xml;q=0.9,image/avif,image/webp,"
+            "image/apng,image/svg+xml,image/*,*/*;q=0.8"
         ),
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
     }
 )
 
@@ -168,7 +173,7 @@ def prepare_directories():
     print("")
     print("=" * 70)
     print("RIFT VALLEY WATCH VIDEO GENERATOR")
-    print("RVW_VIDEO_V24_NO_SOURCE_AUDIO_OR_VIDEO")
+    print("RVW_VIDEO_V25_ARTICLE_IMAGE_RESOLVER")
     print("=" * 70)
     print("")
     print("BASE DIR:", BASE_DIR)
@@ -184,6 +189,7 @@ def prepare_directories():
     print("")
     print("SOURCE DISPLAY: DISABLED")
     print("SOURCE NARRATION: DISABLED")
+    print("ARTICLE URL IMAGE RESOLUTION: ENABLED")
     print("")
 
 
@@ -314,10 +320,6 @@ def word_count(text):
 
 # ============================================================
 # SOURCE / ATTRIBUTION FILTER
-#
-# IMPORTANT:
-# Source information may remain in JSON for metadata,
-# but it must NEVER become narration text.
 # ============================================================
 
 NARRATION_EXCLUDED_KEYS = {
@@ -354,6 +356,57 @@ NARRATION_EXCLUDED_KEYS = {
     "featured_image_url",
     "media_url",
 }
+
+
+# ============================================================
+# REMOVE SOURCE ATTRIBUTION FROM NARRATION
+# ============================================================
+
+def remove_source_attribution(text):
+
+    if not text:
+        return ""
+
+    text = clean_text(text)
+
+    patterns = [
+        r"\bsource\s*[:\-–—]\s*[^.!?]+[.!?]?",
+        r"\bsources\s*[:\-–—]\s*[^.!?]+[.!?]?",
+        r"\bphoto\s*[:\-–—]\s*[^.!?]+[.!?]?",
+        r"\bimage\s*[:\-–—]\s*[^.!?]+[.!?]?",
+        r"\bphoto\s+credit\s*[:\-–—]?\s*[^.!?]+[.!?]?",
+        r"\bimage\s+credit\s*[:\-–—]?\s*[^.!?]+[.!?]?",
+        r"\bphoto\s+source\s*[:\-–—]?\s*[^.!?]+[.!?]?",
+        r"\bimage\s+source\s*[:\-–—]?\s*[^.!?]+[.!?]?",
+        r"\bimage\s+courtesy\s+of\s+[^.!?]+[.!?]?",
+        r"\bphoto\s+courtesy\s+of\s+[^.!?]+[.!?]?",
+        r"\bcourtesy\s+of\s+[^.!?]+[.!?]?",
+    ]
+
+    for pattern in patterns:
+
+        text = re.sub(
+            pattern,
+            " ",
+            text,
+            flags=re.IGNORECASE,
+        )
+
+    # Remove common leading attribution phrases.
+    text = re.sub(
+        r"^\s*(?:according to|as reported by|reported by|published by)\s+[^,;:]+[,;:]\s*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text,
+    )
+
+    return text.strip()
 
 
 # ============================================================
@@ -405,10 +458,6 @@ def is_bad_narration_sentence(sentence):
 
 # ============================================================
 # COLLECT NARRATION TEXT FIELDS
-#
-# IMPORTANT:
-# This deliberately excludes all source/publisher/URL/media
-# fields so they cannot be spoken by gTTS.
 # ============================================================
 
 def collect_text_fields(
@@ -425,17 +474,8 @@ def collect_text_fields(
 
             key_lower = str(key).lower().strip()
 
-            # ------------------------------------------------
-            # NEVER collect metadata/attribution fields.
-            # ------------------------------------------------
-
             if key_lower in NARRATION_EXCLUDED_KEYS:
                 continue
-
-            # ------------------------------------------------
-            # Ignore keys whose names clearly indicate source
-            # or attribution information.
-            # ------------------------------------------------
 
             if any(
                 term in key_lower
@@ -468,6 +508,10 @@ def collect_text_fields(
 
                     cleaned = normalize_sentence(
                         value
+                    )
+
+                    cleaned = remove_source_attribution(
+                        cleaned
                     )
 
                     if cleaned and not is_bad_narration_sentence(
@@ -581,9 +625,6 @@ def load_story():
             or "N/A",
         )
 
-        # Source is printed to the GitHub log only.
-        # It is NOT placed into the video or narration.
-
         print(
             "Source metadata:",
             story.get("source")
@@ -672,10 +713,6 @@ def get_story_title(story):
 
 # ============================================================
 # GET SOURCE METADATA
-#
-# This remains available for logging only.
-# It is NEVER passed into create_scene_frame() as visible text
-# and NEVER passed into narration.
 # ============================================================
 
 def get_story_source(story):
@@ -732,6 +769,10 @@ def split_into_sentences(text):
         text
     )
 
+    text = remove_source_attribution(
+        text
+    )
+
     if not text:
         return []
 
@@ -745,6 +786,10 @@ def split_into_sentences(text):
     for part in parts:
 
         part = normalize_sentence(
+            part
+        )
+
+        part = remove_source_attribution(
             part
         )
 
@@ -774,12 +819,6 @@ def build_narration(
 
     candidates = []
 
-    # --------------------------------------------------------
-    # Script text.
-    # Source/publisher fields are automatically excluded by
-    # collect_text_fields().
-    # --------------------------------------------------------
-
     if script is not None:
 
         candidates.extend(
@@ -787,11 +826,6 @@ def build_narration(
                 script
             )
         )
-
-    # --------------------------------------------------------
-    # Story text.
-    # Source/publisher fields are automatically excluded.
-    # --------------------------------------------------------
 
     if story is not None:
 
@@ -807,11 +841,22 @@ def build_narration(
 
     for text in candidates:
 
+        text = remove_source_attribution(
+            text
+        )
+
         sentences = split_into_sentences(
             text
         )
 
         for sentence in sentences:
+
+            sentence = remove_source_attribution(
+                sentence
+            )
+
+            if not sentence:
+                continue
 
             key = re.sub(
                 r"\W+",
@@ -839,21 +884,28 @@ def build_narration(
         cleaned
     )
 
+    combined = remove_source_attribution(
+        combined
+    )
+
     combined = re.sub(
         r"\s+",
         " ",
         combined,
     ).strip()
 
-    # --------------------------------------------------------
-    # Final attribution safety pass.
-    # --------------------------------------------------------
-
     final_sentences = []
 
     for sentence in split_into_sentences(
         combined
     ):
+
+        sentence = remove_source_attribution(
+            sentence
+        )
+
+        if not sentence:
+            continue
 
         if not is_bad_narration_sentence(
             sentence
@@ -931,7 +983,9 @@ def shorten_narration(
         selected
     ).strip()
 
-    return result
+    return remove_source_attribution(
+        result
+    )
 
 
 def trim_to_word_limit(
@@ -973,6 +1027,10 @@ def build_narration_candidates(
     base = build_narration(
         story,
         script,
+    )
+
+    base = remove_source_attribution(
+        base
     )
 
     if not base:
@@ -1102,6 +1160,16 @@ def generate_single_tts(
     output_path,
 ):
 
+    text = remove_source_attribution(
+        text
+    )
+
+    if not text:
+
+        raise RuntimeError(
+            "Cannot generate TTS from empty/source-only text."
+        )
+
     try:
 
         if output_path.exists():
@@ -1209,6 +1277,10 @@ def create_safe_narration(
         candidates,
         start=1,
     ):
+
+        candidate = remove_source_attribution(
+            candidate
+        )
 
         test_file = (
             AUDIO_DIR
@@ -1334,6 +1406,10 @@ def create_safe_narration(
                     limit,
                 )
 
+                candidate = remove_source_attribution(
+                    candidate
+                )
+
                 if (
                     not candidate
                     or word_count(candidate)
@@ -1436,6 +1512,10 @@ def generate_tts(
     expected_duration=None,
 ):
 
+    text = remove_source_attribution(
+        text
+    )
+
     if not text:
 
         raise RuntimeError(
@@ -1530,7 +1610,104 @@ def generate_tts(
 
 
 # ============================================================
-# IMAGE URL EXTRACTION
+# IMAGE URL HELPERS
+# ============================================================
+
+def looks_like_url(value):
+
+    if not isinstance(value, str):
+        return False
+
+    value = value.strip()
+
+    return value.startswith(
+        (
+            "http://",
+            "https://",
+        )
+    )
+
+
+def is_direct_image_url(url):
+
+    if not looks_like_url(url):
+        return False
+
+    lower = url.lower().split("?")[0].split("#")[0]
+
+    image_extensions = (
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".webp",
+        ".avif",
+        ".gif",
+        ".bmp",
+        ".tif",
+        ".tiff",
+    )
+
+    return lower.endswith(
+        image_extensions
+    )
+
+
+def looks_like_article_url(url):
+
+    if not looks_like_url(url):
+        return False
+
+    lower = url.lower()
+
+    if is_direct_image_url(url):
+        return False
+
+    article_terms = [
+        "/news/",
+        "/story/",
+        "/article/",
+        "/articles/",
+        "/202",
+        "/politics/",
+        "/business/",
+        "/counties/",
+        "/bomet-",
+        "/kericho-",
+        "/nakuru-",
+        "/nandi-",
+        "/uasin",
+        "/narok-",
+        "/west-pokot",
+        "/elgeyo",
+        "/marakwet",
+    ]
+
+    for term in article_terms:
+
+        if term in lower:
+            return True
+
+    return True
+
+
+def normalize_image_url(url):
+
+    if not isinstance(url, str):
+        return ""
+
+    url = url.strip()
+
+    if not url:
+        return ""
+
+    if url.startswith("//"):
+        url = "https:" + url
+
+    return url
+
+
+# ============================================================
+# RECURSIVE IMAGE URL EXTRACTION
 # ============================================================
 
 def recursive_image_urls(
@@ -1554,12 +1731,9 @@ def recursive_image_urls(
                     or "photo" in key_lower
                     or "media" in key_lower
                     or "thumbnail" in key_lower
-                    or "url" in key_lower
                 ):
 
-                    if value.startswith(
-                        "http"
-                    ):
+                    if looks_like_url(value):
 
                         results.append(
                             value
@@ -1590,6 +1764,350 @@ def recursive_image_urls(
     return results
 
 
+# ============================================================
+# EXTRACT IMAGES FROM ARTICLE PAGE
+#
+# This is the important V25 fix.
+#
+# If selected_story.json contains:
+#
+# https://www.kbc.co.ke/bomet-breaks-ground...
+#
+# that is an ARTICLE URL, not an image URL.
+#
+# We open the article and extract:
+# - og:image
+# - twitter:image
+# - JSON-LD images
+# - img src
+# - img data-src
+# - img data-lazy-src
+# - srcset
+# ============================================================
+
+def extract_images_from_article_page(
+    article_url,
+):
+
+    print("")
+    print(
+        "RESOLVING ARTICLE PAGE FOR REAL PHOTOS:"
+    )
+
+    print(
+        article_url
+    )
+
+    if not looks_like_url(article_url):
+
+        return []
+
+    candidates = []
+
+    try:
+
+        response = SESSION.get(
+            article_url,
+            timeout=25,
+            allow_redirects=True,
+        )
+
+    except Exception as exc:
+
+        print(
+            "Article page request failed:",
+            exc,
+        )
+
+        return []
+
+    if response.status_code != 200:
+
+        print(
+            "Article page HTTP status:",
+            response.status_code,
+        )
+
+        return []
+
+    content_type = (
+        response.headers.get(
+            "content-type",
+            ""
+        )
+        .lower()
+    )
+
+    if "html" not in content_type:
+
+        print(
+            "URL did not return HTML:",
+            content_type,
+        )
+
+        return []
+
+    final_url = response.url
+
+    print(
+        "Resolved article URL:",
+        final_url,
+    )
+
+    try:
+
+        soup = BeautifulSoup(
+            response.text,
+            "html.parser",
+        )
+
+    except Exception as exc:
+
+        print(
+            "BeautifulSoup parsing failed:",
+            exc,
+        )
+
+        return []
+
+    # --------------------------------------------------------
+    # OpenGraph image.
+    # --------------------------------------------------------
+
+    for tag in soup.find_all(
+        "meta"
+    ):
+
+        prop = (
+            tag.get("property")
+            or tag.get("name")
+            or ""
+        ).strip().lower()
+
+        content = (
+            tag.get("content")
+            or ""
+        ).strip()
+
+        if not content:
+            continue
+
+        if prop in {
+            "og:image",
+            "og:image:url",
+            "og:image:secure_url",
+            "twitter:image",
+            "twitter:image:src",
+            "twitter:image:url",
+        }:
+
+            candidates.append(
+                content
+            )
+
+    # --------------------------------------------------------
+    # JSON-LD structured data.
+    # --------------------------------------------------------
+
+    for script_tag in soup.find_all(
+        "script",
+        type="application/ld+json",
+    ):
+
+        raw = script_tag.string or script_tag.get_text()
+
+        if not raw:
+            continue
+
+        try:
+
+            parsed = json.loads(
+                raw
+            )
+
+            candidates.extend(
+                recursive_image_urls(
+                    parsed
+                )
+            )
+
+        except Exception:
+
+            # Some publishers have malformed JSON-LD.
+            # Continue to normal HTML extraction.
+            pass
+
+    # --------------------------------------------------------
+    # Standard HTML images.
+    # --------------------------------------------------------
+
+    for img in soup.find_all(
+        "img"
+    ):
+
+        for attr in [
+            "src",
+            "data-src",
+            "data-original",
+            "data-lazy-src",
+            "data-image",
+            "data-url",
+        ]:
+
+            value = img.get(
+                attr
+            )
+
+            if looks_like_url(value):
+
+                candidates.append(
+                    value
+                )
+
+        # ----------------------------------------------------
+        # srcset
+        # ----------------------------------------------------
+
+        srcset = img.get(
+            "srcset"
+        )
+
+        if srcset:
+
+            for item in srcset.split(","):
+
+                item = item.strip()
+
+                if not item:
+                    continue
+
+                parts = item.split()
+
+                if parts:
+
+                    candidate = parts[0]
+
+                    if looks_like_url(
+                        candidate
+                    ):
+
+                        candidates.append(
+                            candidate
+                        )
+
+    # --------------------------------------------------------
+    # Canonical URL-relative image references.
+    # --------------------------------------------------------
+
+    from urllib.parse import urljoin
+
+    normalized = []
+
+    for candidate in candidates:
+
+        if not isinstance(
+            candidate,
+            str,
+        ):
+            continue
+
+        candidate = candidate.strip()
+
+        if not candidate:
+            continue
+
+        if candidate.startswith(
+            (
+                "data:",
+                "javascript:",
+                "#",
+            )
+        ):
+            continue
+
+        if candidate.startswith("//"):
+
+            candidate = (
+                "https:"
+                + candidate
+            )
+
+        elif not candidate.startswith(
+            (
+                "http://",
+                "https://",
+            )
+        ):
+
+            candidate = urljoin(
+                final_url,
+                candidate,
+            )
+
+        if looks_like_url(
+            candidate
+        ):
+
+            normalized.append(
+                candidate
+            )
+
+    # --------------------------------------------------------
+    # De-duplicate.
+    # --------------------------------------------------------
+
+    final = []
+
+    seen = set()
+
+    for candidate in normalized:
+
+        candidate = normalize_image_url(
+            candidate
+        )
+
+        if not candidate:
+            continue
+
+        key = (
+            candidate.lower()
+            .split("?")[0]
+            .split("#")[0]
+        )
+
+        if key in seen:
+            continue
+
+        seen.add(
+            key
+        )
+
+        final.append(
+            candidate
+        )
+
+    print(
+        "Images extracted from article page:",
+        len(final),
+    )
+
+    for index, candidate in enumerate(
+        final[:20],
+        start=1,
+    ):
+
+        print(
+            f"  ARTICLE IMAGE {index}:",
+            candidate,
+        )
+
+    return final
+
+
+# ============================================================
+# GET IMAGE URLS FROM STORY JSON
+# ============================================================
+
 def get_image_urls(story):
 
     urls = []
@@ -1610,23 +2128,27 @@ def get_image_urls(story):
         list,
     ):
 
-        urls.extend(
-            str(x)
-            for x in explicit
-            if (
-                isinstance(x, str)
-                and x.startswith("http")
-            )
-        )
+        for item in explicit:
 
-    elif (
-        isinstance(explicit, str)
-        and explicit.startswith("http")
+            if looks_like_url(
+                item
+            ):
+
+                urls.append(
+                    str(item)
+                )
+
+    elif looks_like_url(
+        explicit
     ):
 
         urls.append(
             explicit
         )
+
+    # --------------------------------------------------------
+    # Standard image fields.
+    # --------------------------------------------------------
 
     for key in [
         "image_url",
@@ -1645,9 +2167,8 @@ def get_image_urls(story):
             key
         )
 
-        if (
-            isinstance(value, str)
-            and value.startswith("http")
+        if looks_like_url(
+            value
         ):
 
             urls.append(
@@ -1661,9 +2182,8 @@ def get_image_urls(story):
 
             for item in value:
 
-                if (
-                    isinstance(item, str)
-                    and item.startswith("http")
+                if looks_like_url(
+                    item
                 ):
 
                     urls.append(
@@ -1675,13 +2195,11 @@ def get_image_urls(story):
                     dict,
                 ):
 
-                    for candidate in recursive_image_urls(
-                        item
-                    ):
-
-                        urls.append(
-                            candidate
+                    urls.extend(
+                        recursive_image_urls(
+                            item
                         )
+                    )
 
         elif isinstance(
             value,
@@ -1694,37 +2212,157 @@ def get_image_urls(story):
                 )
             )
 
+    # --------------------------------------------------------
+    # Search nested story structure.
+    # --------------------------------------------------------
+
     urls.extend(
         recursive_image_urls(
             story
         )
     )
 
-    final = []
+    # --------------------------------------------------------
+    # De-duplicate initial candidates.
+    # --------------------------------------------------------
+
+    initial = []
 
     seen = set()
 
     for url in urls:
 
-        url = url.strip()
-
-        if not url:
+        if not looks_like_url(
+            url
+        ):
             continue
 
-        normalized = (
-            url.lower()
-            .split("?")[0]
+        url = normalize_image_url(
+            url
         )
 
-        if normalized in seen:
+        key = (
+            url.lower()
+            .split("?")[0]
+            .split("#")[0]
+        )
+
+        if key in seen:
             continue
 
         seen.add(
-            normalized
+            key
         )
 
-        final.append(
+        initial.append(
             url
+        )
+
+    print("")
+    print(
+        "INITIAL IMAGE/ARTICLE URL CANDIDATES:",
+        len(initial),
+    )
+
+    # --------------------------------------------------------
+    # CRITICAL FIX:
+    #
+    # Resolve article URLs into actual image URLs.
+    #
+    # Direct image URLs are retained.
+    # Article URLs are NEVER sent to download_image().
+    # --------------------------------------------------------
+
+    final = []
+
+    final_seen = set()
+
+    for url in initial:
+
+        if is_direct_image_url(
+            url
+        ):
+
+            key = (
+                url.lower()
+                .split("?")[0]
+                .split("#")[0]
+            )
+
+            if key not in final_seen:
+
+                final_seen.add(
+                    key
+                )
+
+                final.append(
+                    url
+                )
+
+            continue
+
+        # ----------------------------------------------------
+        # This is not a direct image URL.
+        # Treat it as an article page and resolve it.
+        # ----------------------------------------------------
+
+        print("")
+        print(
+            "NON-DIRECT IMAGE URL DETECTED."
+        )
+
+        print(
+            "Resolving article/media page:",
+            url,
+        )
+
+        article_images = (
+            extract_images_from_article_page(
+                url
+            )
+        )
+
+        for image_url in article_images:
+
+            if not is_direct_image_url(
+                image_url
+            ):
+
+                # Even extracted candidates can sometimes
+                # still be page URLs. Do not download them.
+                continue
+
+            key = (
+                image_url.lower()
+                .split("?")[0]
+                .split("#")[0]
+            )
+
+            if key in final_seen:
+                continue
+
+            final_seen.add(
+                key
+            )
+
+            final.append(
+                image_url
+            )
+
+    print("")
+    print(
+        "FINAL DIRECT IMAGE URL CANDIDATES:",
+        len(final),
+    )
+
+    for index, url in enumerate(
+        final[:30],
+        start=1,
+    ):
+
+        print(
+            f"  IMAGE URL {index}:",
+            url,
         )
 
     return final
@@ -1736,7 +2374,20 @@ def get_image_urls(story):
 
 def image_url_is_bad(url):
 
+    if not isinstance(
+        url,
+        str,
+    ):
+
+        return True
+
     value = url.lower()
+
+    if not is_direct_image_url(
+        value
+    ):
+
+        return True
 
     for term in BAD_IMAGE_TERMS:
 
@@ -1757,6 +2408,21 @@ def download_image(
 
     try:
 
+        # ----------------------------------------------------
+        # NEVER attempt to download an article page as image.
+        # ----------------------------------------------------
+
+        if not is_direct_image_url(
+            url
+        ):
+
+            print(
+                "Rejected non-direct image URL:",
+                url,
+            )
+
+            return False
+
         if image_url_is_bad(
             url
         ):
@@ -1770,7 +2436,7 @@ def download_image(
 
         response = SESSION.get(
             url,
-            timeout=20,
+            timeout=25,
             allow_redirects=True,
         )
 
@@ -1779,6 +2445,35 @@ def download_image(
             print(
                 "HTTP error:",
                 response.status_code,
+                url,
+            )
+
+            return False
+
+        content_type = (
+            response.headers.get(
+                "content-type",
+                ""
+            )
+            .lower()
+        )
+
+        # ----------------------------------------------------
+        # A direct image candidate must actually return image
+        # content. This prevents HTML article pages from being
+        # saved as .jpg files.
+        # ----------------------------------------------------
+
+        if (
+            content_type
+            and not content_type.startswith(
+                "image/"
+            )
+        ):
+
+            print(
+                "Rejected non-image content:",
+                content_type,
                 url,
             )
 
@@ -1829,6 +2524,14 @@ def download_image(
             "Image download failed:",
             exc,
         )
+
+        try:
+
+            if output_path.exists():
+                output_path.unlink()
+
+        except Exception:
+            pass
 
         return False
 
@@ -1981,20 +2684,30 @@ def download_real_images(story):
     )
 
     print(
-        "Image URLs discovered:",
+        "Direct image URLs ready for download:",
         len(urls),
     )
 
     if not urls:
 
         print(
-            "ERROR: No image URLs found in selected story."
+            "ERROR: No direct image URLs found "
+            "after article-page resolution."
         )
 
         return []
 
     for old in SOURCE_DIR.glob(
         "story_image_*.jpg"
+    ):
+
+        try:
+            old.unlink()
+        except Exception:
+            pass
+
+    for old in SOURCE_DIR.glob(
+        "_candidate_*.jpg"
     ):
 
         try:
@@ -2026,7 +2739,25 @@ def download_real_images(story):
             image_index,
         )
 
-        print(url)
+        print(
+            url
+        )
+
+        # ----------------------------------------------------
+        # Absolute safety:
+        # article URLs should never reach this function.
+        # ----------------------------------------------------
+
+        if not is_direct_image_url(
+            url
+        ):
+
+            print(
+                "SKIPPED: URL is not a direct image."
+            )
+
+            image_index += 1
+            continue
 
         temp_path = (
             SOURCE_DIR
@@ -2136,7 +2867,7 @@ def download_real_images(story):
         )
 
         print(
-            "ACCEPTED:",
+            "ACCEPTED REAL ARTICLE PHOTO:",
             final_path,
         )
 
@@ -2437,7 +3168,6 @@ def cover_crop(
 # ============================================================
 # CREATE SCENE FRAME
 #
-# IMPORTANT:
 # SOURCE IS INTENTIONALLY NOT DISPLAYED.
 # ============================================================
 
@@ -2451,10 +3181,6 @@ def create_scene_frame(
     image = Image.open(
         image_path
     ).convert("RGB")
-
-    # --------------------------------------------------------
-    # Background
-    # --------------------------------------------------------
 
     background = cover_crop(
         image,
@@ -2707,18 +3433,7 @@ def create_scene_frame(
     )
 
     # --------------------------------------------------------
-    # IMPORTANT:
-    # NO SOURCE TEXT HERE.
-    #
-    # The previous V23 code displayed:
-    #
-    # Source: {source}
-    #
-    # That has been completely removed.
-    # --------------------------------------------------------
-
-    # --------------------------------------------------------
-    # Footer
+    # NO SOURCE TEXT.
     # --------------------------------------------------------
 
     footer_y = 1810
@@ -3779,6 +4494,19 @@ def clean_working_files():
             except Exception:
                 pass
 
+    for pattern in [
+        "_candidate_*.jpg",
+    ]:
+
+        for path in SOURCE_DIR.glob(
+            pattern
+        ):
+
+            try:
+                path.unlink()
+            except Exception:
+                pass
+
 
 # ============================================================
 # MAIN
@@ -3818,7 +4546,6 @@ def main():
             story
         )
 
-        # Source is retained ONLY as metadata/logging.
         source = get_story_source(
             story
         )
@@ -3839,6 +4566,7 @@ def main():
         )
 
         print("")
+
         print(
             "SOURCE WILL NOT APPEAR IN VIDEO."
         )
@@ -3858,6 +4586,10 @@ def main():
                 story,
                 script,
             )
+        )
+
+        narration = remove_source_attribution(
+            narration
         )
 
         if not narration:
@@ -3937,6 +4669,8 @@ def main():
 
         # ----------------------------------------------------
         # Images.
+        #
+        # V25 now resolves article URLs into actual images.
         # ----------------------------------------------------
 
         image_paths = download_real_images(
@@ -3962,9 +4696,6 @@ def main():
 
         # ----------------------------------------------------
         # Create scenes.
-        #
-        # IMPORTANT:
-        # Source is NOT passed to scene renderer.
         # ----------------------------------------------------
 
         frame_paths = create_scene_frames(
@@ -4065,6 +4796,10 @@ def main():
 
         print(
             "SOURCE AUDIO: NONE"
+        )
+
+        print(
+            "ARTICLE URL RESOLUTION: SUCCESS"
         )
 
         print(
