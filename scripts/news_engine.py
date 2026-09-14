@@ -1,33 +1,41 @@
 # ============================================================
 # RIFT VALLEY WATCH
-# REAL-TIME NEWS ENGINE V6
+# REAL-TIME NEWS ENGINE
+# VERSION: RVW_NEWS_ENGINE_V6_STABLE_MULTIPHOTO
 #
 # PURPOSE
 # - Fetch fresh Rift Valley news at runtime
-# - Prioritize today's events
-# - Cover the entire Rift Valley
+# - Prioritize current/recent stories
+# - Cover the wider Rift Valley region
 # - Prioritize politics + major regional developments
-# - Exclude Rigathi Gachagua
-# - Avoid Citizen branding
-# - Download genuine article photographs
-# - Support multiple genuine article photographs
+# - Exclude Rigathi Gachagua completely
+# - Exclude Citizen/Citizen Digital/Citizen TV
+# - Download REAL article photographs
+# - Attempt to collect MULTIPLE real article photographs
+# - Avoid logos, avatars, placeholders and generic images
 # - Create data/story.json
 # - Create data/script.json
-# - Preserve compatibility with rift_valley_main.py
+#
+# OUTPUT
+#   data/story.json
+#   data/script.json
+#   assets/source/story_image*.jpg
+#
+# COMPATIBILITY
+#   rift_valley_main.py
+#   rift_valley_video_generator.py
 # ============================================================
-
-import json
-import hashlib
-import html
-import re
-import time
-import urllib.parse
-import urllib.request
-import urllib.error
-import xml.etree.ElementTree as ET
 
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
+from urllib.parse import urljoin, urlparse, quote
+import hashlib
+import html
+import json
+import re
+import time
+
+import requests
 
 
 # ============================================================
@@ -48,22 +56,37 @@ SCRIPT_FILE = DATA_DIR / "script.json"
 # ============================================================
 
 MAX_STORIES = 8
-TODAY_PRIORITY_HOURS = 24
-RECENT_PRIORITY_HOURS = 48
-REQUEST_TIMEOUT = 20
 MAX_IMAGES_PER_STORY = 6
 
+TODAY_PRIORITY_HOURS = 24
+RECENT_PRIORITY_HOURS = 72
+
+REQUEST_TIMEOUT = 25
+
+MIN_IMAGE_BYTES = 10000
+MIN_IMAGE_WIDTH = 300
+MIN_IMAGE_HEIGHT = 200
+
 USER_AGENT = (
-    "Mozilla/5.0 "
-    "(X11; Linux x86_64) "
+    "Mozilla/5.0 (X11; Linux x86_64) "
     "AppleWebKit/537.36 "
     "(KHTML, like Gecko) "
-    "Chrome/131.0 Safari/537.36"
+    "Chrome/128.0.0.0 Safari/537.36"
 )
+
+HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": (
+        "text/html,application/xhtml+xml,"
+        "application/xml;q=0.9,image/avif,image/webp,"
+        "image/apng,*/*;q=0.8"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
 
 # ============================================================
-# RIFT VALLEY COVERAGE
+# REGION
 # ============================================================
 
 COUNTIES = [
@@ -84,120 +107,114 @@ COUNTIES = [
 
 
 COUNTY_ALIASES = {
-    "Bomet": [
-        "Bomet",
-        "Sotik",
-        "Longisa",
-        "Chebunyo",
-        "Chepalungu",
-        "Konoin",
-        "Kipkelion",
+    "bomet": [
+        "bomet",
+        "sotik",
+        "chepalungu",
+        "konoin",
+        "kipkelion",
+        "longisa",
     ],
-
-    "Kericho": [
-        "Kericho",
-        "Litein",
-        "Londiani",
-        "Ainamoi",
-        "Bureti",
-        "Belgut",
+    "kericho": [
+        "kericho",
+        "litein",
+        "bureti",
+        "belgut",
+        "ainamoi",
+        "kipkelion",
     ],
-
-    "Nakuru": [
-        "Nakuru",
-        "Naivasha",
-        "Gilgil",
-        "Molo",
-        "Njoro",
-        "Bahati",
-        "Subukia",
-        "Rongai",
+    "nakuru": [
+        "nakuru",
+        "naivasha",
+        "gilgil",
+        "molo",
+        "bahati",
+        "subukia",
+        "rongai",
+        "kuresoi",
     ],
-
-    "Narok": [
-        "Narok",
-        "Kilgoris",
-        "Suswa",
-        "Mai Mahiu",
-        "Mara",
-        "Transmara",
+    "narok": [
+        "narok",
+        "kilgoris",
+        "transmara",
+        "ololulunga",
+        "suswa",
+        "mara",
     ],
-
-    "Nandi": [
-        "Nandi",
-        "Kapsabet",
-        "Nandi Hills",
-        "Mosop",
-        "Aldai",
-        "Emgwen",
+    "nandi": [
+        "nandi",
+        "kapsabet",
+        "mosoriot",
+        "aldai",
+        "chesumei",
+        "emgwen",
     ],
-
-    "Uasin Gishu": [
-        "Uasin Gishu",
-        "Eldoret",
-        "Turbo",
-        "Kesses",
-        "Soy",
-        "Moiben",
+    "uasin gishu": [
+        "uasin gishu",
+        "eldoret",
+        "ainabkoi",
+        "kapseret",
+        "kesses",
+        "moiben",
+        "soy",
+        "turbo",
     ],
-
-    "Elgeyo-Marakwet": [
-        "Elgeyo-Marakwet",
-        "Iten",
-        "Kapsowar",
-        "Keiyo",
-        "Marakwet",
-        "Kabarnet",
+    "elgeyo-marakwet": [
+        "elgeyo",
+        "marakwet",
+        "iten",
+        "keiyo",
+        "keiyo south",
+        "keiyo north",
+        "kapcherop",
+        "kapsowar",
     ],
-
-    "West Pokot": [
-        "West Pokot",
-        "Kapenguria",
-        "Kacheliba",
-        "Sigor",
-        "Pokot",
+    "west pokot": [
+        "west pokot",
+        "pokot",
+        "kapenguria",
+        "sigor",
+        "kacheliba",
+        "pokot south",
     ],
-
-    "Trans Nzoia": [
-        "Trans Nzoia",
-        "Kitale",
-        "Endebess",
-        "Kiminini",
-        "Cherangany",
-        "Saboti",
+    "trans nzoia": [
+        "trans nzoia",
+        "kitale",
+        "endebess",
+        "cherangany",
+        "kiminini",
+        "saboti",
     ],
-
-    "Samburu": [
-        "Samburu",
-        "Maralal",
-        "Baragoi",
-        "Wamba",
+    "samburu": [
+        "samburu",
+        "maralal",
+        "baragoi",
+        "samburu east",
+        "samburu north",
     ],
-
-    "Turkana": [
-        "Turkana",
-        "Lodwar",
-        "Kakuma",
-        "Lokichar",
-        "Kalokol",
+    "turkana": [
+        "turkana",
+        "lodwar",
+        "kakuma",
+        "lokichoggio",
+        "turkana central",
+        "turkana west",
     ],
-
-    "Laikipia": [
-        "Laikipia",
-        "Nanyuki",
-        "Rumuruti",
-        "Nyahururu",
-        "Ndaragwa",
+    "laikipia": [
+        "laikipia",
+        "nanyuki",
+        "nyahururu",
+        "rumuruti",
+        "ol pejeta",
     ],
-
-    "Kajiado": [
-        "Kajiado",
-        "Kitengela",
-        "Ngong",
-        "Loitokitok",
-        "Namanga",
-        "Isinya",
-        "Magadi",
+    "kajiado": [
+        "kajiado",
+        "kitengela",
+        "ngong",
+        "namanga",
+        "ongata rongai",
+        "isinya",
+        "loitokitok",
     ],
 }
 
@@ -207,86 +224,99 @@ COUNTY_ALIASES = {
 # ============================================================
 
 SEARCH_QUERIES = [
-
-    '"Rift Valley" Kenya news',
-
-    '"Rift Valley" Kenya politics',
-    '"Rift Valley" Kenya government',
-    '"Rift Valley" Kenya Ruto',
-    '"Rift Valley" Kenya UDA',
-    '"Rift Valley" Kenya 2027 politics',
-
-    '"Rift Valley" Kenya development',
-    '"Rift Valley" Kenya roads',
-    '"Rift Valley" Kenya infrastructure',
-    '"Rift Valley" Kenya projects',
-
-    '"Rift Valley" Kenya business',
-    '"Rift Valley" Kenya economy',
-    '"Rift Valley" Kenya investment',
-    '"Rift Valley" Kenya agriculture',
-
-    '"Rift Valley" Kenya security',
-    '"Rift Valley" Kenya health',
-    '"Rift Valley" Kenya education',
-
-    '"Bomet" Kenya news',
-    '"Kericho" Kenya news',
-    '"Nakuru" Kenya news',
-    '"Narok" Kenya news',
-    '"Nandi" Kenya news',
-    '"Uasin Gishu" Kenya news',
-    '"Elgeyo-Marakwet" Kenya news',
-    '"West Pokot" Kenya news',
-    '"Trans Nzoia" Kenya news',
-    '"Samburu" Kenya news',
-    '"Turkana" Kenya news',
-    '"Laikipia" Kenya news',
-    '"Kajiado" Kenya news',
-
-    '"William Ruto" "Rift Valley"',
-    '"President Ruto" "Rift Valley"',
-    '"UDA" "Rift Valley"',
-    '"Rift Valley" governor Kenya',
-    '"Rift Valley" MP Kenya',
-    '"Rift Valley" senator Kenya',
+    "Rift Valley Kenya latest news today",
+    "Rift Valley Kenya politics today",
+    "Rift Valley Kenya development today",
+    "Rift Valley Kenya infrastructure today",
+    "Rift Valley Kenya business economy today",
+    "Rift Valley Kenya agriculture today",
+    "Rift Valley Kenya health today",
+    "Rift Valley Kenya education today",
+    "Rift Valley Kenya security today",
+    "Bomet latest news today",
+    "Kericho latest news today",
+    "Nakuru latest news today",
+    "Narok latest news today",
+    "Nandi latest news today",
+    "Uasin Gishu latest news today",
+    "Elgeyo Marakwet latest news today",
+    "West Pokot latest news today",
+    "Trans Nzoia latest news today",
+    "Samburu latest news today",
+    "Turkana latest news today",
+    "Laikipia latest news today",
+    "Kajiado latest news today",
+    "Kenya Rift Valley governor latest",
+    "Kenya Rift Valley MP latest",
+    "Kenya Rift Valley roads projects",
+    "Kenya Rift Valley agriculture latest",
+    "Kenya Rift Valley investment latest",
 ]
 
 
 # ============================================================
-# HARD EXCLUSIONS
+# SOURCES
 # ============================================================
 
-FORBIDDEN_NAMES = [
+TRUSTED_SOURCES = {
+    "nation": 24,
+    "daily nation": 24,
+    "the standard": 23,
+    "standard media": 23,
+    "kbc": 22,
+    "capital fm": 21,
+    "the star": 21,
+    "ntv kenya": 21,
+    "kenya news agency": 24,
+    "business daily": 23,
+    "business daily africa": 23,
+    "the east african": 22,
+    "people daily": 19,
+    "tuko": 15,
+    "county government": 25,
+    "government of kenya": 25,
+    "ministry": 22,
+    "state department": 22,
+}
+
+
+# ============================================================
+# FORBIDDEN TERMS
+# ============================================================
+
+FORBIDDEN_TERMS = [
     "rigathi gachagua",
     "gachagua",
 ]
 
 
-# ============================================================
-# SOURCE PRIORITY
-#
-# Citizen removed deliberately.
-# The renderer must never introduce Citizen branding.
-# ============================================================
+FORBIDDEN_SOURCE_TERMS = [
+    "citizen",
+    "citizen digital",
+    "citizen tv",
+]
 
-TRUSTED_SOURCES = {
-    "kenya news agency": 28,
-    "government of kenya": 27,
-    "county government": 25,
-    "nation": 22,
-    "the standard": 22,
-    "standard media": 22,
-    "kbc": 22,
-    "capital fm": 20,
-    "the star": 20,
-    "ntv kenya": 20,
-    "business daily": 20,
-    "business daily africa": 20,
-    "the east african": 18,
-    "people daily": 17,
-    "tuko": 15,
-}
+
+FORBIDDEN_IMAGE_TERMS = [
+    "citizen",
+    "citizen-digital",
+    "citizen_tv",
+    "citizentv",
+    "world-cup",
+    "worldcup",
+    "avatar",
+    "placeholder",
+    "default",
+    "profile",
+    "generic",
+    "logo",
+    "sprite",
+    "icon",
+    "favicon",
+    "advert",
+    "advertisement",
+    "banner",
+]
 
 
 # ============================================================
@@ -294,219 +324,243 @@ TRUSTED_SOURCES = {
 # ============================================================
 
 CATEGORY_KEYWORDS = {
-
     "POLITICS": [
-        "president",
-        "ruto",
-        "uda",
         "politics",
         "political",
         "governor",
-        "senator",
-        "mp ",
+        "governors",
+        "mp",
+        "mps",
         "member of parliament",
+        "senator",
+        "senators",
+        "uda",
+        "parliament",
+        "county assembly",
+        "assembly",
         "election",
-        "2027",
-        "party",
+        "elections",
         "campaign",
-        "rally",
-        "coalition",
-        "government",
+        "party",
+        "ruto",
+        "president",
         "deputy president",
+        "minister",
         "cabinet",
     ],
-
     "DEVELOPMENT": [
         "development",
         "project",
-        "launched",
-        "construction",
+        "projects",
         "funding",
-        "government project",
-        "county project",
-        "development plan",
+        "construction",
+        "facility",
+        "facilities",
+        "programme",
+        "program",
+        "investment",
     ],
-
     "INFRASTRUCTURE": [
         "road",
         "roads",
         "highway",
         "bridge",
+        "bridges",
         "railway",
         "airport",
         "water",
-        "sewer",
-        "infrastructure",
-        "construction",
         "dam",
+        "electricity",
+        "power",
+        "infrastructure",
     ],
-
     "BUSINESS & ECONOMY": [
         "business",
         "economy",
+        "economic",
         "investment",
         "investor",
-        "market",
         "trade",
+        "market",
+        "markets",
+        "industry",
         "company",
+        "companies",
         "jobs",
         "employment",
-        "industry",
         "finance",
-        "revenue",
+        "bank",
+        "banking",
     ],
-
     "AGRICULTURE": [
         "agriculture",
         "farmer",
         "farmers",
+        "farming",
         "tea",
         "coffee",
         "maize",
+        "milk",
         "livestock",
         "dairy",
         "crop",
+        "crops",
         "harvest",
         "fertilizer",
-        "farming",
+        "fertiliser",
     ],
-
     "HEALTH": [
         "health",
         "hospital",
-        "doctor",
-        "patients",
-        "disease",
+        "hospitals",
         "clinic",
+        "clinics",
+        "doctor",
+        "doctors",
+        "medicine",
         "medical",
-        "healthcare",
+        "disease",
+        "patients",
     ],
-
     "EDUCATION": [
         "education",
         "school",
         "schools",
-        "university",
+        "student",
         "students",
-        "teachers",
+        "university",
         "college",
+        "teacher",
+        "teachers",
         "education ministry",
     ],
-
     "SECURITY": [
-        "police",
         "security",
+        "police",
         "crime",
         "arrest",
-        "attack",
-        "fire",
-        "accident",
-        "missing",
+        "arrests",
+        "suspect",
+        "suspects",
         "terror",
-        "bandit",
-        "investigation",
-        "death",
+        "terrorism",
+        "accident",
+        "accidents",
+        "fire",
+        "flood",
+        "disaster",
     ],
 }
-
-
-# ============================================================
-# IMAGE EXCLUSION TERMS
-# ============================================================
-
-BAD_IMAGE_TERMS = [
-    "citizen",
-    "citizen-tv",
-    "citizen_tv",
-    "ctv",
-    "world-cup",
-    "world_cup",
-    "avatar",
-    "placeholder",
-    "default-image",
-    "default_image",
-    "generic",
-    "profile-picture",
-    "profile_picture",
-    "profilepic",
-    "logo",
-    "logos",
-    "icon",
-    "sprite",
-    "favicon",
-    "thumbnail-placeholder",
-    "no-image",
-    "no_image",
-]
 
 
 # ============================================================
 # HTTP
 # ============================================================
 
+SESSION = requests.Session()
+SESSION.headers.update(HEADERS)
+
+
 def http_get(url, timeout=REQUEST_TIMEOUT):
-
-    if not url:
-        return b""
-
-    request = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": USER_AGENT,
-            "Accept": "*/*",
-        },
-    )
-
     try:
-        with urllib.request.urlopen(
-            request,
-            timeout=timeout
-        ) as response:
+        response = SESSION.get(
+            url,
+            timeout=timeout,
+            allow_redirects=True,
+        )
 
-            return response.read()
+        response.raise_for_status()
 
-    except Exception:
-        return b""
+        return response
+
+    except Exception as exc:
+        print(
+            f"[NEWS] GET failed: {url} -> {exc}"
+        )
+        return None
 
 
 # ============================================================
-# CLEANING
+# TEXT CLEANING
 # ============================================================
 
 def clean_text(value):
-
     if value is None:
         return ""
 
-    value = html.unescape(str(value))
+    text = html.unescape(str(value))
 
-    value = re.sub(
+    text = text.replace("\r", " ")
+    text = text.replace("\n", " ")
+
+    text = re.sub(
         r"<[^>]+>",
         " ",
-        value
+        text,
     )
 
-    value = re.sub(
+    text = re.sub(
         r"\s+",
         " ",
-        value
+        text,
     )
 
-    return value.strip()
+    return text.strip()
 
 
-def clean_title(value):
+def clean_title(title):
+    title = clean_text(title)
 
-    value = clean_text(value)
+    patterns = [
+        r"\s*[-|–—]\s*Citizen Digital.*$",
+        r"\s*[-|–—]\s*Citizen TV.*$",
+        r"\s*[-|–—]\s*Nation.*$",
+        r"\s*[-|–—]\s*KBC.*$",
+        r"\s*[-|–—]\s*The Star.*$",
+        r"\s*[-|–—]\s*The Standard.*$",
+        r"\s*[-|–—]\s*People Daily.*$",
+    ]
 
-    value = re.sub(
-        r"\s*-\s*(Citizen Digital|Nation|KBC|The Star|The Standard|NTV).*$",
-        "",
-        value,
-        flags=re.IGNORECASE
+    for pattern in patterns:
+        title = re.sub(
+            pattern,
+            "",
+            title,
+            flags=re.I,
+        )
+
+    return clean_text(title)
+
+
+# ============================================================
+# FORBIDDEN CHECKS
+# ============================================================
+
+def contains_forbidden_text(text):
+    lowered = clean_text(text).lower()
+
+    return any(
+        term in lowered
+        for term in FORBIDDEN_TERMS
     )
 
-    return value.strip(" -")
+
+def forbidden_source(source_name):
+    lowered = clean_text(source_name).lower()
+
+    return any(
+        term in lowered
+        for term in FORBIDDEN_SOURCE_TERMS
+    )
+
+
+def forbidden_image_url(url):
+    lowered = clean_text(url).lower()
+
+    return any(
+        term in lowered
+        for term in FORBIDDEN_IMAGE_TERMS
+    )
 
 
 # ============================================================
@@ -514,26 +568,45 @@ def clean_title(value):
 # ============================================================
 
 def parse_date(value):
-
     if not value:
         return None
 
-    value = value.strip()
+    text = clean_text(value)
+
+    # ISO format.
+    try:
+        normalized = text.replace(
+            "Z",
+            "+00:00",
+        )
+
+        dt = datetime.fromisoformat(
+            normalized
+        )
+
+        if dt.tzinfo is None:
+            dt = dt.replace(
+                tzinfo=timezone.utc
+            )
+
+        return dt.astimezone(timezone.utc)
+
+    except Exception:
+        pass
 
     formats = [
         "%a, %d %b %Y %H:%M:%S %z",
         "%a, %d %b %Y %H:%M:%S GMT",
-        "%a, %d %b %Y %H:%M GMT",
-        "%a, %d %b %Y %H:%M:%S %Z",
+        "%d %b %Y %H:%M:%S",
+        "%Y-%m-%d",
+        "%d/%m/%Y",
     ]
 
     for fmt in formats:
-
         try:
-
             dt = datetime.strptime(
-                value,
-                fmt
+                text,
+                fmt,
             )
 
             if dt.tzinfo is None:
@@ -541,12 +614,10 @@ def parse_date(value):
                     tzinfo=timezone.utc
                 )
 
-            return dt.astimezone(
-                timezone.utc
-            )
+            return dt.astimezone(timezone.utc)
 
         except Exception:
-            pass
+            continue
 
     return None
 
@@ -556,243 +627,436 @@ def parse_date(value):
 # ============================================================
 
 def fetch_google_news(query):
-
-    encoded = urllib.parse.quote_plus(
-        query
-    )
+    encoded = quote(query)
 
     url = (
-        "https://news.google.com/rss/search?"
-        f"q={encoded}"
+        "https://news.google.com/rss/search"
+        f"?q={encoded}"
         "&hl=en-KE"
         "&gl=KE"
         "&ceid=KE:en"
     )
 
-    raw = http_get(url)
+    response = http_get(url)
 
-    if not raw:
+    if response is None:
         return []
 
-    try:
-        root = ET.fromstring(raw)
+    text = response.text
 
-    except Exception:
-        return []
+    items = re.findall(
+        r"<item>(.*?)</item>",
+        text,
+        flags=re.I | re.S,
+    )
 
     results = []
 
-    for item in root.findall(".//item"):
+    for item in items:
+        title_match = re.search(
+            r"<title>(.*?)</title>",
+            item,
+            flags=re.I | re.S,
+        )
+
+        link_match = re.search(
+            r"<link>(.*?)</link>",
+            item,
+            flags=re.I | re.S,
+        )
+
+        pub_match = re.search(
+            r"<pubDate>(.*?)</pubDate>",
+            item,
+            flags=re.I | re.S,
+        )
+
+        source_match = re.search(
+            r"<source[^>]*>(.*?)</source>",
+            item,
+            flags=re.I | re.S,
+        )
+
+        description_match = re.search(
+            r"<description>(.*?)</description>",
+            item,
+            flags=re.I | re.S,
+        )
 
         title = clean_title(
-            item.findtext("title", "")
+            title_match.group(1)
+            if title_match
+            else ""
         )
 
         link = clean_text(
-            item.findtext("link", "")
-        )
-
-        description = clean_text(
-            item.findtext("description", "")
+            link_match.group(1)
+            if link_match
+            else ""
         )
 
         pub_date = clean_text(
-            item.findtext("pubDate", "")
+            pub_match.group(1)
+            if pub_match
+            else ""
         )
 
-        source_element = item.find("source")
+        source = clean_text(
+            source_match.group(1)
+            if source_match
+            else ""
+        )
 
-        source = ""
-
-        if source_element is not None:
-            source = clean_text(
-                source_element.text
-            )
+        description = clean_text(
+            description_match.group(1)
+            if description_match
+            else ""
+        )
 
         if not title or not link:
             continue
 
-        results.append({
-            "title": title,
-            "url": link,
-            "description": description,
-            "published": pub_date,
-            "source": source,
-            "query": query,
-        })
+        results.append(
+            {
+                "title": title,
+                "url": link,
+                "date_raw": pub_date,
+                "source_name": source,
+                "description": description,
+                "query": query,
+            }
+        )
 
     return results
 
 
 # ============================================================
-# IMAGE URL NORMALIZATION
+# ARTICLE IMAGE EXTRACTION
 # ============================================================
 
 def absolute_url(base_url, image_url):
-
     if not image_url:
         return ""
 
     image_url = html.unescape(
-        image_url.strip()
+        clean_text(image_url)
+    )
+
+    image_url = image_url.strip(
+        "\"' "
     )
 
     if image_url.startswith("//"):
-        return "https:" + image_url
+        parsed = urlparse(base_url)
 
-    if image_url.startswith("http://"):
-        return image_url
+        return (
+            f"{parsed.scheme}:{image_url}"
+        )
 
-    if image_url.startswith("https://"):
-        return image_url
-
-    return urllib.parse.urljoin(
+    return urljoin(
         base_url,
-        image_url
+        image_url,
     )
 
 
-# ============================================================
-# IMAGE QUALITY FILTER
-# ============================================================
+def extract_meta_images(page_url, html_text):
+    images = []
 
-def image_url_is_allowed(image_url):
-
-    if not image_url:
-        return False
-
-    lower = image_url.lower()
-
-    for term in BAD_IMAGE_TERMS:
-
-        if term in lower:
-            return False
-
-    return True
-
-
-# ============================================================
-# EXTRACT IMAGE URLS
-# ============================================================
-
-def extract_image_urls(page, base_url):
-
-    if not page:
-        return []
-
-    text = page.decode(
-        "utf-8",
-        errors="ignore"
-    )
-
-    candidates = []
-
+    # Open Graph images.
     patterns = [
-
-        r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)',
-
-        r'<meta[^>]+property=["\']og:image:url["\'][^>]+content=["\']([^"\']+)',
-
-        r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)',
-
-        r'<meta[^>]+name=["\']twitter:image:src["\'][^>]+content=["\']([^"\']+)',
-
+        r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
         r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
-
-        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image:url["\']',
-
+        r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']',
         r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:image["\']',
+    ]
 
+    for pattern in patterns:
+        matches = re.findall(
+            pattern,
+            html_text,
+            flags=re.I,
+        )
+
+        for match in matches:
+            image = absolute_url(
+                page_url,
+                match,
+            )
+
+            if image:
+                images.append(image)
+
+    return images
+
+
+def extract_json_ld_images(page_url, html_text):
+    images = []
+
+    blocks = re.findall(
+        r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+        html_text,
+        flags=re.I | re.S,
+    )
+
+    for block in blocks:
+        block = html.unescape(
+            block.strip()
+        )
+
+        try:
+            data = json.loads(block)
+        except Exception:
+            continue
+
+        objects = []
+
+        if isinstance(data, dict):
+            objects.append(data)
+
+            graph = data.get("@graph")
+
+            if isinstance(graph, list):
+                objects.extend(graph)
+
+        elif isinstance(data, list):
+            objects.extend(data)
+
+        for obj in objects:
+            if not isinstance(obj, dict):
+                continue
+
+            image_value = obj.get("image")
+
+            if isinstance(image_value, str):
+                images.append(
+                    absolute_url(
+                        page_url,
+                        image_value,
+                    )
+                )
+
+            elif isinstance(image_value, list):
+                for item in image_value:
+                    if isinstance(item, str):
+                        images.append(
+                            absolute_url(
+                                page_url,
+                                item,
+                            )
+                        )
+
+                    elif isinstance(item, dict):
+                        url = item.get("url")
+
+                        if url:
+                            images.append(
+                                absolute_url(
+                                    page_url,
+                                    url,
+                                )
+                            )
+
+            elif isinstance(image_value, dict):
+                url = image_value.get("url")
+
+                if url:
+                    images.append(
+                        absolute_url(
+                            page_url,
+                            url,
+                        )
+                    )
+
+    return images
+
+
+def extract_article_img_urls(page_url, html_text):
+    images = []
+
+    # Standard src.
+    patterns = [
         r'<img[^>]+src=["\']([^"\']+)["\']',
-
         r'<img[^>]+data-src=["\']([^"\']+)["\']',
-
         r'<img[^>]+data-lazy-src=["\']([^"\']+)["\']',
-
         r'<img[^>]+data-original=["\']([^"\']+)["\']',
     ]
 
     for pattern in patterns:
-
         matches = re.findall(
             pattern,
-            text,
-            flags=re.IGNORECASE
+            html_text,
+            flags=re.I,
         )
 
-        for value in matches:
-
-            absolute = absolute_url(
-                base_url,
-                value
+        for match in matches:
+            image = absolute_url(
+                page_url,
+                match,
             )
 
-            if not absolute:
-                continue
+            if image:
+                images.append(image)
 
-            if not image_url_is_allowed(
-                absolute
-            ):
-                continue
+    # srcset.
+    srcsets = re.findall(
+        r'<img[^>]+srcset=["\']([^"\']+)["\']',
+        html_text,
+        flags=re.I,
+    )
 
-            if absolute not in candidates:
-                candidates.append(
-                    absolute
+    for srcset in srcsets:
+        entries = srcset.split(",")
+
+        for entry in entries:
+            value = entry.strip().split(" ")[0]
+
+            if value:
+                images.append(
+                    absolute_url(
+                        page_url,
+                        value,
+                    )
                 )
 
-    return candidates
+    return images
 
 
-# ============================================================
-# ARTICLE IMAGES
-# ============================================================
+def image_candidate_score(url):
+    lowered = url.lower()
 
-def find_article_images(url):
+    score = 0
 
-    page = http_get(
-        url,
-        timeout=REQUEST_TIMEOUT
+    positive_terms = [
+        "article",
+        "news",
+        "upload",
+        "uploads",
+        "media",
+        "images",
+        "image",
+        "photo",
+        "content",
+        "wp-content",
+    ]
+
+    negative_terms = [
+        "logo",
+        "icon",
+        "favicon",
+        "avatar",
+        "profile",
+        "placeholder",
+        "sprite",
+        "banner",
+        "advert",
+        "ads",
+        "facebook",
+        "twitter",
+        "instagram",
+        "youtube",
+        "worldcup",
+        "world-cup",
+    ]
+
+    for term in positive_terms:
+        if term in lowered:
+            score += 3
+
+    for term in negative_terms:
+        if term in lowered:
+            score -= 20
+
+    if forbidden_image_url(url):
+        score -= 100
+
+    return score
+
+
+def find_article_images(article_url):
+    response = http_get(
+        article_url,
+        timeout=REQUEST_TIMEOUT,
     )
 
-    if not page:
+    if response is None:
         return []
 
-    candidates = extract_image_urls(
-        page,
-        url
+    page = response.text
+
+    candidates = []
+
+    candidates.extend(
+        extract_meta_images(
+            article_url,
+            page,
+        )
     )
 
-    return candidates[:MAX_IMAGES_PER_STORY]
-
-
-# ============================================================
-# IMAGE VALIDATION
-# ============================================================
-
-def validate_image_bytes(content):
-
-    if not content:
-        return False
-
-    if len(content) < 10000:
-        return False
-
-    try:
-
-        from PIL import Image
-        from io import BytesIO
-
-        image = Image.open(
-            BytesIO(content)
+    candidates.extend(
+        extract_json_ld_images(
+            article_url,
+            page,
         )
+    )
 
-        width, height = image.size
+    candidates.extend(
+        extract_article_img_urls(
+            article_url,
+            page,
+        )
+    )
 
-        if width < 400 or height < 300:
-            return False
+    # De-duplicate URLs.
+    unique = []
+    seen = set()
 
-        if width * height < 160000:
-            return False
+    for url in candidates:
+        url = clean_text(url)
+
+        if not url:
+            continue
+
+        if not url.startswith(
+            ("http://", "https://")
+        ):
+            continue
+
+        normalized = url.split("?")[0].lower()
+
+        if normalized in seen:
+            continue
+
+        seen.add(normalized)
+
+        if forbidden_image_url(url):
+            continue
+
+        unique.append(url)
+
+    unique.sort(
+        key=image_candidate_score,
+        reverse=True,
+    )
+
+    return unique[:30]
+
+
+# ============================================================
+# IMAGE DOWNLOAD
+# ============================================================
+
+def image_has_valid_dimensions(path):
+    try:
+        from PIL import Image
+
+        with Image.open(path) as image:
+            width, height = image.size
+
+            if width < MIN_IMAGE_WIDTH:
+                return False
+
+            if height < MIN_IMAGE_HEIGHT:
+                return False
 
         return True
 
@@ -800,89 +1064,112 @@ def validate_image_bytes(content):
         return False
 
 
-# ============================================================
-# DOWNLOAD IMAGE
-# ============================================================
+def download_image(url, destination):
+    if not url:
+        return False
 
-def download_image(
-    image_url,
-    story_id,
-    index
-):
-
-    if not image_url:
-        return ""
-
-    if not image_url_is_allowed(
-        image_url
-    ):
-        return ""
+    if forbidden_image_url(url):
+        return False
 
     try:
-
-        request = urllib.request.Request(
-            image_url,
-            headers={
-                "User-Agent": USER_AGENT,
-                "Accept": (
-                    "image/avif,image/webp,"
-                    "image/apng,image/svg+xml,"
-                    "image/*,*/*;q=0.8"
-                ),
-            },
+        response = SESSION.get(
+            url,
+            timeout=REQUEST_TIMEOUT,
+            stream=True,
+            allow_redirects=True,
         )
 
-        with urllib.request.urlopen(
-            request,
-            timeout=REQUEST_TIMEOUT
-        ) as response:
+        response.raise_for_status()
 
-            content = response.read()
-
-            content_type = (
-                response.headers.get(
-                    "Content-Type",
-                    ""
-                )
-                .lower()
+        content_type = (
+            response.headers.get(
+                "Content-Type",
+                ""
             )
+            .lower()
+        )
 
-        if not validate_image_bytes(
-            content
+        if (
+            "image" not in content_type
+            and not url.lower().endswith(
+                (
+                    ".jpg",
+                    ".jpeg",
+                    ".png",
+                    ".webp",
+                )
+            )
         ):
-            return ""
+            return False
 
-        extension = ".jpg"
-
-        if "webp" in content_type:
-            extension = ".webp"
-
-        elif "png" in content_type:
-            extension = ".png"
-
-        elif "avif" in content_type:
-            extension = ".avif"
-
-        elif "jpeg" in content_type:
-            extension = ".jpg"
-
-        filename = (
-            f"story_{story_id}_{index}{extension}"
+        temporary = destination.with_suffix(
+            ".download"
         )
 
-        output = SOURCE_DIR / filename
+        with temporary.open("wb") as handle:
+            for chunk in response.iter_content(
+                chunk_size=65536
+            ):
+                if chunk:
+                    handle.write(chunk)
 
-        with open(
-            output,
-            "wb"
-        ) as f:
+        if not temporary.exists():
+            return False
 
-            f.write(content)
+        if temporary.stat().st_size < MIN_IMAGE_BYTES:
+            temporary.unlink(missing_ok=True)
+            return False
 
-        return (
-            "assets/source/"
-            + filename
+        if not image_has_valid_dimensions(
+            temporary
+        ):
+            temporary.unlink(missing_ok=True)
+            return False
+
+        temporary.replace(destination)
+
+        return True
+
+    except Exception as exc:
+        try:
+            destination.with_suffix(
+                ".download"
+            ).unlink(
+                missing_ok=True
+            )
+        except Exception:
+            pass
+
+        print(
+            f"[NEWS] Image download failed: "
+            f"{url} -> {exc}"
         )
+
+        return False
+
+
+# ============================================================
+# IMAGE SIGNATURE
+# ============================================================
+
+def file_signature(path):
+    try:
+        digest = hashlib.sha256()
+
+        with path.open(
+            "rb"
+        ) as handle:
+            while True:
+                chunk = handle.read(
+                    1024 * 1024
+                )
+
+                if not chunk:
+                    break
+
+                digest.update(chunk)
+
+        return digest.hexdigest()
 
     except Exception:
         return ""
@@ -892,179 +1179,122 @@ def download_image(
 # COUNTY DETECTION
 # ============================================================
 
-def detect_county(
-    title,
-    description
-):
-
-    text = (
-        f"{title} {description}"
+def detect_county(text):
+    lowered = clean_text(
+        text
     ).lower()
 
-    matches = []
+    best_county = ""
+
+    best_score = 0
 
     for county, aliases in COUNTY_ALIASES.items():
+        score = 0
 
         for alias in aliases:
+            if alias in lowered:
+                score += 1
 
-            if alias.lower() in text:
+        if score > best_score:
+            best_score = score
+            best_county = county
 
-                matches.append(
-                    county
-                )
-
-                break
-
-    if not matches:
+    if not best_county:
         return ""
 
-    for county in matches:
-
-        if county.lower() in text:
-            return county
-
-    return matches[0]
+    return best_county.title()
 
 
 # ============================================================
 # CATEGORY DETECTION
 # ============================================================
 
-def detect_category(
-    title,
-    description
-):
-
-    text = (
-        f"{title} {description}"
+def detect_category(text):
+    lowered = clean_text(
+        text
     ).lower()
 
     scores = {}
 
     for category, keywords in CATEGORY_KEYWORDS.items():
-
         score = 0
 
         for keyword in keywords:
-
-            if keyword.lower() in text:
+            if keyword in lowered:
                 score += 1
 
         scores[category] = score
 
-    best = max(
+    best_category = max(
         scores,
-        key=scores.get
+        key=scores.get,
     )
 
-    if scores[best] == 0:
-        return "REGIONAL NEWS"
+    if scores[best_category] <= 0:
+        return "DEVELOPMENT"
+
+    return best_category
+
+
+# ============================================================
+# SOURCE SCORE
+# ============================================================
+
+def source_score(source_name):
+    lowered = clean_text(
+        source_name
+    ).lower()
+
+    best = 5
+
+    for source, score in TRUSTED_SOURCES.items():
+        if source in lowered:
+            best = max(
+                best,
+                score,
+            )
 
     return best
 
 
 # ============================================================
-# EXCLUSION
+# POLITICAL SCORE
 # ============================================================
 
-def is_forbidden(
-    title,
-    description
-):
-
-    text = (
-        f"{title} {description}"
+def political_score(text):
+    lowered = clean_text(
+        text
     ).lower()
 
-    for name in FORBIDDEN_NAMES:
+    keywords = [
+        "president",
+        "deputy president",
+        "governor",
+        "mp",
+        "mps",
+        "senator",
+        "senators",
+        "parliament",
+        "uda",
+        "ruto",
+        "county assembly",
+        "election",
+        "elections",
+        "politics",
+    ]
 
-        if name in text:
-            return True
-
-    return False
-
-
-# ============================================================
-# TRUSTED SOURCE SCORE
-# ============================================================
-
-def source_score(source):
-
-    source_lower = clean_text(
-        source
-    ).lower()
-
-    score = 0
-
-    for name, points in TRUSTED_SOURCES.items():
-
-        if name in source_lower:
-
-            score = max(
-                score,
-                points
-            )
-
-    return score
-
-
-# ============================================================
-# POLITICAL PRIORITY
-# ============================================================
-
-def political_score(
-    title,
-    description
-):
-
-    text = (
-        f"{title} {description}"
-    ).lower()
-
-    score = 0
-
-    priority_terms = {
-
-        "william ruto": 35,
-        "president ruto": 35,
-        "ruto": 25,
-        "uda": 20,
-        "governor": 18,
-        "senator": 18,
-        "mp ": 15,
-        "member of parliament": 15,
-        "2027": 25,
-        "election": 20,
-        "politics": 15,
-        "political": 15,
-        "party": 12,
-        "government": 10,
-        "cabinet": 15,
-    }
-
-    for term, points in priority_terms.items():
-
-        if term in text:
-            score += points
-
-    return min(
-        score,
-        60
+    return sum(
+        1
+        for keyword in keywords
+        if keyword in lowered
     )
 
 
 # ============================================================
-# FRESHNESS SCORE
+# FRESHNESS
 # ============================================================
 
-def freshness_score(
-    published
-):
-
-    dt = parse_date(
-        published
-    )
-
+def freshness_score(dt):
     if dt is None:
         return 0
 
@@ -1072,142 +1302,31 @@ def freshness_score(
         timezone.utc
     )
 
-    age = (
-        now - dt
-    ).total_seconds() / 3600
+    age = now - dt
 
-    if age < 0:
-        age = 0
+    hours = max(
+        0,
+        age.total_seconds() / 3600,
+    )
 
-    if age <= 6:
-        return 80
+    if hours <= TODAY_PRIORITY_HOURS:
+        return 40
 
-    if age <= 12:
-        return 70
+    if hours <= RECENT_PRIORITY_HOURS:
+        return 25
 
-    if age <= 24:
-        return 60
-
-    if age <= 36:
-        return 35
-
-    if age <= 48:
-        return 15
+    if hours <= 168:
+        return 10
 
     return 0
-
-
-# ============================================================
-# FRESHNESS LABEL
-# ============================================================
-
-def freshness_label(
-    published
-):
-
-    dt = parse_date(
-        published
-    )
-
-    if dt is None:
-        return "UNKNOWN"
-
-    now = datetime.now(
-        timezone.utc
-    )
-
-    age = (
-        now - dt
-    ).total_seconds() / 3600
-
-    if age <= 24:
-        return "TODAY"
-
-    if age <= 48:
-        return "RECENT"
-
-    return "OLD"
 
 
 # ============================================================
 # RELEVANCE
 # ============================================================
 
-def relevance_score(
-    title,
-    description
-):
-
-    text = (
-        f"{title} {description}"
-    ).lower()
-
-    score = 0
-
-    for county in COUNTIES:
-
-        if county.lower() in text:
-            score += 12
-
-    regional_terms = [
-        "rift valley",
-        "eldoret",
-        "nakuru",
-        "narok",
-        "kericho",
-        "bomet",
-        "nandi",
-        "turkana",
-        "pokot",
-        "samburu",
-        "laikipia",
-        "kajiado",
-        "trans nzoia",
-        "marakwet",
-    ]
-
-    for term in regional_terms:
-
-        if term in text:
-            score += 5
-
-    return min(
-        score,
-        50
-    )
-
-
-# ============================================================
-# STORY ID
-# ============================================================
-
-def story_id(
-    title,
-    url
-):
-
-    raw = (
-        title
-        + "|"
-        + url
-    ).encode(
-        "utf-8"
-    )
-
-    return hashlib.sha1(
-        raw
-    ).hexdigest()[:12]
-
-
-# ============================================================
-# NORMALIZE STORY
-# ============================================================
-
-def normalize_story(
-    item
-):
-
-    title = clean_title(
+def relevance_score(item):
+    title = clean_text(
         item.get("title")
     )
 
@@ -1216,82 +1335,1085 @@ def normalize_story(
     )
 
     source = clean_text(
-        item.get("source")
+        item.get("source_name")
+    )
+
+    combined = (
+        f"{title} "
+        f"{description}"
+    )
+
+    if contains_forbidden_text(
+        combined
+    ):
+        return -1000
+
+    if forbidden_source(source):
+        return -1000
+
+    county = detect_county(
+        combined
+    )
+
+    category = detect_category(
+        combined
+    )
+
+    score = 0
+
+    # Rift Valley relevance.
+    if county:
+        score += 35
+
+    if "rift valley" in combined.lower():
+        score += 25
+
+    # Source quality.
+    score += source_score(
+        source
+    )
+
+    # Freshness.
+    dt = parse_date(
+        item.get("date_raw")
+    )
+
+    score += freshness_score(
+        dt
+    )
+
+    # Category.
+    category_weights = {
+        "POLITICS": 18,
+        "DEVELOPMENT": 17,
+        "INFRASTRUCTURE": 17,
+        "BUSINESS & ECONOMY": 16,
+        "AGRICULTURE": 14,
+        "HEALTH": 12,
+        "EDUCATION": 12,
+        "SECURITY": 13,
+    }
+
+    score += category_weights.get(
+        category,
+        5,
+    )
+
+    # Political relevance.
+    score += min(
+        political_score(combined) * 2,
+        12,
+    )
+
+    # Strong titles.
+    if len(title) >= 35:
+        score += 5
+
+    if len(description) >= 80:
+        score += 5
+
+    return score
+
+
+# ============================================================
+# STORY ID
+# ============================================================
+
+def story_id(item):
+    title = clean_text(
+        item.get("title")
+    ).lower()
+
+    url = clean_text(
+        item.get("url")
+    ).lower()
+
+    raw = (
+        f"{title}|{url}"
+    )
+
+    return hashlib.sha1(
+        raw.encode(
+            "utf-8",
+            errors="ignore",
+        )
+    ).hexdigest()[:12]
+
+
+# ============================================================
+# NORMALIZE STORY
+# ============================================================
+
+def normalize_story(item):
+    title = clean_title(
+        item.get("title")
+    )
+
+    description = clean_text(
+        item.get("description")
+    )
+
+    source_name = clean_text(
+        item.get("source_name")
     )
 
     url = clean_text(
         item.get("url")
     )
 
-    published = clean_text(
-        item.get("published")
+    combined = (
+        f"{title} "
+        f"{description}"
     )
 
     county = detect_county(
-        title,
-        description
+        combined
     )
 
     category = detect_category(
-        title,
-        description
+        combined
     )
 
-    currentness = freshness_label(
-        published
+    dt = parse_date(
+        item.get("date_raw")
     )
 
-    freshness = freshness_score(
-        published
-    )
-
-    relevance = relevance_score(
-        title,
-        description
-    )
-
-    politics = political_score(
-        title,
-        description
-    )
-
-    source_points = source_score(
-        source
-    )
-
-    score = (
-        freshness
-        + relevance
-        + politics
-        + source_points
-    )
+    if dt:
+        date_value = dt.isoformat()
+    else:
+        date_value = ""
 
     return {
-
+        "id": story_id(item),
         "title": title,
-
-        "county": (
-            county
-            if county
-            else "Rift Valley"
-        ),
-
+        "county": county,
         "category": category,
+        "date": date_value,
+        "source": {
+            "name": source_name,
+            "url": url,
+            "type": (
+                "OFFICIAL_SOURCE"
+                if (
+                    "county government"
+                    in source_name.lower()
+                    or "government of kenya"
+                    in source_name.lower()
+                    or "ministry"
+                    in source_name.lower()
+                )
+                else "NEWS_SOURCE"
+            ),
+        },
+        "summary": description,
+        "article_url": url,
+        "images": [],
+        "image": "",
+        "image_path": "",
+        "image_urls": [],
+        "verified_facts": [],
+        "official_statement": {
+            "available": False,
+            "speaker": "",
+            "quote": "",
+        },
+        "visuals": [],
+        "editorial": {
+            "confirmed": [],
+            "unconfirmed": [],
+        },
+    }
 
-        "description": description,
 
-        "source": source,
+# ============================================================
+# DEDUPLICATION
+# ============================================================
 
-        "url": url,
+def deduplicate(items):
+    unique = []
 
-        "published": published,
+    seen_urls = set()
+    seen_titles = set()
 
-        "currentness": currentness,
+    for item in items:
+        url = clean_text(
+            item.get("url")
+        ).lower()
 
-        "freshness_score": freshness,
+        title = re.sub(
+            r"[^a-z0-9]+",
+            " ",
+            clean_text(
+                item.get("title")
+            ).lower(),
+        ).strip()
 
-        "relevance_score": relevance,
+        if url and url in seen_urls:
+            continue
 
-        "political_score": politics,
+        if title and title in seen_titles:
+            continue
 
-       
+        if url:
+            seen_urls.add(url)
+
+        if title:
+            seen_titles.add(title)
+
+        unique.append(item)
+
+    return unique
+
+
+# ============================================================
+# DIVERSE SELECTION
+# ============================================================
+
+def select_diverse_stories(items):
+    ranked = sorted(
+        items,
+        key=relevance_score,
+        reverse=True,
+    )
+
+    selected = []
+
+    counties_seen = set()
+    categories_seen = set()
+
+    # First pass: diversity.
+    for item in ranked:
+        if len(selected) >= MAX_STORIES:
+            break
+
+        text = (
+            f"{item.get('title', '')} "
+            f"{item.get('description', '')}"
+        )
+
+        county = detect_county(text)
+        category = detect_category(text)
+
+        if (
+            county
+            and county.lower()
+            in counties_seen
+            and category
+            and category in categories_seen
+        ):
+            continue
+
+        selected.append(item)
+
+        if county:
+            counties_seen.add(
+                county.lower()
+            )
+
+        if category:
+            categories_seen.add(
+                category
+            )
+
+    # Second pass: fill remaining slots.
+    if len(selected) < MAX_STORIES:
+        selected_ids = {
+            story_id(item)
+            for item in selected
+        }
+
+        for item in ranked:
+            if len(selected) >= MAX_STORIES:
+                break
+
+            if story_id(item) in selected_ids:
+                continue
+
+            selected.append(item)
+
+    return selected
+
+
+# ============================================================
+# DOWNLOAD STORY IMAGES
+# ============================================================
+
+def download_story_images(story, story_number):
+    SOURCE_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    article_url = story.get(
+        "article_url"
+    )
+
+    if not article_url:
+        article_url = (
+            story.get("source", {})
+            .get("url", "")
+        )
+
+    if not article_url:
+        return []
+
+    image_urls = find_article_images(
+        article_url
+    )
+
+    if not image_urls:
+        print(
+            "[NEWS] No article images found: "
+            f"{story.get('title')}"
+        )
+
+        return []
+
+    downloaded = []
+
+    signatures = set()
+
+    for index, image_url in enumerate(
+        image_urls,
+        start=1,
+    ):
+        if len(downloaded) >= MAX_IMAGES_PER_STORY:
+            break
+
+        if forbidden_image_url(
+            image_url
+        ):
+            continue
+
+        if index == 1:
+            filename = (
+                f"story_{story_number}_image.jpg"
+            )
+        else:
+            filename = (
+                f"story_{story_number}_"
+                f"image_{index}.jpg"
+            )
+
+        destination = (
+            SOURCE_DIR / filename
+        )
+
+        # Try download.
+        if not download_image(
+            image_url,
+            destination,
+        ):
+            continue
+
+        signature = file_signature(
+            destination
+        )
+
+        if signature and signature in signatures:
+            destination.unlink(
+                missing_ok=True
+            )
+            continue
+
+        if signature:
+            signatures.add(
+                signature
+            )
+
+        downloaded.append(
+            {
+                "path": str(
+                    destination.relative_to(
+                        BASE_DIR
+                    )
+                ),
+                "url": image_url,
+                "file": destination.name,
+            }
+        )
+
+        print(
+            "[NEWS] Downloaded image "
+            f"{len(downloaded)}: "
+            f"{destination.name}"
+        )
+
+    return downloaded
+
+
+# ============================================================
+# NARRATION
+# ============================================================
+
+def build_narration(story):
+    title = clean_text(
+        story.get("title")
+    )
+
+    summary = clean_text(
+        story.get("summary")
+    )
+
+    county = clean_text(
+        story.get("county")
+    )
+
+    category = clean_text(
+        story.get("category")
+    )
+
+    source = (
+        story.get("source", {})
+        if isinstance(
+            story.get("source"),
+            dict,
+        )
+        else {}
+    )
+
+    source_name = clean_text(
+        source.get("name")
+    )
+
+    parts = []
+
+    if title:
+        parts.append(
+            title + "."
+        )
+
+    if summary:
+        parts.append(
+            summary
+        )
+
+    if county:
+        parts.append(
+            f"The development is being "
+            f"followed in {county}."
+        )
+
+    if category:
+        parts.append(
+            f"This is a {category.lower()} "
+            f"update from Rift Valley Watch."
+        )
+
+    if source_name:
+        parts.append(
+            f"Source: {source_name}."
+        )
+
+    narration = " ".join(
+        clean_text(part)
+        for part in parts
+        if clean_text(part)
+    )
+
+    narration = clean_text(
+        narration
+    )
+
+    if contains_forbidden_text(
+        narration
+    ):
+        return ""
+
+    return narration
+
+
+# ============================================================
+# VISUAL METADATA
+# ============================================================
+
+def build_visuals(story):
+    visuals = []
+
+    title = clean_text(
+        story.get("title")
+    )
+
+    county = clean_text(
+        story.get("county")
+    )
+
+    category = clean_text(
+        story.get("category")
+    )
+
+    images = story.get(
+        "images",
+        [],
+    )
+
+    if title:
+        visuals.append(
+            {
+                "type": "REAL_ARTICLE_PHOTO",
+                "description": title,
+            }
+        )
+
+    if county:
+        visuals.append(
+            {
+                "type": "LOCATION",
+                "description": county,
+            }
+        )
+
+    if category:
+        visuals.append(
+            {
+                "type": "CATEGORY",
+                "description": category,
+            }
+        )
+
+    if isinstance(images, list):
+        for index, image in enumerate(
+            images,
+            start=1,
+        ):
+            visuals.append(
+                {
+                    "type": "REAL_ARTICLE_PHOTO",
+                    "description": (
+                        f"Article photograph "
+                        f"{index}"
+                    ),
+                    "image": image,
+                }
+            )
+
+    source = story.get(
+        "source",
+        {},
+    )
+
+    if isinstance(source, dict):
+        source_name = clean_text(
+            source.get("name")
+        )
+
+        if source_name:
+            visuals.append(
+                {
+                    "type": "SOURCE_CARD",
+                    "description": source_name,
+                }
+            )
+
+    return visuals
+
+
+# ============================================================
+# STORY JSON
+# ============================================================
+
+def write_story_json(stories):
+    payload = {
+        "generated_at": datetime.now(
+            timezone.utc
+        ).isoformat(),
+        "region": "Rift Valley, Kenya",
+        "story_count": len(stories),
+        "stories": stories,
+    }
+
+    save_json(
+        STORY_FILE,
+        payload,
+    )
+
+    print(
+        f"[NEWS] Wrote {STORY_FILE}"
+    )
+
+
+# ============================================================
+# SCRIPT JSON
+# ============================================================
+
+def write_script_json(stories):
+    scripts = []
+
+    for story in stories:
+        narration = build_narration(
+            story
+        )
+
+        scripts.append(
+            {
+                "id": story.get("id", ""),
+                "title": story.get(
+                    "title",
+                    "",
+                ),
+                "county": story.get(
+                    "county",
+                    "",
+                ),
+                "category": story.get(
+                    "category",
+                    "",
+                ),
+                "narration": narration,
+                "images": story.get(
+                    "images",
+                    [],
+                ),
+            }
+        )
+
+    payload = {
+        "generated_at": datetime.now(
+            timezone.utc
+        ).isoformat(),
+        "scripts": scripts,
+    }
+
+    save_json(
+        SCRIPT_FILE,
+        payload,
+    )
+
+    print(
+        f"[NEWS] Wrote {SCRIPT_FILE}"
+    )
+
+
+# ============================================================
+# SAVE JSON
+# ============================================================
+
+def save_json(path, data):
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    temporary = path.with_suffix(
+        path.suffix + ".tmp"
+    )
+
+    with temporary.open(
+        "w",
+        encoding="utf-8",
+    ) as handle:
+        json.dump(
+            data,
+            handle,
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    temporary.replace(path)
+
+
+# ============================================================
+# CLEAN OLD SOURCE IMAGES
+# ============================================================
+
+def clean_old_images():
+    SOURCE_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    for path in SOURCE_DIR.iterdir():
+        if not path.is_file():
+            continue
+
+        if path.suffix.lower() not in {
+            ".jpg",
+            ".jpeg",
+            ".png",
+            ".webp",
+        }:
+            continue
+
+        try:
+            path.unlink()
+        except Exception as exc:
+            print(
+                f"[NEWS] Could not remove "
+                f"{path}: {exc}"
+            )
+
+
+# ============================================================
+# COLLECT NEWS
+# ============================================================
+
+def collect_news():
+    print()
+    print("=" * 72)
+    print(
+        "RIFT VALLEY WATCH - "
+        "REAL-TIME NEWS ENGINE V6"
+    )
+    print("=" * 72)
+
+    DATA_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    SOURCE_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    clean_old_images()
+
+    all_items = []
+
+    # --------------------------------------------------------
+    # Fetch Google News RSS results.
+    # --------------------------------------------------------
+
+    for number, query in enumerate(
+        SEARCH_QUERIES,
+        start=1,
+    ):
+        print(
+            f"[NEWS] Search {number}/"
+            f"{len(SEARCH_QUERIES)}: "
+            f"{query}"
+        )
+
+        try:
+            items = fetch_google_news(
+                query
+            )
+
+            all_items.extend(items)
+
+        except Exception as exc:
+            print(
+                f"[NEWS] Search failed: "
+                f"{exc}"
+            )
+
+        # Small pause to reduce request pressure.
+        time.sleep(0.15)
+
+    print(
+        f"[NEWS] Raw results: "
+        f"{len(all_items)}"
+    )
+
+    # --------------------------------------------------------
+    # Filter forbidden content.
+    # --------------------------------------------------------
+
+    filtered = []
+
+    for item in all_items:
+        title = clean_text(
+            item.get("title")
+        )
+
+        description = clean_text(
+            item.get("description")
+        )
+
+        source = clean_text(
+            item.get("source_name")
+        )
+
+        combined = (
+            f"{title} "
+            f"{description}"
+        )
+
+        if contains_forbidden_text(
+            combined
+        ):
+            continue
+
+        if forbidden_source(
+            source
+        ):
+            continue
+
+        if not title:
+            continue
+
+        if not item.get("url"):
+            continue
+
+        filtered.append(item)
+
+    print(
+        f"[NEWS] After content filtering: "
+        f"{len(filtered)}"
+    )
+
+    # --------------------------------------------------------
+    # Deduplicate.
+    # --------------------------------------------------------
+
+    filtered = deduplicate(
+        filtered
+    )
+
+    print(
+        f"[NEWS] After deduplication: "
+        f"{len(filtered)}"
+    )
+
+    # --------------------------------------------------------
+    # Require actual Rift Valley relevance.
+    # --------------------------------------------------------
+
+    relevant = []
+
+    for item in filtered:
+        text = (
+            f"{item.get('title', '')} "
+            f"{item.get('description', '')}"
+        )
+
+        county = detect_county(
+            text
+        )
+
+        if (
+            county
+            or "rift valley"
+            in text.lower()
+        ):
+            relevant.append(item)
+
+    print(
+        f"[NEWS] Rift Valley relevant: "
+        f"{len(relevant)}"
+    )
+
+    # If too few regional results survive,
+    # use the strongest remaining results.
+    if len(relevant) < 4:
+        relevant = sorted(
+            filtered,
+            key=relevance_score,
+            reverse=True,
+        )[:20]
+
+    selected_raw = select_diverse_stories(
+        relevant
+    )
+
+    print(
+        f"[NEWS] Selected candidates: "
+        f"{len(selected_raw)}"
+    )
+
+    # --------------------------------------------------------
+    # Normalize and download real article images.
+    # --------------------------------------------------------
+
+    stories = []
+
+    for number, item in enumerate(
+        selected_raw,
+        start=1,
+    ):
+        story = normalize_story(
+            item
+        )
+
+        title = clean_text(
+            story.get("title")
+        )
+
+        if contains_forbidden_text(
+            title
+        ):
+            continue
+
+        print()
+        print(
+            f"[NEWS] STORY {number}: "
+            f"{title}"
+        )
+
+        print(
+            f"[NEWS] County: "
+            f"{story.get('county', '')}"
+        )
+
+        print(
+            f"[NEWS] Category: "
+            f"{story.get('category', '')}"
+        )
+
+        print(
+            f"[NEWS] Source: "
+            f"{story.get('source', {}).get('name', '')}"
+        )
+
+        images = download_story_images(
+            story,
+            number,
+        )
+
+        if not images:
+            print(
+                "[NEWS] Story rejected: "
+                "no valid real article photo."
+            )
+            continue
+
+        story["images"] = [
+            item["path"]
+            for item in images
+        ]
+
+        story["image_urls"] = [
+            item["url"]
+            for item in images
+        ]
+
+        story["image"] = story[
+            "images"
+        ][0]
+
+        story["image_path"] = story[
+            "images"
+        ][0]
+
+        story["visuals"] = build_visuals(
+            story
+        )
+
+        # Basic confirmed editorial fields.
+        story["editorial"]["confirmed"] = [
+            f"Published source: "
+            f"{story.get('source', {}).get('name', '')}",
+        ]
+
+        if story.get("county"):
+            story["editorial"]["confirmed"].append(
+                f"Location: "
+                f"{story.get('county')}"
+            )
+
+        if story.get("date"):
+            story["editorial"]["confirmed"].append(
+                f"Publication date: "
+                f"{story.get('date')}"
+            )
+
+        stories.append(
+            story
+        )
+
+        if len(stories) >= MAX_STORIES:
+            break
+
+    # --------------------------------------------------------
+    # Emergency fallback.
+    # --------------------------------------------------------
+
+    if not stories:
+        raise RuntimeError(
+            "News engine found no usable "
+            "Rift Valley stories with valid "
+            "real article photographs."
+        )
+
+    # --------------------------------------------------------
+    # Write outputs.
+    # --------------------------------------------------------
+
+    write_story_json(
+        stories
+    )
+
+    write_script_json(
+        stories
+    )
+
+    print()
+    print("=" * 72)
+    print(
+        "NEWS ENGINE COMPLETED SUCCESSFULLY"
+    )
+    print("=" * 72)
+
+    print(
+        f"[NEWS] Final stories: "
+        f"{len(stories)}"
+    )
+
+    for index, story in enumerate(
+        stories,
+        start=1,
+    ):
+        print(
+            f"[NEWS] {index}. "
+            f"{story.get('title', '')}"
+        )
+
+        print(
+            f"       County: "
+            f"{story.get('county', '')}"
+        )
+
+        print(
+            f"       Category: "
+            f"{story.get('category', '')}"
+        )
+
+        print(
+            f"       Photos: "
+            f"{len(story.get('images', []))}"
+        )
+
+    print()
+    print(
+        f"[NEWS] Story file: "
+        f"{STORY_FILE}"
+    )
+
+    print(
+        f"[NEWS] Script file: "
+        f"{SCRIPT_FILE}"
+    )
+
+    return stories
+
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
+
+if __name__ == "__main__":
+    try:
+        collect_news()
+
+    except KeyboardInterrupt:
+        print(
+            "[NEWS] Interrupted."
+        )
+        raise SystemExit(130)
+
+    except Exception as exc:
+        print()
+        print(
+            "=" * 72
+        )
+        print(
+            "NEWS ENGINE FAILED"
+        )
+        print(
+            "=" * 72
+        )
+        print(
+            f"ERROR: {exc}"
+        )
+
+        raise SystemExit(1)
