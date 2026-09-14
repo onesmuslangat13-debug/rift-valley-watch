@@ -1,7 +1,7 @@
 from pathlib import Path
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from urllib.parse import quote_plus, urljoin
+from urllib.parse import quote_plus, urljoin, urlparse, parse_qs, unquote
 from html import unescape
 import hashlib
 import json
@@ -58,10 +58,14 @@ BLOCKED_STORIES = [
 ]
 
 
-# IMPORTANT:
-# Do NOT block every Google-hosted image.
-# Google CDN URLs can contain legitimate article photographs.
-# We only block search pages / screenshots / obvious placeholders.
+BLOCKED_DOMAINS = [
+    "news.google.com",
+    "google.com",
+    "google.co.ke",
+    "bing.com",
+]
+
+
 BLOCKED_IMAGES = [
     "news.google.com",
     "google.com/search",
@@ -164,6 +168,132 @@ def blocked_image(url):
             return True
 
     return False
+
+
+def is_google_url(url):
+    url = normalize_url(url)
+
+    if not url:
+        return False
+
+    host = urlparse(url).netloc.lower()
+
+    return (
+        host == "news.google.com"
+        or host.endswith(".google.com")
+        or host.endswith(".google.co.ke")
+    )
+
+
+def is_blocked_article_url(url):
+    url = normalize_url(url)
+
+    if not url:
+        return True
+
+    host = urlparse(url).netloc.lower()
+
+    if host == "news.google.com":
+        return True
+
+    if host.endswith(".google.com"):
+        return True
+
+    if host.endswith(".google.co.ke"):
+        return True
+
+    if host == "bing.com":
+        return True
+
+    if host.endswith(".bing.com"):
+        return True
+
+    return False
+
+
+def article_domain(url):
+    url = normalize_url(url)
+
+    if not url:
+        return ""
+
+    host = urlparse(url).netloc.lower()
+
+    if host.startswith("www."):
+        host = host[4:]
+
+    return host
+
+
+def publisher_from_domain(url):
+    host = article_domain(url)
+
+    if not host:
+        return ""
+
+    known = {
+        "k24tv.co.ke": "K24 TV",
+        "k24tv.co.ke": "K24 TV",
+        "citizen.digital": "Citizen Digital",
+        "nation.africa": "Nation",
+        "standardmedia.co.ke": "The Standard",
+        "the-star.co.ke": "The Star",
+        "capitalfm.co.ke": "Capital FM",
+        "ntvkenya.co.ke": "NTV Kenya",
+        "kenyans.co.ke": "Kenyans.co.ke",
+        "tuko.co.ke": "TUKO",
+        "mpasho.co.ke": "Mpasho",
+        "pulselive.co.ke": "Pulse Live",
+        "kenyanews.go.ke": "KNA",
+        "people.co.ke": "People Daily",
+        "thekenyatimes.com": "The Kenya Times",
+        "kbc.co.ke": "KBC",
+    }
+
+    if host in known:
+        return known[host]
+
+    parts = host.split(".")
+
+    if len(parts) >= 2:
+        name = parts[-2]
+
+        if name:
+            return name.replace(
+                "-",
+                " ",
+            ).title()
+
+    return host
+
+
+def clean_story_title(title):
+    title = clean(title)
+
+    if not title:
+        return ""
+
+    # Remove common publisher suffixes.
+    patterns = [
+        r"\s*[-|]\s*K24(?:\s*TV)?\s*$",
+        r"\s*[-|]\s*K24TV\s*$",
+        r"\s*[-|]\s*Citizen Digital\s*$",
+        r"\s*[-|]\s*The Standard\s*$",
+        r"\s*[-|]\s*Nation\s*$",
+        r"\s*[-|]\s*NTV Kenya\s*$",
+        r"\s*[-|]\s*Capital FM\s*$",
+        r"\s*[-|]\s*People Daily\s*$",
+    ]
+
+    for pattern in patterns:
+        title = re.sub(
+            pattern,
+            "",
+            title,
+            flags=re.IGNORECASE,
+        ).strip()
+
+    return title
 
 
 def detect_county(text):
@@ -314,8 +444,6 @@ def parse_feed(text):
                 child.tag
             )
 
-            # Preserve the complete XML for nested
-            # <img>, <media:content>, etc.
             serialized = ET.tostring(
                 child,
                 encoding="unicode",
@@ -373,7 +501,6 @@ def parse_feed(text):
                     raw_value
                 )
 
-            # Scan this child AND every nested element.
             for node in child.iter():
 
                 for attribute_name in [
@@ -483,6 +610,114 @@ def fetch_feed(url):
     return items
 
 
+def extract_external_url_from_html(
+    html,
+    fallback_url,
+):
+    if not html:
+        return ""
+
+    candidates = []
+
+    patterns = [
+        r'<link[^>]+rel=["\']canonical["\'][^>]+href=["\']([^"\']+)',
+        r'<meta[^>]+property=["\']og:url["\'][^>]+content=["\']([^"\']+)',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:url["\']',
+    ]
+
+    for pattern in patterns:
+
+        try:
+            matches = re.findall(
+                pattern,
+                html,
+                flags=re.IGNORECASE,
+            )
+
+        except Exception:
+            matches = []
+
+        for value in matches:
+
+            candidate = normalize_url(
+                value
+            )
+
+            if not candidate:
+                continue
+
+            if not is_blocked_article_url(
+                candidate
+            ):
+
+                candidates.append(
+                    candidate
+                )
+
+    # Search for publisher links in the Google page.
+    href_patterns = [
+        r'href=["\'](https?://[^"\']+)',
+        r'"url"\s*:\s*"([^"]+)"',
+    ]
+
+    for pattern in href_patterns:
+
+        try:
+            matches = re.findall(
+                pattern,
+                html,
+                flags=re.IGNORECASE,
+            )
+
+        except Exception:
+            matches = []
+
+        for value in matches:
+
+            candidate = normalize_url(
+                value
+            )
+
+            if not candidate:
+                continue
+
+            candidate = unquote(
+                candidate
+            )
+
+            if is_blocked_article_url(
+                candidate
+            ):
+                continue
+
+            lowered = candidate.lower()
+
+            if any(
+                x in lowered
+                for x in [
+                    "/search",
+                    "googleusercontent",
+                    "gstatic",
+                ]
+            ):
+                continue
+
+            candidates.append(
+                candidate
+            )
+
+    # Prefer a real publisher URL.
+    for candidate in candidates:
+
+        if not is_blocked_article_url(
+            candidate
+        ):
+
+            return candidate
+
+    return fallback_url
+
+
 def resolve_article(url):
     url = normalize_url(
         url
@@ -491,24 +726,101 @@ def resolve_article(url):
     if not url:
         return ""
 
-    if "news.google.com" not in url:
+    if not is_google_url(url):
         return url
+
+    log(
+        "GOOGLE NEWS LINK DETECTED"
+    )
 
     response = request_url(
         url
     )
 
     if response is None:
-        return url
+
+        log(
+            "GOOGLE NEWS RESOLUTION FAILED"
+        )
+
+        return ""
 
     final_url = normalize_url(
         response.url
     )
 
-    if final_url:
+    if (
+        final_url
+        and not is_blocked_article_url(
+            final_url
+        )
+    ):
+
+        log(
+            "RESOLVED PUBLISHER URL: "
+            + final_url
+        )
+
         return final_url
 
-    return url
+    html = response.text or ""
+
+    extracted = extract_external_url_from_html(
+        html,
+        "",
+    )
+
+    if extracted:
+
+        log(
+            "EXTRACTED PUBLISHER URL: "
+            + extracted
+        )
+
+        return extracted
+
+    # Look for a URL query parameter sometimes embedded
+    # inside Google News links.
+    parsed = urlparse(
+        url
+    )
+
+    query = parse_qs(
+        parsed.query
+    )
+
+    for key in [
+        "url",
+        "u",
+        "q",
+    ]:
+
+        values = query.get(
+            key,
+            [],
+        )
+
+        for value in values:
+
+            candidate = normalize_url(
+                unquote(value)
+            )
+
+            if (
+                candidate
+                and not is_blocked_article_url(
+                    candidate
+                )
+            ):
+
+                log(
+                    "QUERY PUBLISHER URL: "
+                    + candidate
+                )
+
+                return candidate
+
+    return ""
 
 
 def add_candidate(
@@ -554,6 +866,7 @@ def add_candidate(
         return
 
     if value not in images:
+
         images.append(
             value
         )
@@ -625,6 +938,7 @@ def html_images(
     for pattern in patterns:
 
         try:
+
             matches = re.findall(
                 pattern,
                 html,
@@ -632,6 +946,7 @@ def html_images(
             )
 
         except Exception:
+
             matches = []
 
         for value in matches:
@@ -639,10 +954,7 @@ def html_images(
             if not value:
                 continue
 
-            if (
-                "srcset"
-                in pattern.lower()
-            ):
+            if "srcset" in pattern.lower():
 
                 add_srcset(
                     images,
@@ -658,7 +970,6 @@ def html_images(
                     page_url,
                 )
 
-    # JSON-LD and embedded article metadata.
     json_patterns = [
         r'"image"\s*:\s*"([^"]+)"',
         r'"thumbnailUrl"\s*:\s*"([^"]+)"',
@@ -668,6 +979,7 @@ def html_images(
     for pattern in json_patterns:
 
         try:
+
             matches = re.findall(
                 pattern,
                 html,
@@ -675,6 +987,7 @@ def html_images(
             )
 
         except Exception:
+
             matches = []
 
         for value in matches:
@@ -718,6 +1031,7 @@ def extract_urls_from_text(
     for pattern in patterns:
 
         try:
+
             matches = re.findall(
                 pattern,
                 raw,
@@ -725,6 +1039,7 @@ def extract_urls_from_text(
             )
 
         except Exception:
+
             matches = []
 
         for value in matches:
@@ -733,6 +1048,7 @@ def extract_urls_from_text(
                 value,
                 tuple,
             ):
+
                 value = value[0]
 
             value = str(
@@ -778,7 +1094,6 @@ def rss_images(item):
         "",
     )
 
-    # First: recursively extracted RSS media URLs.
     for value in item.get(
         "media",
         [],
@@ -790,7 +1105,6 @@ def rss_images(item):
             base_url,
         )
 
-    # Second: complete raw description XML.
     raw_description = item.get(
         "raw_description",
         "",
@@ -807,7 +1121,6 @@ def rss_images(item):
             base_url,
         )
 
-    # Third: cleaned description.
     description = item.get(
         "description",
         "",
@@ -861,6 +1174,7 @@ def valid_image(path):
         return True
 
     except Exception:
+
         return False
 
 
@@ -938,6 +1252,7 @@ def download_images(
     )
 
     if folder.exists():
+
         shutil.rmtree(
             folder
         )
@@ -1117,11 +1432,15 @@ def download_images(
 
 def process_item(item):
 
-    title = clean(
+    raw_title = clean(
         item.get(
             "title",
             "",
         )
+    )
+
+    title = clean_story_title(
+        raw_title
     )
 
     description = clean(
@@ -1158,16 +1477,22 @@ def process_item(item):
     if not link:
         return None
 
-    if blocked_story(title):
+    if blocked_story(
+        raw_title
+        + " "
+        + description
+    ):
 
         log(
             "BLOCKED STORY: "
-            + title
+            + raw_title
         )
 
         return None
 
-    if not recent(published):
+    if not recent(
+        published
+    ):
 
         log(
             "OLD STORY: "
@@ -1192,6 +1517,24 @@ def process_item(item):
         link
     )
 
+    if not article_url:
+
+        log(
+            "NO REAL PUBLISHER URL"
+        )
+
+        return None
+
+    if is_blocked_article_url(
+        article_url
+    ):
+
+        log(
+            "BLOCKED ARTICLE URL"
+        )
+
+        return None
+
     response = request_url(
         article_url
     )
@@ -1204,7 +1547,13 @@ def process_item(item):
             response.url
         )
 
-        if final_url:
+        if (
+            final_url
+            and not is_blocked_article_url(
+                final_url
+            )
+        ):
+
             article_url = final_url
 
         html = response.text
@@ -1219,6 +1568,16 @@ def process_item(item):
         log(
             "ARTICLE PAGE REQUEST FAILED"
         )
+
+    if is_blocked_article_url(
+        article_url
+    ):
+
+        log(
+            "REJECTED GOOGLE ARTICLE URL"
+        )
+
+        return None
 
     page_images = html_images(
         html,
@@ -1241,6 +1600,7 @@ def process_item(item):
     for value in page_images:
 
         if value not in candidates:
+
             candidates.append(
                 value
             )
@@ -1248,6 +1608,7 @@ def process_item(item):
     for value in feed_images:
 
         if value not in candidates:
+
             candidates.append(
                 value
             )
@@ -1255,6 +1616,7 @@ def process_item(item):
     for value in embedded_images:
 
         if value not in candidates:
+
             candidates.append(
                 value
             )
@@ -1313,6 +1675,27 @@ def process_item(item):
 
         return None
 
+    detected_source = publisher_from_domain(
+        article_url
+    )
+
+    if detected_source:
+
+        source = detected_source
+
+    if not source:
+        source = "Rift Valley Watch"
+
+    if source.lower() in [
+        "google",
+        "google news",
+        "google news rss",
+    ]:
+
+        source = publisher_from_domain(
+            article_url
+        )
+
     county = detect_county(
         title
         + " "
@@ -1343,8 +1726,11 @@ def date_sort(item):
 
         value = parsedate_to_datetime(
             item.get(
-                "pubdate",
-                "",
+                "published",
+                item.get(
+                    "pubdate",
+                    "",
+                ),
             )
         )
 
@@ -1417,6 +1803,7 @@ def make_script(story):
     )
 
     if not source:
+
         source = "Rift Valley Watch"
 
     parts = []
@@ -1501,7 +1888,7 @@ def main():
         "RIFT VALLEY WATCH NEWS ENGINE"
     )
     log(
-        "VERSION V23 REAL PHOTO RECOVERY"
+        "VERSION V24 REAL PUBLISHER RESOLUTION"
     )
     log(
         "============================================================"
@@ -1571,6 +1958,11 @@ def main():
             if not title_key:
                 continue
 
+            if blocked_story(
+                title
+            ):
+                continue
+
             if title_key in seen_titles:
                 continue
 
@@ -1585,6 +1977,7 @@ def main():
             )
 
             if link_key:
+
                 seen_links.add(
                     link_key
                 )
@@ -1651,12 +2044,14 @@ def main():
             "============================================================"
         )
         log(
-            "No valid story with a real article photograph was found."
+            "No valid real publisher story with a real article "
+            "photograph was found."
         )
         log("")
 
         raise RuntimeError(
-            "No valid stories with real article photographs were found."
+            "No valid real publisher stories with real "
+            "article photographs were found."
         )
 
     valid.sort(
@@ -1717,6 +2112,10 @@ def main():
     log(
         "SOURCE: "
         + selected["source"]
+    )
+    log(
+        "ARTICLE URL: "
+        + selected["article_url"]
     )
     log(
         "REAL PHOTOS: "
