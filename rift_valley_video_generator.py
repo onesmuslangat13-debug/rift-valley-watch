@@ -15,7 +15,7 @@ from gtts import gTTS
 # ============================================================
 # RIFT VALLEY WATCH
 # VIDEO GENERATOR
-# VERSION: RVW_VIDEO_V22_PATH_AUDIO_STABLE
+# VERSION: RVW_VIDEO_V23_DURATION_HARD_CAP
 #
 # PURPOSE
 # - One selected real news story
@@ -23,6 +23,8 @@ from gtts import gTTS
 # - No generic avatars/placeholders/logos
 # - Professional 1080x1920 vertical news reel
 # - Stable narration/audio handling
+# - Automatic narration duration control
+# - Hard final duration safety cap
 # - Correct data/audio/video paths for GitHub Actions
 # - Final MP4:
 #       output/rift_valley_watch_reel.mp4
@@ -63,7 +65,12 @@ MAX_SCENES = 4
 
 MIN_DURATION = 18.0
 TARGET_DURATION = 23.0
+
+# IMPORTANT:
+# Keep this below 35 seconds so encoding/container overhead
+# cannot push the final MP4 above the workflow limit.
 MAX_DURATION = 35.0
+HARD_MAX_DURATION = 34.50
 
 MIN_WORDS = 65
 TARGET_WORDS = 95
@@ -162,7 +169,7 @@ def prepare_directories():
     print("")
     print("=" * 70)
     print("RIFT VALLEY WATCH VIDEO GENERATOR")
-    print("RVW_VIDEO_V22_PATH_AUDIO_STABLE")
+    print("RVW_VIDEO_V23_DURATION_HARD_CAP")
     print("=" * 70)
     print("")
     print("BASE DIR:", BASE_DIR)
@@ -172,6 +179,9 @@ def prepare_directories():
     print("SOURCE DIR:", SOURCE_DIR)
     print("VIDEO WORK DIR:", VIDEO_WORK_DIR)
     print("OUTPUT DIR:", OUTPUT_DIR)
+    print("")
+    print("MAX VIDEO DURATION:", MAX_DURATION)
+    print("HARD AUDIO/VIDEO CAP:", HARD_MAX_DURATION)
     print("")
 
 
@@ -254,7 +264,12 @@ def normalize_sentence(text):
 
 
 def word_count(text):
-    return len(re.findall(r"\b[\w’'-]+\b", text or ""))
+    return len(
+        re.findall(
+            r"\b[\w’'-]+\b",
+            text or "",
+        )
+    )
 
 
 # ============================================================
@@ -301,6 +316,7 @@ def collect_text_fields(obj, results=None):
         results = []
 
     if isinstance(obj, dict):
+
         for key, value in obj.items():
 
             key_lower = str(key).lower()
@@ -320,18 +336,27 @@ def collect_text_fields(obj, results=None):
                     "story",
                     "article",
                 }:
+
                     cleaned = normalize_sentence(value)
 
                     if cleaned:
                         results.append(cleaned)
 
             elif isinstance(value, (dict, list)):
-                collect_text_fields(value, results)
+
+                collect_text_fields(
+                    value,
+                    results,
+                )
 
     elif isinstance(obj, list):
 
         for item in obj:
-            collect_text_fields(item, results)
+
+            collect_text_fields(
+                item,
+                results,
+            )
 
     return results
 
@@ -350,13 +375,23 @@ def load_json_file(path):
         return None
 
     try:
-        with open(path, "r", encoding="utf-8") as f:
+
+        with open(
+            path,
+            "r",
+            encoding="utf-8",
+        ) as f:
+
             data = json.load(f)
 
         return data
 
     except Exception as exc:
-        print(f"ERROR loading {path}: {exc}")
+
+        print(
+            f"ERROR loading {path}: {exc}"
+        )
+
         return None
 
 
@@ -368,14 +403,23 @@ def load_story():
 
     print("Looking for:", STORY_FILE)
 
-    story = load_json_file(STORY_FILE)
+    story = load_json_file(
+        STORY_FILE
+    )
 
     if story is None:
-        print("ERROR: selected_story.json was not loaded.")
+
+        print(
+            "ERROR: selected_story.json was not loaded."
+        )
+
         return None
 
     if isinstance(story, dict):
-        print("Selected story loaded successfully.")
+
+        print(
+            "Selected story loaded successfully."
+        )
 
         print(
             "Headline:",
@@ -404,11 +448,20 @@ def load_script():
 
     print("Looking for:", SCRIPT_FILE)
 
-    script = load_json_file(SCRIPT_FILE)
+    script = load_json_file(
+        SCRIPT_FILE
+    )
 
     if script is None:
-        print("WARNING: selected_script.json was not loaded.")
-        print("The generator will attempt to build narration from story data.")
+
+        print(
+            "WARNING: selected_script.json was not loaded."
+        )
+
+        print(
+            "The generator will attempt to build narration "
+            "from story data."
+        )
 
     return script
 
@@ -418,6 +471,7 @@ def load_script():
 # ============================================================
 
 def get_story_title(story):
+
     if not isinstance(story, dict):
         return "Rift Valley Watch"
 
@@ -430,6 +484,7 @@ def get_story_title(story):
     nested = story.get("story")
 
     if isinstance(nested, dict):
+
         candidates.extend(
             [
                 nested.get("title"),
@@ -448,6 +503,7 @@ def get_story_title(story):
 
 
 def get_story_source(story):
+
     if not isinstance(story, dict):
         return ""
 
@@ -462,6 +518,7 @@ def get_story_source(story):
     nested = story.get("story")
 
     if isinstance(nested, dict):
+
         candidates.extend(
             [
                 nested.get("source"),
@@ -485,12 +542,16 @@ def get_story_source(story):
 # ============================================================
 
 def split_into_sentences(text):
+
     text = clean_text(text)
 
     if not text:
         return []
 
-    parts = re.split(r"(?<=[.!?])\s+", text)
+    parts = re.split(
+        r"(?<=[.!?])\s+",
+        text,
+    )
 
     results = []
 
@@ -510,13 +571,20 @@ def split_into_sentences(text):
 
 
 def build_narration(story, script):
+
     candidates = []
 
     if script is not None:
-        candidates.extend(collect_text_fields(script))
+
+        candidates.extend(
+            collect_text_fields(script)
+        )
 
     if story is not None:
-        candidates.extend(collect_text_fields(story))
+
+        candidates.extend(
+            collect_text_fields(story)
+        )
 
     cleaned = []
 
@@ -524,11 +592,17 @@ def build_narration(story, script):
 
     for text in candidates:
 
-        sentences = split_into_sentences(text)
+        sentences = split_into_sentences(
+            text
+        )
 
         for sentence in sentences:
 
-            key = re.sub(r"\W+", "", sentence.lower())
+            key = re.sub(
+                r"\W+",
+                "",
+                sentence.lower(),
+            )
 
             if not key:
                 continue
@@ -542,10 +616,13 @@ def build_narration(story, script):
     if not cleaned:
         return ""
 
-    # Prefer the longest coherent source material first.
     combined = " ".join(cleaned)
 
-    combined = re.sub(r"\s+", " ", combined).strip()
+    combined = re.sub(
+        r"\s+",
+        " ",
+        combined,
+    ).strip()
 
     return combined
 
@@ -554,8 +631,14 @@ def build_narration(story, script):
 # SHORTEN NARRATION
 # ============================================================
 
-def shorten_narration(text, max_words=MAX_WORDS):
-    sentences = split_into_sentences(text)
+def shorten_narration(
+    text,
+    max_words=MAX_WORDS,
+):
+
+    sentences = split_into_sentences(
+        text
+    )
 
     if not sentences:
         return ""
@@ -568,79 +651,139 @@ def shorten_narration(text, max_words=MAX_WORDS):
         wc = word_count(sentence)
 
         if count + wc <= max_words:
+
             selected.append(sentence)
             count += wc
+
         else:
+
             remaining = max_words - count
 
             if remaining >= 8:
+
                 words = sentence.split()
 
-                partial = " ".join(words[:remaining])
+                partial = " ".join(
+                    words[:remaining]
+                )
 
-                partial = partial.rstrip(",;:-")
+                partial = partial.rstrip(
+                    ",;:-"
+                )
 
                 if partial:
-                    selected.append(partial + ".")
+
+                    selected.append(
+                        partial + "."
+                    )
 
             break
 
-    return " ".join(selected).strip()
+    return " ".join(
+        selected
+    ).strip()
 
 
-def trim_to_word_limit(text, max_words):
+def trim_to_word_limit(
+    text,
+    max_words,
+):
+
     words = text.split()
 
     if len(words) <= max_words:
         return text
 
-    trimmed = " ".join(words[:max_words])
+    trimmed = " ".join(
+        words[:max_words]
+    )
 
-    trimmed = trimmed.rstrip(",;:-")
+    trimmed = trimmed.rstrip(
+        ",;:-"
+    )
 
-    if not trimmed.endswith((".", "!", "?")):
+    if not trimmed.endswith(
+        (".", "!", "?")
+    ):
+
         trimmed += "."
 
     return trimmed
 
 
 # ============================================================
-# SAFE NARRATION
+# BUILD NARRATION CANDIDATES
 # ============================================================
 
-def create_safe_narration(story, script):
-    base = build_narration(story, script)
+def build_narration_candidates(
+    story,
+    script,
+):
+
+    base = build_narration(
+        story,
+        script,
+    )
 
     if not base:
-        print("ERROR: No usable narration text was found.")
-        return ""
+        return []
 
     candidates = []
 
-    # Original text first.
-    original_words = word_count(base)
+    original_words = word_count(
+        base
+    )
 
-    if MIN_WORDS <= original_words <= MAX_WORDS:
-        candidates.append(base)
+    if (
+        MIN_WORDS
+        <= original_words
+        <= MAX_WORDS
+    ):
 
-    # Standard target.
-    target = shorten_narration(base, TARGET_WORDS)
+        candidates.append(
+            base
+        )
 
-    if target:
-        candidates.append(target)
+    limits = [
+        TARGET_WORDS,
+        MAX_WORDS,
+        115,
+        110,
+        105,
+        100,
+        95,
+        90,
+        85,
+        80,
+        75,
+        70,
+        MIN_WORDS,
+    ]
 
-    # Additional candidates.
-    for limit in [MAX_WORDS, 115, 110, 105, 100, 95, 90, 85, 80, 75, 70, MIN_WORDS]:
+    for limit in limits:
 
-        candidate = shorten_narration(base, limit)
+        candidate = shorten_narration(
+            base,
+            limit,
+        )
 
-        if candidate:
-            wc = word_count(candidate)
+        if not candidate:
+            continue
 
-            if MIN_WORDS <= wc <= MAX_WORDS:
-                candidates.append(candidate)
+        wc = word_count(
+            candidate
+        )
 
-    # Deduplicate.
+        if (
+            MIN_WORDS
+            <= wc
+            <= MAX_WORDS
+        ):
+
+            candidates.append(
+                candidate
+            )
+
     unique = []
 
     seen = set()
@@ -653,42 +796,18 @@ def create_safe_narration(story, script):
             continue
 
         seen.add(key)
+
         unique.append(candidate)
 
-    if not unique:
-        candidate = trim_to_word_limit(base, MAX_WORDS)
-
-        if word_count(candidate) >= MIN_WORDS:
-            unique.append(candidate)
-
-    if not unique:
-        print("ERROR: Narration could not be created within word limits.")
-        return ""
-
-    # Prefer a candidate near TARGET_WORDS.
-    unique.sort(
-        key=lambda x: abs(word_count(x) - TARGET_WORDS)
-    )
-
-    chosen = unique[0]
-
-    print("")
-    print("=" * 70)
-    print("NARRATION")
-    print("=" * 70)
-    print(chosen)
-    print("")
-    print("WORD COUNT:", word_count(chosen))
-    print("")
-
-    return chosen
+    return unique
 
 
 # ============================================================
-# TTS
+# TTS DURATION
 # ============================================================
 
 def get_audio_duration(path):
+
     if not path.exists():
         return 0.0
 
@@ -712,74 +831,454 @@ def get_audio_duration(path):
         return 0.0
 
     try:
-        return float(result.stdout.strip())
+
+        return float(
+            result.stdout.strip()
+        )
+
     except Exception:
+
         return 0.0
 
 
-def generate_tts(text):
-    if not text:
-        raise RuntimeError("Cannot generate TTS from empty narration.")
+# ============================================================
+# GENERATE ONE TTS FILE
+# ============================================================
 
-    print("")
-    print("=" * 70)
-    print("GENERATING NARRATION AUDIO")
-    print("=" * 70)
-
-    temp_audio = AUDIO_DIR / "narration_temp.mp3"
-
-    best_audio = AUDIO_DIR / "narration_best.mp3"
-
-    for path in [temp_audio, best_audio, FINAL_AUDIO]:
-        try:
-            if path.exists():
-                path.unlink()
-        except Exception:
-            pass
-
-    # First attempt.
-    print("Generating gTTS audio...")
+def generate_single_tts(
+    text,
+    output_path,
+):
 
     try:
+
+        if output_path.exists():
+            output_path.unlink()
+
+    except Exception:
+        pass
+
+    print("")
+    print(
+        "Generating gTTS:",
+        word_count(text),
+        "words",
+    )
+
+    try:
+
         tts = gTTS(
             text=text,
             lang="en",
             slow=False,
         )
 
-        tts.save(str(temp_audio))
+        tts.save(
+            str(output_path)
+        )
 
     except Exception as exc:
+
         raise RuntimeError(
             f"gTTS failed: {exc}"
         )
 
-    if not temp_audio.exists():
+    if not output_path.exists():
+
         raise RuntimeError(
-            "gTTS did not create narration_temp.mp3."
+            "gTTS did not create the MP3 file."
         )
 
-    if temp_audio.stat().st_size < 1000:
+    if output_path.stat().st_size < 1000:
+
         raise RuntimeError(
             "Generated narration MP3 is too small."
         )
 
-    duration = get_audio_duration(temp_audio)
-
-    print("TTS duration:", round(duration, 2), "seconds")
+    duration = get_audio_duration(
+        output_path
+    )
 
     if duration <= 0:
+
         raise RuntimeError(
             "Unable to determine TTS audio duration."
         )
 
-    shutil.copy2(temp_audio, best_audio)
-    shutil.copy2(best_audio, FINAL_AUDIO)
+    print(
+        "Generated duration:",
+        round(duration, 2),
+        "seconds",
+    )
 
-    final_duration = get_audio_duration(FINAL_AUDIO)
+    return duration
 
-    print("Final narration:", FINAL_AUDIO)
-    print("Final audio duration:", round(final_duration, 2), "seconds")
+
+# ============================================================
+# CREATE SAFE NARRATION
+#
+# IMPORTANT:
+# This function now measures actual gTTS duration and keeps
+# shortening the narration until it safely fits below 34.5 sec.
+# ============================================================
+
+def create_safe_narration(
+    story,
+    script,
+):
+
+    candidates = build_narration_candidates(
+        story,
+        script,
+    )
+
+    if not candidates:
+
+        print(
+            "ERROR: No usable narration text was found."
+        )
+
+        return "", 0.0
+
+    # Sort candidates so the one closest to target
+    # length is tested first.
+    candidates.sort(
+        key=lambda x: abs(
+            word_count(x) - TARGET_WORDS
+        )
+    )
+
+    print("")
+    print("=" * 70)
+    print("TESTING NARRATION LENGTH")
+    print("=" * 70)
+
+    temp_candidates = []
+
+    for index, candidate in enumerate(
+        candidates,
+        start=1,
+    ):
+
+        test_file = (
+            AUDIO_DIR
+            / f"tts_test_{index:02d}.mp3"
+        )
+
+        try:
+
+            duration = generate_single_tts(
+                candidate,
+                test_file,
+            )
+
+        except Exception as exc:
+
+            print(
+                "TTS candidate failed:",
+                exc,
+            )
+
+            continue
+
+        temp_candidates.append(
+            (
+                candidate,
+                duration,
+                test_file,
+            )
+        )
+
+        print(
+            f"Candidate {index}: "
+            f"{word_count(candidate)} words -> "
+            f"{duration:.2f} seconds"
+        )
+
+        # Perfect range.
+        if (
+            MIN_DURATION
+            <= duration
+            <= HARD_MAX_DURATION
+        ):
+
+            print("")
+            print(
+                "ACCEPTED NARRATION DURATION:",
+                round(duration, 2),
+                "seconds",
+            )
+
+            return (
+                candidate,
+                duration,
+            )
+
+    # --------------------------------------------------------
+    # If none of the standard candidates fit, dynamically
+    # shorten based on the measured TTS speed.
+    # --------------------------------------------------------
+
+    print("")
+    print(
+        "No standard narration candidate fit "
+        "the duration limit."
+    )
+
+    if temp_candidates:
+
+        # Use the shortest valid candidate as the base.
+        shortest = min(
+            temp_candidates,
+            key=lambda item: item[1],
+        )
+
+        base_text = shortest[0]
+        base_duration = shortest[1]
+        base_words = word_count(
+            base_text
+        )
+
+        if base_duration > HARD_MAX_DURATION:
+
+            estimated_words = int(
+                base_words
+                * (
+                    HARD_MAX_DURATION
+                    / base_duration
+                )
+                * 0.94
+            )
+
+            estimated_words = max(
+                MIN_WORDS,
+                min(
+                    estimated_words,
+                    base_words - 1,
+                ),
+            )
+
+            print(
+                "Dynamic word target:",
+                estimated_words,
+            )
+
+            dynamic_limits = []
+
+            current = estimated_words
+
+            while current >= MIN_WORDS:
+
+                dynamic_limits.append(
+                    current
+                )
+
+                current -= 5
+
+            for index, limit in enumerate(
+                dynamic_limits,
+                start=1,
+            ):
+
+                candidate = shorten_narration(
+                    build_narration(
+                        story,
+                        script,
+                    ),
+                    limit,
+                )
+
+                if (
+                    not candidate
+                    or word_count(candidate)
+                    < MIN_WORDS
+                ):
+                    continue
+
+                test_file = (
+                    AUDIO_DIR
+                    / (
+                        f"tts_dynamic_{index:02d}.mp3"
+                    )
+                )
+
+                try:
+
+                    duration = generate_single_tts(
+                        candidate,
+                        test_file,
+                    )
+
+                except Exception as exc:
+
+                    print(
+                        "Dynamic TTS failed:",
+                        exc,
+                    )
+
+                    continue
+
+                print(
+                    "Dynamic candidate:",
+                    word_count(candidate),
+                    "words ->",
+                    round(duration, 2),
+                    "seconds",
+                )
+
+                if (
+                    MIN_DURATION
+                    <= duration
+                    <= HARD_MAX_DURATION
+                ):
+
+                    print("")
+                    print(
+                        "DYNAMIC NARRATION ACCEPTED"
+                    )
+
+                    return (
+                        candidate,
+                        duration,
+                    )
+
+    # --------------------------------------------------------
+    # Final fallback:
+    # Use the shortest measured narration if it is valid.
+    # --------------------------------------------------------
+
+    valid_fallbacks = [
+        item
+        for item in temp_candidates
+        if (
+            item[1] >= MIN_DURATION
+            and item[1] <= MAX_DURATION
+        )
+    ]
+
+    if valid_fallbacks:
+
+        selected = min(
+            valid_fallbacks,
+            key=lambda item: item[1],
+        )
+
+        print("")
+        print(
+            "USING SHORTEST VALID NARRATION:",
+            round(selected[1], 2),
+            "seconds",
+        )
+
+        return (
+            selected[0],
+            selected[1],
+        )
+
+    raise RuntimeError(
+        "Unable to create narration within "
+        "the allowed duration."
+    )
+
+
+# ============================================================
+# GENERATE FINAL NARRATION AUDIO
+# ============================================================
+
+def generate_tts(
+    text,
+    expected_duration=None,
+):
+
+    if not text:
+
+        raise RuntimeError(
+            "Cannot generate TTS from empty narration."
+        )
+
+    print("")
+    print("=" * 70)
+    print("CREATING FINAL NARRATION AUDIO")
+    print("=" * 70)
+
+    temp_audio = (
+        AUDIO_DIR
+        / "narration_temp.mp3"
+    )
+
+    best_audio = (
+        AUDIO_DIR
+        / "narration_best.mp3"
+    )
+
+    for path in [
+        temp_audio,
+        best_audio,
+        FINAL_AUDIO,
+    ]:
+
+        try:
+
+            if path.exists():
+                path.unlink()
+
+        except Exception:
+            pass
+
+    duration = generate_single_tts(
+        text,
+        temp_audio,
+    )
+
+    # --------------------------------------------------------
+    # Safety check.
+    # --------------------------------------------------------
+
+    if duration > HARD_MAX_DURATION:
+
+        raise RuntimeError(
+            "Final narration is still longer than "
+            f"the hard limit: {duration:.2f}s"
+        )
+
+    if duration < MIN_DURATION:
+
+        raise RuntimeError(
+            "Final narration is shorter than "
+            f"the minimum: {duration:.2f}s"
+        )
+
+    shutil.copy2(
+        temp_audio,
+        best_audio,
+    )
+
+    shutil.copy2(
+        best_audio,
+        FINAL_AUDIO,
+    )
+
+    final_duration = get_audio_duration(
+        FINAL_AUDIO
+    )
+
+    print("")
+    print(
+        "FINAL NARRATION:",
+        FINAL_AUDIO,
+    )
+
+    print(
+        "FINAL AUDIO DURATION:",
+        round(final_duration, 2),
+        "seconds",
+    )
+
+    print(
+        "NARRATION WORD COUNT:",
+        word_count(text),
+    )
+
     print("")
 
     return final_duration
@@ -789,7 +1288,11 @@ def generate_tts(text):
 # IMAGE URL EXTRACTION
 # ============================================================
 
-def recursive_image_urls(obj, results=None):
+def recursive_image_urls(
+    obj,
+    results=None,
+):
+
     if results is None:
         results = []
 
@@ -808,37 +1311,70 @@ def recursive_image_urls(obj, results=None):
                     or "thumbnail" in key_lower
                     or "url" in key_lower
                 ):
-                    if value.startswith("http"):
-                        results.append(value)
 
-            elif isinstance(value, (dict, list)):
-                recursive_image_urls(value, results)
+                    if value.startswith("http"):
+
+                        results.append(
+                            value
+                        )
+
+            elif isinstance(
+                value,
+                (dict, list),
+            ):
+
+                recursive_image_urls(
+                    value,
+                    results,
+                )
 
     elif isinstance(obj, list):
 
         for item in obj:
-            recursive_image_urls(item, results)
+
+            recursive_image_urls(
+                item,
+                results,
+            )
 
     return results
 
 
 def get_image_urls(story):
+
     urls = []
 
-    if not isinstance(story, dict):
+    if not isinstance(
+        story,
+        dict,
+    ):
+
         return urls
 
     # Preferred explicit image_urls.
-    explicit = story.get("image_urls")
+    explicit = story.get(
+        "image_urls"
+    )
 
-    if isinstance(explicit, list):
+    if isinstance(
+        explicit,
+        list,
+    ):
+
         urls.extend(
             str(x)
             for x in explicit
-            if isinstance(x, str) and x.startswith("http")
+            if (
+                isinstance(x, str)
+                and x.startswith("http")
+            )
         )
 
-    elif isinstance(explicit, str) and explicit.startswith("http"):
+    elif (
+        isinstance(explicit, str)
+        and explicit.startswith("http")
+    ):
+
         urls.append(explicit)
 
     # Other common fields.
@@ -857,24 +1393,55 @@ def get_image_urls(story):
 
         value = story.get(key)
 
-        if isinstance(value, str) and value.startswith("http"):
+        if (
+            isinstance(value, str)
+            and value.startswith("http")
+        ):
+
             urls.append(value)
 
-        elif isinstance(value, list):
+        elif isinstance(
+            value,
+            list,
+        ):
+
             for item in value:
 
-                if isinstance(item, str) and item.startswith("http"):
+                if (
+                    isinstance(item, str)
+                    and item.startswith("http")
+                ):
+
                     urls.append(item)
 
-                elif isinstance(item, dict):
-                    for candidate in recursive_image_urls(item):
-                        urls.append(candidate)
+                elif isinstance(
+                    item,
+                    dict,
+                ):
 
-        elif isinstance(value, dict):
-            urls.extend(recursive_image_urls(value))
+                    for candidate in recursive_image_urls(
+                        item
+                    ):
+
+                        urls.append(
+                            candidate
+                        )
+
+        elif isinstance(
+            value,
+            dict,
+        ):
+
+            urls.extend(
+                recursive_image_urls(
+                    value
+                )
+            )
 
     # Recursive fallback.
-    urls.extend(recursive_image_urls(story))
+    urls.extend(
+        recursive_image_urls(story)
+    )
 
     # Deduplicate.
     final = []
@@ -888,7 +1455,10 @@ def get_image_urls(story):
         if not url:
             continue
 
-        normalized = url.lower().split("?")[0]
+        normalized = (
+            url.lower()
+            .split("?")[0]
+        )
 
         if normalized in seen:
             continue
@@ -904,9 +1474,11 @@ def get_image_urls(story):
 # ============================================================
 
 def image_url_is_bad(url):
+
     value = url.lower()
 
     for term in BAD_IMAGE_TERMS:
+
         if term in value:
             return True
 
@@ -917,11 +1489,20 @@ def image_url_is_bad(url):
 # IMAGE DOWNLOAD
 # ============================================================
 
-def download_image(url, output_path):
+def download_image(
+    url,
+    output_path,
+):
+
     try:
 
         if image_url_is_bad(url):
-            print("Rejected URL:", url)
+
+            print(
+                "Rejected URL:",
+                url,
+            )
+
             return False
 
         response = SESSION.get(
@@ -931,34 +1512,44 @@ def download_image(url, output_path):
         )
 
         if response.status_code != 200:
+
             print(
                 "HTTP error:",
                 response.status_code,
                 url,
             )
-            return False
 
-        content_type = response.headers.get(
-            "Content-Type",
-            ""
-        ).lower()
+            return False
 
         data = response.content
 
         if len(data) < 10000:
-            print("Rejected tiny image:", url)
+
+            print(
+                "Rejected tiny image:",
+                url,
+            )
+
             return False
 
-        output_path.write_bytes(data)
+        output_path.write_bytes(
+            data
+        )
 
         try:
-            with Image.open(output_path) as im:
+
+            with Image.open(
+                output_path
+            ) as im:
 
                 im.verify()
 
         except Exception:
 
-            print("Invalid image:", url)
+            print(
+                "Invalid image:",
+                url,
+            )
 
             try:
                 output_path.unlink()
@@ -971,7 +1562,11 @@ def download_image(url, output_path):
 
     except Exception as exc:
 
-        print("Image download failed:", exc)
+        print(
+            "Image download failed:",
+            exc,
+        )
+
         return False
 
 
@@ -980,34 +1575,51 @@ def download_image(url, output_path):
 # ============================================================
 
 def image_is_valid(path):
+
     try:
 
         with Image.open(path) as im:
 
             width, height = im.size
 
-            if width < 350 or height < 250:
+            if (
+                width < 350
+                or height < 250
+            ):
+
                 print(
                     "Rejected small image:",
                     width,
                     "x",
                     height,
                 )
+
                 return False
 
             area = width * height
 
             if area < 150000:
-                print("Rejected low-area image.")
+
+                print(
+                    "Rejected low-area image."
+                )
+
                 return False
 
-            ratio = width / float(height)
+            ratio = width / float(
+                height
+            )
 
-            if ratio < 0.45 or ratio > 3.5:
+            if (
+                ratio < 0.45
+                or ratio > 3.5
+            ):
+
                 print(
                     "Rejected extreme aspect ratio:",
                     ratio,
                 )
+
                 return False
 
             # Reject very small square/icon-like images.
@@ -1015,29 +1627,45 @@ def image_is_valid(path):
                 abs(width - height) < 10
                 and width < 500
             ):
-                print("Rejected icon-like square.")
+
+                print(
+                    "Rejected icon-like square."
+                )
+
                 return False
 
-            rgb = im.convert("RGB")
-            small = rgb.resize((64, 64))
+            rgb = im.convert(
+                "RGB"
+            )
+
+            small = rgb.resize(
+                (64, 64)
+            )
 
             extrema = small.getextrema()
 
-            # Flat blank image detection.
             channel_ranges = [
                 maximum - minimum
-                for minimum, maximum in extrema
+                for minimum, maximum
+                in extrema
             ]
 
             if max(channel_ranges) < 8:
-                print("Rejected flat/blank image.")
+
+                print(
+                    "Rejected flat/blank image."
+                )
+
                 return False
 
             return True
 
     except Exception as exc:
 
-        print("Image validation error:", exc)
+        print(
+            "Image validation error:",
+            exc,
+        )
 
         return False
 
@@ -1047,18 +1675,27 @@ def image_is_valid(path):
 # ============================================================
 
 def image_hash(path):
+
     try:
 
         with Image.open(path) as im:
 
-            thumb = im.convert("RGB")
-            thumb.thumbnail((64, 64))
+            thumb = im.convert(
+                "RGB"
+            )
+
+            thumb.thumbnail(
+                (64, 64)
+            )
 
             data = thumb.tobytes()
 
-            return hashlib.md5(data).hexdigest()
+            return hashlib.md5(
+                data
+            ).hexdigest()
 
     except Exception:
+
         return ""
 
 
@@ -1067,29 +1704,44 @@ def image_hash(path):
 # ============================================================
 
 def download_real_images(story):
+
     print("")
     print("=" * 70)
     print("DOWNLOADING REAL ARTICLE PHOTOS")
     print("=" * 70)
 
-    urls = get_image_urls(story)
+    urls = get_image_urls(
+        story
+    )
 
-    print("Image URLs discovered:", len(urls))
+    print(
+        "Image URLs discovered:",
+        len(urls),
+    )
 
     if not urls:
-        print("ERROR: No image URLs found in selected story.")
+
+        print(
+            "ERROR: No image URLs found in selected story."
+        )
+
         return []
 
     # Clean previous scene images.
-    for old in SOURCE_DIR.glob("story_image_*.jpg"):
+    for old in SOURCE_DIR.glob(
+        "story_image_*.jpg"
+    ):
+
         try:
             old.unlink()
         except Exception:
             pass
 
     try:
+
         if FINAL_IMAGE.exists():
             FINAL_IMAGE.unlink()
+
     except Exception:
         pass
 
@@ -1104,14 +1756,25 @@ def download_real_images(story):
             break
 
         print("")
-        print("IMAGE CANDIDATE", image_index)
+        print(
+            "IMAGE CANDIDATE",
+            image_index,
+        )
+
         print(url)
 
-        temp_path = SOURCE_DIR / f"_candidate_{image_index}.jpg"
+        temp_path = (
+            SOURCE_DIR
+            / (
+                f"_candidate_{image_index}.jpg"
+            )
+        )
 
         try:
+
             if temp_path.exists():
                 temp_path.unlink()
+
         except Exception:
             pass
 
@@ -1121,10 +1784,14 @@ def download_real_images(story):
         )
 
         if not success:
+
             image_index += 1
             continue
 
-        if not image_is_valid(temp_path):
+        if not image_is_valid(
+            temp_path
+        ):
+
             try:
                 temp_path.unlink()
             except Exception:
@@ -1133,10 +1800,18 @@ def download_real_images(story):
             image_index += 1
             continue
 
-        digest = image_hash(temp_path)
+        digest = image_hash(
+            temp_path
+        )
 
-        if digest and digest in hashes:
-            print("Rejected duplicate image.")
+        if (
+            digest
+            and digest in hashes
+        ):
+
+            print(
+                "Rejected duplicate image."
+            )
 
             try:
                 temp_path.unlink()
@@ -1149,16 +1824,24 @@ def download_real_images(story):
         if digest:
             hashes.add(digest)
 
-        final_path = SOURCE_DIR / (
-            f"story_image_{len(valid_paths) + 1}.jpg"
+        final_path = (
+            SOURCE_DIR
+            / (
+                f"story_image_"
+                f"{len(valid_paths) + 1}.jpg"
+            )
         )
 
         try:
-            with Image.open(temp_path) as im:
 
-                converted = im.convert("RGB")
+            with Image.open(
+                temp_path
+            ) as im:
 
-                # Save as high-quality JPEG.
+                converted = im.convert(
+                    "RGB"
+                )
+
                 converted.save(
                     final_path,
                     "JPEG",
@@ -1170,7 +1853,10 @@ def download_real_images(story):
 
         except Exception as exc:
 
-            print("Image conversion failed:", exc)
+            print(
+                "Image conversion failed:",
+                exc,
+            )
 
             try:
                 temp_path.unlink()
@@ -1180,15 +1866,25 @@ def download_real_images(story):
             image_index += 1
             continue
 
-        valid_paths.append(final_path)
+        valid_paths.append(
+            final_path
+        )
 
-        print("ACCEPTED:", final_path)
+        print(
+            "ACCEPTED:",
+            final_path,
+        )
 
         image_index += 1
 
     if not valid_paths:
+
         print("")
-        print("ERROR: No valid real article photos were downloaded.")
+        print(
+            "ERROR: No valid real article photos "
+            "were downloaded."
+        )
+
         return []
 
     # Compatibility image.
@@ -1198,13 +1894,26 @@ def download_real_images(story):
     )
 
     print("")
-    print("VALID REAL PHOTOS:", len(valid_paths))
-    print("Compatibility image:", FINAL_IMAGE)
+    print(
+        "VALID REAL PHOTOS:",
+        len(valid_paths),
+    )
+
+    print(
+        "Compatibility image:",
+        FINAL_IMAGE,
+    )
+
     print("")
 
     for path in valid_paths:
+
         try:
-            with Image.open(path) as im:
+
+            with Image.open(
+                path
+            ) as im:
+
                 print(
                     path.name,
                     "->",
@@ -1213,6 +1922,7 @@ def download_real_images(story):
                     path.stat().st_size,
                     "bytes",
                 )
+
         except Exception:
             pass
 
@@ -1223,10 +1933,15 @@ def download_real_images(story):
 # FONT LOADING
 # ============================================================
 
-def load_font(size, bold=False):
+def load_font(
+    size,
+    bold=False,
+):
+
     candidates = []
 
     if bold:
+
         candidates.extend(
             [
                 "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
@@ -1235,6 +1950,7 @@ def load_font(size, bold=False):
         )
 
     else:
+
         candidates.extend(
             [
                 "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -1253,10 +1969,12 @@ def load_font(size, bold=False):
         if Path(font_path).exists():
 
             try:
+
                 return ImageFont.truetype(
                     font_path,
                     size=size,
                 )
+
             except Exception:
                 pass
 
@@ -1267,7 +1985,13 @@ def load_font(size, bold=False):
 # TEXT WRAPPING
 # ============================================================
 
-def wrap_text(draw, text, font, max_width):
+def wrap_text(
+    draw,
+    text,
+    font,
+    max_width,
+):
+
     words = text.split()
 
     lines = []
@@ -1287,20 +2011,28 @@ def wrap_text(draw, text, font, max_width):
             font=font,
         )
 
-        width = bbox[2] - bbox[0]
+        width = (
+            bbox[2]
+            - bbox[0]
+        )
 
         if width <= max_width:
+
             current = test
 
         else:
 
             if current:
-                lines.append(current)
+                lines.append(
+                    current
+                )
 
             current = word
 
     if current:
-        lines.append(current)
+        lines.append(
+            current
+        )
 
     return lines
 
@@ -1316,6 +2048,7 @@ def draw_wrapped_text(
     line_spacing=12,
     max_lines=None,
 ):
+
     lines = wrap_text(
         draw,
         text,
@@ -1324,7 +2057,10 @@ def draw_wrapped_text(
     )
 
     if max_lines is not None:
-        lines = lines[:max_lines]
+
+        lines = lines[
+            :max_lines
+        ]
 
     for line in lines:
 
@@ -1341,9 +2077,15 @@ def draw_wrapped_text(
             font=font,
         )
 
-        line_height = bbox[3] - bbox[1]
+        line_height = (
+            bbox[3]
+            - bbox[1]
+        )
 
-        y += line_height + line_spacing
+        y += (
+            line_height
+            + line_spacing
+        )
 
     return y
 
@@ -1352,38 +2094,64 @@ def draw_wrapped_text(
 # IMAGE COVER CROP
 # ============================================================
 
-def cover_crop(image, width, height):
-    image = image.convert("RGB")
+def cover_crop(
+    image,
+    width,
+    height,
+):
 
-    source_w, source_h = image.size
+    image = image.convert(
+        "RGB"
+    )
 
-    source_ratio = source_w / float(source_h)
-    target_ratio = width / float(height)
+    source_w, source_h = (
+        image.size
+    )
+
+    source_ratio = (
+        source_w
+        / float(source_h)
+    )
+
+    target_ratio = (
+        width
+        / float(height)
+    )
 
     if source_ratio > target_ratio:
 
-        # Too wide.
         new_height = source_h
+
         new_width = int(
-            source_h * target_ratio
+            source_h
+            * target_ratio
         )
 
     else:
 
-        # Too tall.
         new_width = source_w
+
         new_height = int(
-            source_w / target_ratio
+            source_w
+            / target_ratio
         )
 
     left = max(
         0,
-        (source_w - new_width) // 2,
+        (
+            source_w
+            - new_width
+        )
+        // 2,
     )
 
     top = max(
         0,
-        (source_h - new_height) // 2,
+        (
+            source_h
+            - new_height
+        )
+        // 2,
     )
 
     image = image.crop(
@@ -1396,7 +2164,10 @@ def cover_crop(image, width, height):
     )
 
     return image.resize(
-        (width, height),
+        (
+            width,
+            height,
+        ),
         Image.Resampling.LANCZOS,
     )
 
@@ -1412,7 +2183,10 @@ def create_scene_frame(
     scene_number,
     total_scenes,
 ):
-    image = Image.open(image_path).convert("RGB")
+
+    image = Image.open(
+        image_path
+    ).convert("RGB")
 
     # --------------------------------------------------------
     # Background
@@ -1428,14 +2202,16 @@ def create_scene_frame(
         ImageFilter.GaussianBlur(18)
     )
 
-    # Darken background.
     dark_overlay = Image.new(
         "RGBA",
         (WIDTH, HEIGHT),
         (0, 0, 0, 145),
     )
 
-    background = background.convert("RGBA")
+    background = background.convert(
+        "RGBA"
+    )
+
     background.alpha_composite(
         dark_overlay
     )
@@ -1455,9 +2231,15 @@ def create_scene_frame(
         photo_height,
     )
 
-    photo = photo.convert("RGB")
+    photo = photo.convert(
+        "RGB"
+    )
 
-    photo_x = (WIDTH - photo_width) // 2
+    photo_x = (
+        WIDTH
+        - photo_width
+    ) // 2
+
     photo_y = 365
 
     # Photo shadow.
@@ -1467,14 +2249,20 @@ def create_scene_frame(
         (0, 0, 0, 0),
     )
 
-    shadow_draw = ImageDraw.Draw(shadow)
+    shadow_draw = ImageDraw.Draw(
+        shadow
+    )
 
     shadow_draw.rounded_rectangle(
         (
             photo_x - 10,
             photo_y - 10,
-            photo_x + photo_width + 10,
-            photo_y + photo_height + 10,
+            photo_x
+            + photo_width
+            + 10,
+            photo_y
+            + photo_height
+            + 10,
         ),
         radius=22,
         fill=(0, 0, 0, 170),
@@ -1484,7 +2272,9 @@ def create_scene_frame(
         ImageFilter.GaussianBlur(14)
     )
 
-    canvas.alpha_composite(shadow)
+    canvas.alpha_composite(
+        shadow
+    )
 
     canvas.alpha_composite(
         photo.convert("RGBA"),
@@ -1494,7 +2284,9 @@ def create_scene_frame(
         ),
     )
 
-    draw = ImageDraw.Draw(canvas)
+    draw = ImageDraw.Draw(
+        canvas
+    )
 
     # --------------------------------------------------------
     # Header
@@ -1512,7 +2304,6 @@ def create_scene_frame(
         fill=NAVY,
     )
 
-    # Accent strip.
     draw.rectangle(
         (
             0,
@@ -1567,12 +2358,15 @@ def create_scene_frame(
     )
 
     scene_width = (
-        scene_bbox[2] - scene_bbox[0]
+        scene_bbox[2]
+        - scene_bbox[0]
     )
 
     draw.rounded_rectangle(
         (
-            WIDTH - scene_width - 95,
+            WIDTH
+            - scene_width
+            - 95,
             48,
             WIDTH - 45,
             98,
@@ -1583,7 +2377,9 @@ def create_scene_frame(
 
     draw.text(
         (
-            WIDTH - scene_width - 70,
+            WIDTH
+            - scene_width
+            - 70,
             57,
         ),
         scene_text,
@@ -1611,7 +2407,6 @@ def create_scene_frame(
         width=2,
     )
 
-    # Section label.
     label_font = load_font(
         25,
         bold=True,
@@ -1627,13 +2422,14 @@ def create_scene_frame(
         fill=RED,
     )
 
-    # Headline.
     headline_font = load_font(
         49,
         bold=True,
     )
 
-    headline = clean_text(title)
+    headline = clean_text(
+        title
+    )
 
     draw_wrapped_text(
         draw,
@@ -1647,21 +2443,27 @@ def create_scene_frame(
         max_lines=5,
     )
 
-    # Source.
     source_font = load_font(
         24,
         bold=False,
     )
 
-    source_clean = clean_text(source)
+    source_clean = clean_text(
+        source
+    )
 
     if source_clean:
-        source_text = f"Source: {source_clean}"
+
+        source_text = (
+            f"Source: {source_clean}"
+        )
 
         draw.text(
             (
                 75,
-                panel_y + panel_height - 90,
+                panel_y
+                + panel_height
+                - 90,
             ),
             source_text,
             font=source_font,
@@ -1714,11 +2516,9 @@ def create_scene_frame(
         fill=MID_GREY,
     )
 
-    # --------------------------------------------------------
-    # Convert to RGB
-    # --------------------------------------------------------
-
-    final = canvas.convert("RGB")
+    final = canvas.convert(
+        "RGB"
+    )
 
     return final
 
@@ -1732,17 +2532,21 @@ def create_scene_frames(
     title,
     source,
 ):
+
     print("")
     print("=" * 70)
     print("CREATING REAL-PHOTO SCENES")
     print("=" * 70)
 
     if not image_paths:
+
         raise RuntimeError(
             "No valid image paths available."
         )
 
-    total_scenes = len(image_paths)
+    total_scenes = len(
+        image_paths
+    )
 
     frame_paths = []
 
@@ -1751,12 +2555,16 @@ def create_scene_frames(
         start=1,
     ):
 
-        frame_path = VIDEO_WORK_DIR / (
-            f"scene_{index:02d}.jpg"
+        frame_path = (
+            VIDEO_WORK_DIR
+            / (
+                f"scene_{index:02d}.jpg"
+            )
         )
 
         print(
-            f"Creating scene {index}/{total_scenes}:",
+            f"Creating scene "
+            f"{index}/{total_scenes}:",
             image_path,
         )
 
@@ -1775,10 +2583,15 @@ def create_scene_frames(
             optimize=True,
         )
 
-        frame_paths.append(frame_path)
+        frame_paths.append(
+            frame_path
+        )
 
     print("")
-    print("SCENE FRAMES CREATED:", len(frame_paths))
+    print(
+        "SCENE FRAMES CREATED:",
+        len(frame_paths),
+    )
 
     return frame_paths
 
@@ -1791,36 +2604,63 @@ def create_silent_video(
     frame_paths,
     duration,
 ):
+
     print("")
     print("=" * 70)
     print("CREATING SILENT VIDEO")
     print("=" * 70)
 
     if not frame_paths:
+
         raise RuntimeError(
             "No scene frames found."
         )
 
     if duration <= 0:
+
         raise RuntimeError(
             "Invalid target duration."
         )
 
-    # Ensure target duration is reasonable.
+    # --------------------------------------------------------
+    # HARD CAP
+    #
+    # Never allow the scene video to exceed the safe maximum.
+    # --------------------------------------------------------
+
     target_duration = max(
         MIN_DURATION,
         min(
-            MAX_DURATION,
+            HARD_MAX_DURATION,
             duration,
         ),
     )
 
-    total_frames = len(frame_paths)
+    print(
+        "Requested duration:",
+        round(duration, 2),
+        "seconds",
+    )
 
-    # Divide narration duration across scenes.
-    base_duration = target_duration / total_frames
+    print(
+        "Video target duration:",
+        round(target_duration, 2),
+        "seconds",
+    )
 
-    concat_file = VIDEO_WORK_DIR / "scenes.txt"
+    total_scenes = len(
+        frame_paths
+    )
+
+    base_duration = (
+        target_duration
+        / total_scenes
+    )
+
+    concat_file = (
+        VIDEO_WORK_DIR
+        / "scenes.txt"
+    )
 
     with open(
         concat_file,
@@ -1833,7 +2673,9 @@ def create_silent_video(
             f.write(
                 "file "
                 + "'"
-                + str(frame_path.resolve()).replace(
+                + str(
+                    frame_path.resolve()
+                ).replace(
                     "'",
                     "'\\''",
                 )
@@ -1841,17 +2683,19 @@ def create_silent_video(
             )
 
             f.write(
-                f"duration {base_duration:.4f}\n"
+                f"duration "
+                f"{base_duration:.4f}\n"
             )
 
-        # concat demuxer requires the final frame
-        # to be repeated.
+        # Required by concat demuxer.
         last_frame = frame_paths[-1]
 
         f.write(
             "file "
             + "'"
-            + str(last_frame.resolve()).replace(
+            + str(
+                last_frame.resolve()
+            ).replace(
                 "'",
                 "'\\''",
             )
@@ -1864,6 +2708,7 @@ def create_silent_video(
     )
 
     if silent_video.exists():
+
         silent_video.unlink()
 
     run_command(
@@ -1897,13 +2742,88 @@ def create_silent_video(
     )
 
     if not silent_video.exists():
+
         raise RuntimeError(
             "Silent video was not generated."
         )
 
     if silent_video.stat().st_size < 50000:
+
         raise RuntimeError(
             "Silent video is unexpectedly small."
+        )
+
+    # --------------------------------------------------------
+    # Measure actual generated video.
+    # --------------------------------------------------------
+
+    actual_duration = get_audio_duration(
+        silent_video
+    )
+
+    print(
+        "Generated silent video duration:",
+        round(actual_duration, 2),
+        "seconds",
+    )
+
+    # If concat produces a slight timing excess,
+    # explicitly trim it.
+    if actual_duration > HARD_MAX_DURATION:
+
+        print(
+            "Silent video exceeded hard cap."
+        )
+
+        capped_video = (
+            VIDEO_WORK_DIR
+            / "silent_video_capped.mp4"
+        )
+
+        if capped_video.exists():
+            capped_video.unlink()
+
+        run_command(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(silent_video),
+                "-t",
+                f"{HARD_MAX_DURATION:.3f}",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "medium",
+                "-crf",
+                "20",
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+                str(capped_video),
+            ]
+        )
+
+        if not capped_video.exists():
+
+            raise RuntimeError(
+                "Unable to cap silent video duration."
+            )
+
+        shutil.move(
+            str(capped_video),
+            str(silent_video),
+        )
+
+        actual_duration = get_audio_duration(
+            silent_video
+        )
+
+        print(
+            "Capped silent video duration:",
+            round(actual_duration, 2),
+            "seconds",
         )
 
     print(
@@ -1915,6 +2835,120 @@ def create_silent_video(
 
 
 # ============================================================
+# PREPARE FINAL AUDIO
+#
+# This creates a final audio file whose duration is guaranteed
+# not to exceed HARD_MAX_DURATION.
+# ============================================================
+
+def prepare_final_audio(
+    audio_file,
+):
+
+    print("")
+    print("=" * 70)
+    print("PREPARING FINAL AUDIO")
+    print("=" * 70)
+
+    if not audio_file.exists():
+
+        raise RuntimeError(
+            "Narration audio does not exist."
+        )
+
+    duration = get_audio_duration(
+        audio_file
+    )
+
+    if duration <= 0:
+
+        raise RuntimeError(
+            "Invalid narration duration."
+        )
+
+    print(
+        "Original narration duration:",
+        round(duration, 2),
+        "seconds",
+    )
+
+    # --------------------------------------------------------
+    # Normally this should already be below the hard cap.
+    # --------------------------------------------------------
+
+    if duration <= HARD_MAX_DURATION:
+
+        print(
+            "Narration is already within hard limit."
+        )
+
+        return audio_file
+
+    # --------------------------------------------------------
+    # Absolute fallback: trim audio to hard cap.
+    # This should rarely happen because create_safe_narration()
+    # already controls the TTS length.
+    # --------------------------------------------------------
+
+    capped_audio = (
+        AUDIO_DIR
+        / "narration_capped.mp3"
+    )
+
+    if capped_audio.exists():
+        capped_audio.unlink()
+
+    run_command(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(audio_file),
+            "-t",
+            f"{HARD_MAX_DURATION:.3f}",
+            "-c:a",
+            "libmp3lame",
+            "-b:a",
+            "192k",
+            "-ar",
+            "44100",
+            "-ac",
+            "2",
+            str(capped_audio),
+        ]
+    )
+
+    if not capped_audio.exists():
+
+        raise RuntimeError(
+            "Failed to create capped narration."
+        )
+
+    capped_duration = get_audio_duration(
+        capped_audio
+    )
+
+    if capped_duration <= 0:
+
+        raise RuntimeError(
+            "Capped narration duration is invalid."
+        )
+
+    print(
+        "Capped narration duration:",
+        round(capped_duration, 2),
+        "seconds",
+    )
+
+    shutil.copy2(
+        capped_audio,
+        FINAL_AUDIO,
+    )
+
+    return FINAL_AUDIO
+
+
+# ============================================================
 # MUX AUDIO + VIDEO
 # ============================================================
 
@@ -1922,17 +2956,20 @@ def mux_audio(
     silent_video,
     audio_file,
 ):
+
     print("")
     print("=" * 70)
     print("MUXING AUDIO + VIDEO")
     print("=" * 70)
 
     if not silent_video.exists():
+
         raise RuntimeError(
             "Silent video does not exist."
         )
 
     if not audio_file.exists():
+
         raise RuntimeError(
             "Narration audio does not exist."
         )
@@ -1943,22 +2980,77 @@ def mux_audio(
     )
 
     if FINAL_VIDEO.exists():
+
         try:
             FINAL_VIDEO.unlink()
         except Exception:
             pass
 
+    # --------------------------------------------------------
+    # Get both durations.
+    # --------------------------------------------------------
+
+    video_duration = get_audio_duration(
+        silent_video
+    )
+
     audio_duration = get_audio_duration(
         audio_file
     )
 
+    if video_duration <= 0:
+
+        raise RuntimeError(
+            "Invalid silent video duration."
+        )
+
     if audio_duration <= 0:
+
         raise RuntimeError(
             "Invalid narration duration."
         )
 
-    # Add only a tiny safety allowance.
-    final_duration = audio_duration + 0.05
+    print(
+        "Silent video duration:",
+        round(video_duration, 2),
+        "seconds",
+    )
+
+    print(
+        "Audio duration:",
+        round(audio_duration, 2),
+        "seconds",
+    )
+
+    # --------------------------------------------------------
+    # Determine final duration.
+    #
+    # Never exceed HARD_MAX_DURATION.
+    # Also never exceed either stream's duration.
+    # --------------------------------------------------------
+
+    final_duration = min(
+        video_duration,
+        audio_duration,
+        HARD_MAX_DURATION,
+    )
+
+    if final_duration < MIN_DURATION:
+
+        raise RuntimeError(
+            "Final duration would be below minimum: "
+            f"{final_duration:.2f}s"
+        )
+
+    print(
+        "FINAL TARGET DURATION:",
+        round(final_duration, 2),
+        "seconds",
+    )
+
+    # --------------------------------------------------------
+    # Explicitly trim video and audio to identical duration.
+    # --------------------------------------------------------
 
     run_command(
         [
@@ -1990,6 +3082,7 @@ def mux_audio(
             "2",
             "-t",
             f"{final_duration:.3f}",
+            "-shortest",
             "-movflags",
             "+faststart",
             str(FINAL_VIDEO),
@@ -1997,22 +3090,119 @@ def mux_audio(
     )
 
     if not FINAL_VIDEO.exists():
+
         raise RuntimeError(
             "Final MP4 was not generated."
         )
 
     if FINAL_VIDEO.stat().st_size < 100000:
+
         raise RuntimeError(
             "Final MP4 is unexpectedly small."
         )
 
+    # --------------------------------------------------------
+    # Measure actual final duration.
+    # --------------------------------------------------------
+
+    actual_final_duration = get_audio_duration(
+        FINAL_VIDEO
+    )
+
     print("")
-    print("FINAL VIDEO:", FINAL_VIDEO)
+    print(
+        "FINAL VIDEO:",
+        FINAL_VIDEO,
+    )
+
     print(
         "FINAL VIDEO SIZE:",
         FINAL_VIDEO.stat().st_size,
         "bytes",
     )
+
+    print(
+        "ACTUAL FINAL DURATION:",
+        round(actual_final_duration, 2),
+        "seconds",
+    )
+
+    # --------------------------------------------------------
+    # Emergency final hard-cap pass.
+    #
+    # This protects against unusual MP4 timestamp/container
+    # behaviour where ffprobe duration can be slightly longer.
+    # --------------------------------------------------------
+
+    if actual_final_duration > HARD_MAX_DURATION:
+
+        print("")
+        print(
+            "WARNING: Final MP4 still exceeds hard cap."
+        )
+
+        print(
+            "Running emergency duration trim..."
+        )
+
+        emergency_video = (
+            VIDEO_WORK_DIR
+            / "final_duration_capped.mp4"
+        )
+
+        if emergency_video.exists():
+            emergency_video.unlink()
+
+        run_command(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(FINAL_VIDEO),
+                "-t",
+                f"{HARD_MAX_DURATION:.3f}",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "medium",
+                "-crf",
+                "20",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-ar",
+                "44100",
+                "-ac",
+                "2",
+                "-movflags",
+                "+faststart",
+                str(emergency_video),
+            ]
+        )
+
+        if not emergency_video.exists():
+
+            raise RuntimeError(
+                "Emergency duration trim failed."
+            )
+
+        shutil.move(
+            str(emergency_video),
+            str(FINAL_VIDEO),
+        )
+
+        actual_final_duration = get_audio_duration(
+            FINAL_VIDEO
+        )
+
+        print(
+            "Emergency-capped duration:",
+            round(actual_final_duration, 2),
+            "seconds",
+        )
 
     return FINAL_VIDEO
 
@@ -2022,12 +3212,14 @@ def mux_audio(
 # ============================================================
 
 def verify_final_video():
+
     print("")
     print("=" * 70)
     print("VERIFYING FINAL VIDEO")
     print("=" * 70)
 
     if not FINAL_VIDEO.exists():
+
         raise RuntimeError(
             "Final video does not exist."
         )
@@ -2050,6 +3242,7 @@ def verify_final_video():
     )
 
     if result.returncode != 0:
+
         raise RuntimeError(
             "ffprobe failed on final MP4."
         )
@@ -2108,7 +3301,44 @@ def verify_final_video():
         text=True,
     )
 
+    video_codec_result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=codec_name",
+            "-of",
+            "csv=p=0",
+            str(FINAL_VIDEO),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    audio_codec_result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=codec_name",
+            "-of",
+            "csv=p=0",
+            str(FINAL_VIDEO),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
     try:
+
         width = int(
             width_result.stdout.strip()
         )
@@ -2118,6 +3348,7 @@ def verify_final_video():
         )
 
     except Exception:
+
         raise RuntimeError(
             "Unable to determine final video dimensions."
         )
@@ -2126,17 +3357,28 @@ def verify_final_video():
         audio_result.stdout.strip()
     )
 
+    video_codec = (
+        video_codec_result.stdout.strip()
+    )
+
+    audio_codec = (
+        audio_codec_result.stdout.strip()
+    )
+
     if width != WIDTH:
+
         raise RuntimeError(
             f"Wrong video width: {width}"
         )
 
     if height != HEIGHT:
+
         raise RuntimeError(
             f"Wrong video height: {height}"
         )
 
     if not has_audio:
+
         raise RuntimeError(
             "Final video has no audio stream."
         )
@@ -2146,57 +3388,129 @@ def verify_final_video():
     )
 
     print("")
-    print("FINAL WIDTH:", width)
-    print("FINAL HEIGHT:", height)
+    print(
+        "FINAL WIDTH:",
+        width,
+    )
+
+    print(
+        "FINAL HEIGHT:",
+        height,
+    )
+
     print(
         "FINAL DURATION:",
-        round(final_duration, 2),
+        round(final_duration, 3),
         "seconds",
     )
-    print("AUDIO STREAM: YES")
+
+    print(
+        "VIDEO CODEC:",
+        video_codec or "unknown",
+    )
+
+    print(
+        "AUDIO CODEC:",
+        audio_codec or "unknown",
+    )
+
+    print(
+        "AUDIO STREAM: YES"
+    )
+
     print("")
 
-    if final_duration < MIN_DURATION - 1:
+    # --------------------------------------------------------
+    # Duration checks.
+    #
+    # The final file must actually be within the hard cap.
+    # --------------------------------------------------------
+
+    if final_duration < (
+        MIN_DURATION - 0.50
+    ):
+
         raise RuntimeError(
-            "Final video is too short."
+            "Final video is too short: "
+            f"{final_duration:.2f} seconds."
         )
 
-    if final_duration > MAX_DURATION + 1:
+    if final_duration > HARD_MAX_DURATION:
+
         raise RuntimeError(
-            "Final video is too long."
+            "Final video is too long: "
+            f"{final_duration:.2f} seconds."
         )
 
-    print("FINAL VIDEO VERIFICATION SUCCESSFUL")
+    # Additional normal maximum check.
+    if final_duration > MAX_DURATION:
+
+        raise RuntimeError(
+            "Final video exceeds maximum duration: "
+            f"{final_duration:.2f} seconds."
+        )
+
+    print(
+        "DURATION CHECK: PASS"
+    )
+
+    print(
+        f"Duration is within "
+        f"{MIN_DURATION:.0f}-{MAX_DURATION:.0f} seconds."
+    )
+
+    print("")
+    print(
+        "FINAL VIDEO VERIFICATION SUCCESSFUL"
+    )
 
 
 # ============================================================
 # COPY COMPATIBILITY FILES
 # ============================================================
 
-def finalize_compatibility_files(image_paths):
+def finalize_compatibility_files(
+    image_paths,
+):
+
     if not image_paths:
         return
 
     first = image_paths[0]
 
     if first.exists():
+
         shutil.copy2(
             first,
             FINAL_IMAGE,
         )
 
-    # Ensure narration exists in expected location.
     if FINAL_AUDIO.exists():
+
         AUDIO_DIR.mkdir(
             parents=True,
             exist_ok=True,
         )
 
     print("")
-    print("COMPATIBILITY FILES READY")
-    print("Story image:", FINAL_IMAGE)
-    print("Narration:", FINAL_AUDIO)
-    print("Video:", FINAL_VIDEO)
+    print(
+        "COMPATIBILITY FILES READY"
+    )
+
+    print(
+        "Story image:",
+        FINAL_IMAGE,
+    )
+
+    print(
+        "Narration:",
+        FINAL_AUDIO,
+    )
+
+    print(
+        "Video:",
+        FINAL_VIDEO,
+    )
 
 
 # ============================================================
@@ -2204,19 +3518,43 @@ def finalize_compatibility_files(image_paths):
 # ============================================================
 
 def clean_working_files():
+
     VIDEO_WORK_DIR.mkdir(
         parents=True,
         exist_ok=True,
     )
 
+    # Scene/video temporary files.
     for pattern in [
         "scene_*.jpg",
         "silent_video.mp4",
+        "silent_video_capped.mp4",
         "scenes.txt",
+        "final_duration_capped.mp4",
         "narration.mp3",
     ]:
 
-        for path in VIDEO_WORK_DIR.glob(pattern):
+        for path in VIDEO_WORK_DIR.glob(
+            pattern
+        ):
+
+            try:
+                path.unlink()
+            except Exception:
+                pass
+
+    # Clean old TTS test files.
+    for pattern in [
+        "tts_test_*.mp3",
+        "tts_dynamic_*.mp3",
+        "narration_temp.mp3",
+        "narration_best.mp3",
+        "narration_capped.mp3",
+    ]:
+
+        for path in AUDIO_DIR.glob(
+            pattern
+        ):
 
             try:
                 path.unlink()
@@ -2229,6 +3567,7 @@ def clean_working_files():
 # ============================================================
 
 def main():
+
     try:
 
         prepare_directories()
@@ -2242,6 +3581,7 @@ def main():
         story = load_story()
 
         if story is None:
+
             raise RuntimeError(
                 "selected_story.json could not be loaded."
             )
@@ -2256,38 +3596,115 @@ def main():
         # Story details.
         # ----------------------------------------------------
 
-        title = get_story_title(story)
-        source = get_story_source(story)
+        title = get_story_title(
+            story
+        )
+
+        source = get_story_source(
+            story
+        )
 
         print("")
         print("=" * 70)
         print("SELECTED STORY")
         print("=" * 70)
-        print("TITLE:", title)
-        print("SOURCE:", source or "Not provided")
+
+        print(
+            "TITLE:",
+            title,
+        )
+
+        print(
+            "SOURCE:",
+            source or "Not provided",
+        )
+
         print("")
 
         # ----------------------------------------------------
-        # Narration.
+        # Build narration candidates.
         # ----------------------------------------------------
 
-        narration = create_safe_narration(
-            story,
-            script,
+        narration, measured_duration = (
+            create_safe_narration(
+                story,
+                script,
+            )
         )
 
         if not narration:
+
             raise RuntimeError(
                 "No valid narration was generated."
             )
 
+        print("")
+        print("=" * 70)
+        print("SELECTED NARRATION")
+        print("=" * 70)
+
+        print(narration)
+
+        print("")
+
+        print(
+            "NARRATION WORDS:",
+            word_count(narration),
+        )
+
+        print(
+            "MEASURED TTS DURATION:",
+            round(
+                measured_duration,
+                2,
+            ),
+            "seconds",
+        )
+
+        # ----------------------------------------------------
+        # Generate final narration.
+        # ----------------------------------------------------
+
         narration_duration = generate_tts(
-            narration
+            narration,
+            measured_duration,
         )
 
         if narration_duration <= 0:
+
             raise RuntimeError(
                 "Narration duration is invalid."
+            )
+
+        if narration_duration > HARD_MAX_DURATION:
+
+            raise RuntimeError(
+                "Narration exceeded hard duration cap "
+                "after final generation."
+            )
+
+        # ----------------------------------------------------
+        # Prepare final audio.
+        # ----------------------------------------------------
+
+        final_audio = prepare_final_audio(
+            FINAL_AUDIO
+        )
+
+        final_audio_duration = get_audio_duration(
+            final_audio
+        )
+
+        if final_audio_duration <= 0:
+
+            raise RuntimeError(
+                "Final narration audio is invalid."
+            )
+
+        if final_audio_duration > HARD_MAX_DURATION:
+
+            raise RuntimeError(
+                "Final narration audio exceeds hard cap."
             )
 
         # ----------------------------------------------------
@@ -2299,6 +3716,7 @@ def main():
         )
 
         if not image_paths:
+
             raise RuntimeError(
                 "No valid real article photos were available."
             )
@@ -2307,9 +3725,9 @@ def main():
         # Scene count.
         # ----------------------------------------------------
 
-        # Use all available valid article photos,
-        # capped by MAX_SCENES.
-        image_paths = image_paths[:MAX_SCENES]
+        image_paths = image_paths[
+            :MAX_SCENES
+        ]
 
         print("")
         print(
@@ -2329,6 +3747,7 @@ def main():
         )
 
         if not frame_paths:
+
             raise RuntimeError(
                 "No scene frames were created."
             )
@@ -2339,7 +3758,7 @@ def main():
 
         silent_video = create_silent_video(
             frame_paths,
-            narration_duration,
+            final_audio_duration,
         )
 
         # ----------------------------------------------------
@@ -2348,11 +3767,11 @@ def main():
 
         final_video = mux_audio(
             silent_video,
-            FINAL_AUDIO,
+            final_audio,
         )
 
         # ----------------------------------------------------
-        # Compatibility.
+        # Compatibility files.
         # ----------------------------------------------------
 
         finalize_compatibility_files(
@@ -2360,7 +3779,7 @@ def main():
         )
 
         # ----------------------------------------------------
-        # Verify.
+        # Verify final MP4.
         # ----------------------------------------------------
 
         verify_final_video()
@@ -2369,23 +3788,63 @@ def main():
         # Final status.
         # ----------------------------------------------------
 
+        final_verified_duration = (
+            get_audio_duration(
+                FINAL_VIDEO
+            )
+        )
+
         print("")
         print("=" * 70)
-        print("RIFT VALLEY WATCH GENERATION SUCCESSFUL")
+        print(
+            "RIFT VALLEY WATCH GENERATION SUCCESSFUL"
+        )
         print("=" * 70)
+
         print("")
         print("FINAL MP4:")
         print(FINAL_VIDEO)
+
         print("")
-        print("REAL PHOTOS USED:", len(image_paths))
-        print("NARRATION WORDS:", word_count(narration))
+
+        print(
+            "REAL PHOTOS USED:",
+            len(image_paths),
+        )
+
+        print(
+            "NARRATION WORDS:",
+            word_count(narration),
+        )
+
         print(
             "NARRATION DURATION:",
-            round(narration_duration, 2),
+            round(
+                narration_duration,
+                2,
+            ),
             "seconds",
         )
+
+        print(
+            "VERIFIED FINAL DURATION:",
+            round(
+                final_verified_duration,
+                2,
+            ),
+            "seconds",
+        )
+
         print("")
-        print("SUCCESS")
+
+        print(
+            "FINAL OUTPUT IS WITHIN DURATION LIMIT."
+        )
+
+        print(
+            "SUCCESS"
+        )
+
         print("")
 
         return 0
@@ -2393,17 +3852,27 @@ def main():
     except KeyboardInterrupt:
 
         print("")
-        print("Generation interrupted by user.")
+        print(
+            "Generation interrupted by user."
+        )
+
         return 130
 
     except Exception as exc:
 
         print("")
         print("=" * 70)
-        print("GENERATION FAILED")
+        print(
+            "RIFT VALLEY WATCH GENERATION FAILED"
+        )
         print("=" * 70)
+
         print("")
-        print("ERROR:", exc)
+        print(
+            "ERROR:",
+            exc,
+        )
+
         print("")
 
         import traceback
