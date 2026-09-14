@@ -8,12 +8,25 @@ import sys
 
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
+
 # ============================================================
 # RIFT VALLEY WATCH - VIDEO GENERATOR
-# VERSION: RVW_VIDEO_V32_STABLE_MULTIPHOTO
+# VERSION: RVW_VIDEO_V33_SYNTAX_STABLE_MULTIPHOTO
+#
+# PURPOSE
+# - Read selected_story.json and selected_script.json
+# - Use only valid real article photographs
+# - Remove duplicate or near-duplicate images
+# - Create one scene per genuinely unique photo
+# - Never display a fake scene counter
+# - Avoid Citizen TV and unrelated placeholder graphics
+# - Create a professional 1080x1920 vertical news reel
+# - Add narration and validate the final MP4
 # ============================================================
 
+
 BASE_DIR = Path(__file__).resolve().parent
+
 DATA_DIR = BASE_DIR / "data"
 SOURCE_DIR = BASE_DIR / "assets" / "source"
 WORK_DIR = BASE_DIR / "assets" / "video_work"
@@ -25,153 +38,234 @@ SCRIPT_FILE = DATA_DIR / "selected_script.json"
 AUDIO_FILE = AUDIO_DIR / "narration.mp3"
 FINAL_FILE = OUTPUT_DIR / "rift_valley_watch_reel.mp4"
 
-W, H, FPS = 1080, 1920, 30
-MAX_SCENES = 6
-MIN_BYTES = 10000
-MIN_W, MIN_H = 400, 300
+WIDTH = 1080
+HEIGHT = 1920
+FPS = 30
 
-FORBIDDEN = (
-    "citizen", "ctv", "world_cup", "worldcup", "avatar",
-    "placeholder", "default_image", "default-image",
-    "profile_picture", "profile-picture", "dummy", "generic"
+MIN_IMAGE_BYTES = 10_000
+MIN_VIDEO_BYTES = 100_000
+
+FORBIDDEN_IMAGE_TERMS = (
+    "citizen",
+    "ctv",
+    "world_cup",
+    "worldcup",
+    "avatar",
+    "placeholder",
+    "default_image",
+    "default-image",
+    "profile_picture",
+    "profile-picture",
+    "dummy",
+    "generic",
+    "logo",
+    "icon",
 )
 
-BLACK = (8, 8, 10)
-WHITE = (248, 248, 248)
-GREY = (165, 165, 170)
-RED = (205, 28, 38)
-YELLOW = (245, 190, 45)
+
+# ============================================================
+# BASIC HELPERS
+# ============================================================
+
+def print_banner(message):
+    print()
+    print("=" * 72)
+    print(message)
+    print("=" * 72)
 
 
-def ensure_dirs():
-    for p in (DATA_DIR, SOURCE_DIR, WORK_DIR, AUDIO_DIR, OUTPUT_DIR):
-        p.mkdir(parents=True, exist_ok=True)
+def ensure_directories():
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    SOURCE_DIR.mkdir(parents=True, exist_ok=True)
+    WORK_DIR.mkdir(parents=True, exist_ok=True)
+    AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def clean_work():
-    for pattern in ("scene_*.jpg", "scene_*.mp4", "concat.txt",
-                    "silent.mp4", "muxed.mp4"):
-        for p in WORK_DIR.glob(pattern):
-            try:
-                p.unlink()
-            except OSError:
-                pass
+def run_command(command, description):
+    print()
+    print("RUNNING:", description)
+    print("COMMAND:", " ".join(str(item) for item in command))
+
+    result = subprocess.run(
+        command,
+        cwd=str(BASE_DIR),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+    print(result.stdout)
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"{description} failed with exit code {result.returncode}"
+        )
+
+    return result.stdout
 
 
 def load_json(path):
-    if not path.exists() or path.stat().st_size < 2:
-        raise RuntimeError(f"Required JSON file missing or empty: {path}")
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    if not path.exists():
+        raise RuntimeError(f"Required JSON file does not exist: {path}")
+
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            value = json.load(handle)
+    except Exception as exc:
+        raise RuntimeError(f"Could not read JSON file {path}: {exc}") from exc
+
+    if not isinstance(value, (dict, list)):
+        raise RuntimeError(f"JSON file is not an object or list: {path}")
+
+    return value
 
 
-def text(value):
+def save_json(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(value, handle, ensure_ascii=False, indent=2)
+
+
+def safe_text(value):
     if value is None:
         return ""
-    s = re.sub(r"<[^>]+>", " ", str(value))
-    return re.sub(r"\s+", " ", s).strip()
+
+    if isinstance(value, (dict, list)):
+        return ""
+
+    return str(value).strip()
 
 
-def story_object(data):
-    if not isinstance(data, dict):
-        raise RuntimeError("selected_story.json must contain an object")
+def clean_text(value, fallback=""):
+    text = safe_text(value)
 
-    if isinstance(data.get("story"), dict):
-        return data["story"]
+    text = re.sub(r"\s+", " ", text)
+    text = text.replace("\x00", "")
+    text = text.strip()
 
-    if isinstance(data.get("stories"), list) and data["stories"]:
-        if isinstance(data["stories"][0], dict):
-            return data["stories"][0]
-
-    if data.get("title"):
-        return data
-
-    raise RuntimeError("No story object found")
+    return text or fallback
 
 
 def source_name(story):
-    src = story.get("source", "")
+    source = story.get("source", "")
 
-    if isinstance(src, dict):
-        src = src.get("name", "")
+    if isinstance(source, dict):
+        name = clean_text(source.get("name"), "Rift Valley Watch")
+    else:
+        name = clean_text(source, "Rift Valley Watch")
 
-    s = text(src)
+    lowered = name.lower()
 
-    if "citizen" in s.lower():
+    if "citizen" in lowered or lowered == "ctv":
         return "Rift Valley Watch"
 
-    return s or "Rift Valley Watch"
+    return name
 
 
-def title(story):
-    return text(story.get("title")) or "Rift Valley Update"
-
-
-def county(story):
-    return text(story.get("county")) or "Rift Valley"
-
-
-def category(story):
-    return (text(story.get("category")) or "REGIONAL NEWS").upper()
-
-
-def published(story):
-    return text(
-        story.get("published")
-        or story.get("date")
-        or ""
+def story_title(story):
+    return clean_text(
+        story.get("title")
+        or story.get("headline")
+        or story.get("name"),
+        "Rift Valley Regional Update",
     )
 
 
-def resolve_path(value):
-    if not value:
-        return None
-
-    p = Path(str(value).strip())
-    choices = []
-
-    if p.is_absolute():
-        choices.append(p)
-    else:
-        choices.extend(
-            [
-                BASE_DIR / p,
-                SOURCE_DIR / p.name,
-            ]
-        )
-
-    for candidate in choices:
-        try:
-            if candidate.exists() and candidate.is_file():
-                return candidate.resolve()
-        except OSError:
-            pass
-
-    return None
+def story_county(story):
+    return clean_text(
+        story.get("county")
+        or story.get("location")
+        or story.get("region"),
+        "Rift Valley",
+    )
 
 
-def forbidden_path(path):
-    value = str(path).lower()
-    return any(term in value for term in FORBIDDEN)
+def story_category(story):
+    return clean_text(
+        story.get("category")
+        or story.get("section")
+        or story.get("topic"),
+        "REGIONAL UPDATE",
+    ).upper()
+
+
+def story_summary(story):
+    return clean_text(
+        story.get("summary")
+        or story.get("description")
+        or story.get("details")
+        or story.get("body"),
+        "",
+    )
+
+
+def story_facts(story):
+    facts = story.get("verified_facts", [])
+
+    if not isinstance(facts, list):
+        return []
+
+    result = []
+
+    for item in facts:
+        if not isinstance(item, dict):
+            continue
+
+        label = clean_text(item.get("label"))
+        value = clean_text(item.get("value"))
+
+        if label and value:
+            result.append((label.upper(), value))
+
+    return result[:5]
+
+
+# ============================================================
+# IMAGE VALIDATION
+# ============================================================
+
+def is_forbidden_image(path):
+    name = path.name.lower()
+    full_name = str(path).lower()
+
+    for term in FORBIDDEN_IMAGE_TERMS:
+        if term in name or term in full_name:
+            return True
+
+    return False
 
 
 def valid_image(path):
-    if not path or not path.exists() or not path.is_file():
+    if not path:
         return False
 
-    if forbidden_path(path):
-        print("REJECTED IMAGE:", path)
+    path = Path(path)
+
+    if not path.exists():
+        return False
+
+    if not path.is_file():
+        return False
+
+    if is_forbidden_image(path):
         return False
 
     try:
-        if path.stat().st_size < MIN_BYTES:
+        if path.stat().st_size < MIN_IMAGE_BYTES:
             return False
 
         with Image.open(path) as image:
-            if image.width < MIN_W or image.height < MIN_H:
-                return False
-
             image.verify()
+
+        with Image.open(path) as image:
+            width, height = image.size
+
+        if width < 400 or height < 300:
+            return False
 
         return True
 
@@ -179,19 +273,12 @@ def valid_image(path):
         return False
 
 
-def file_hash(path):
-    digest = hashlib.sha256()
-
+def image_hash(path):
     try:
-        with open(path, "rb") as f:
-            for block in iter(
-                lambda: f.read(1024 * 1024),
-                b"",
-            ):
-                digest.update(block)
-
-        return digest.hexdigest()
-
+        with Image.open(path) as image:
+            image = image.convert("RGB")
+            image.thumbnail((64, 64))
+            return hashlib.sha256(image.tobytes()).hexdigest()
     except Exception:
         return ""
 
@@ -200,203 +287,222 @@ def perceptual_hash(path):
     try:
         with Image.open(path) as image:
             image = image.convert("L")
-            image = image.resize(
-                (16, 16),
-                Image.Resampling.LANCZOS,
-            )
-
+            image = image.resize((16, 16))
             pixels = list(image.getdata())
-
-            if not pixels:
-                return ""
-
             average = sum(pixels) / len(pixels)
 
             return "".join(
-                "1" if value >= average else "0"
-                for value in pixels
+                "1" if pixel >= average else "0"
+                for pixel in pixels
             )
-
     except Exception:
         return ""
 
 
-def hash_distance(a, b):
-    if not a or not b or len(a) != len(b):
-        return 9999
+def hamming_distance(first, second):
+    if not first or not second:
+        return 999
+
+    if len(first) != len(second):
+        return 999
 
     return sum(
-        left != right
-        for left, right in zip(a, b)
+        1
+        for left, right in zip(first, second)
+        if left != right
     )
 
 
-def image_candidates(story):
-    candidates = []
-
-    values = story.get(
-        "image_paths",
-        [],
-    )
-
-    if isinstance(values, str):
-        values = [values]
-
-    if isinstance(values, list):
-        for value in values:
-            path = resolve_path(value)
-
-            if path:
-                candidates.append(path)
-
-    for key in (
-        "image_path",
-        "local_image",
-        "image",
-        "photo",
-        "photo_path",
-    ):
-        value = story.get(key)
-
-        if isinstance(value, list):
-            for item in value:
-                path = resolve_path(item)
-
-                if path:
-                    candidates.append(path)
-
-        else:
-            path = resolve_path(value)
-
-            if path:
-                candidates.append(path)
-
-    try:
-        source_files = sorted(
-            SOURCE_DIR.iterdir(),
-            key=lambda p: p.name.lower(),
-        )
-    except OSError:
-        source_files = []
-
-    for path in source_files:
-        if (
-            path.is_file()
-            and path.name.lower().startswith("story_image")
-        ):
-            candidates.append(path)
-
-    return candidates
-
-
-def unique_images(story):
-    result = []
+def unique_images(paths):
+    selected = []
     exact_hashes = set()
-    visual_hashes = []
-    seen_paths = set()
+    perceptual_hashes = []
 
-    for path in image_candidates(story):
-
-        try:
-            key = str(path.resolve())
-        except OSError:
-            continue
-
-        if key in seen_paths:
-            continue
-
-        seen_paths.add(key)
+    for path in paths:
+        path = Path(path)
 
         if not valid_image(path):
             continue
 
-        exact = file_hash(path)
+        exact = image_hash(path)
 
         if exact and exact in exact_hashes:
-            print(
-                "SKIPPED EXACT DUPLICATE:",
-                path.name,
-            )
             continue
 
-        visual = perceptual_hash(path)
+        perceptual = perceptual_hash(path)
 
-        if visual:
-            duplicate = any(
-                hash_distance(
-                    visual,
-                    previous,
-                ) <= 8
-                for previous in visual_hashes
+        if perceptual:
+            too_similar = any(
+                hamming_distance(perceptual, previous) <= 8
+                for previous in perceptual_hashes
             )
 
-            if duplicate:
-                print(
-                    "SKIPPED VISUAL DUPLICATE:",
-                    path.name,
-                )
+            if too_similar:
                 continue
+
+        selected.append(path)
 
         if exact:
             exact_hashes.add(exact)
 
-        if visual:
-            visual_hashes.append(visual)
+        if perceptual:
+            perceptual_hashes.append(perceptual)
 
-        result.append(path)
-
-        if len(result) >= MAX_SCENES:
+        if len(selected) >= 6:
             break
+
+    return selected
+
+
+def collect_image_candidates(story):
+    candidates = []
+
+    image_fields = (
+        "image_paths",
+        "images",
+        "image_path",
+        "local_image",
+        "photo",
+        "photo_path",
+        "image",
+    )
+
+    for field in image_fields:
+        value = story.get(field)
+
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    item = (
+                        item.get("local_path")
+                        or item.get("path")
+                        or item.get("file")
+                        or item.get("image_path")
+                    )
+
+                if item:
+                    candidates.append(Path(str(item)))
+
+        elif isinstance(value, str):
+            candidates.append(Path(value))
+
+    expanded = []
+
+    for path in candidates:
+        if not path.is_absolute():
+            expanded.append(BASE_DIR / path)
+            expanded.append(DATA_DIR / path)
+            expanded.append(SOURCE_DIR / path)
+        else:
+            expanded.append(path)
+
+    for pattern in (
+        "story_image*",
+        "article_image*",
+        "photo*",
+        "*.jpg",
+        "*.jpeg",
+        "*.png",
+        "*.webp",
+    ):
+        expanded.extend(SOURCE_DIR.glob(pattern))
+
+    result = []
+    seen = set()
+
+    for path in expanded:
+        try:
+            resolved = path.resolve()
+        except Exception:
+            resolved = path
+
+        if str(resolved) in seen:
+            continue
+
+        seen.add(str(resolved))
+        result.append(resolved)
 
     return result
 
 
-def font(size, bold=False):
-    if bold:
-        names = [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
-        ]
-    else:
-        names = [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-        ]
+# ============================================================
+# FONT AND DRAWING HELPERS
+# ============================================================
 
-    for name in names:
-        if Path(name).exists():
+def find_font(size, bold=False):
+    candidates = []
+
+    if bold:
+        candidates.extend(
+            [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+            ]
+        )
+    else:
+        candidates.extend(
+            [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+            ]
+        )
+
+    candidates.extend(
+        [
+            "C:/Windows/Fonts/arial.ttf",
+            "C:/Windows/Fonts/arialbd.ttf",
+        ]
+    )
+
+    for candidate in candidates:
+        path = Path(candidate)
+
+        if path.exists():
             try:
-                return ImageFont.truetype(
-                    name,
-                    size,
-                )
+                return ImageFont.truetype(str(path), size=size)
             except Exception:
                 pass
 
     return ImageFont.load_default()
 
 
-def wrap(draw, value, fnt, width):
-    words = text(value).split()
+def fit_text(draw, text, font, max_width):
+    text = clean_text(text)
+
+    if not text:
+        return ""
+
+    if draw.textbbox((0, 0), text, font=font)[2] <= max_width:
+        return text
+
+    words = text.split()
+    output = ""
+
+    for word in words:
+        trial = f"{output} {word}".strip()
+
+        if draw.textbbox((0, 0), trial, font=font)[2] <= max_width:
+            output = trial
+        else:
+            break
+
+    return output or text[:40]
+
+
+def wrap_text(draw, text, font, max_width, max_lines=5):
+    words = clean_text(text).split()
+
+    if not words:
+        return []
 
     lines = []
     current = ""
 
     for word in words:
+        trial = f"{current} {word}".strip()
+        width = draw.textbbox((0, 0), trial, font=font)[2]
 
-        trial = (
-            word
-            if not current
-            else current + " " + word
-        )
-
-        box = draw.textbbox(
-            (0, 0),
-            trial,
-            font=fnt,
-        )
-
-        if box[2] - box[0] <= width:
+        if width <= max_width:
             current = trial
         else:
             if current:
@@ -404,58 +510,25 @@ def wrap(draw, value, fnt, width):
 
             current = word
 
-    if current:
+            if len(lines) >= max_lines:
+                break
+
+    if current and len(lines) < max_lines:
         lines.append(current)
+
+    if len(lines) == max_lines and len(words) > 0:
+        last = lines[-1]
+
+        if not last.endswith("…"):
+            lines[-1] = last.rstrip(". ") + "…"
 
     return lines
 
 
-def crop_vertical(image):
-    image = image.convert("RGB")
-
-    sw, sh = image.size
-
-    target_ratio = W / H
-    source_ratio = sw / sh
-
-    if source_ratio > target_ratio:
-
-        new_width = int(
-            sh * target_ratio
-        )
-
-        left = (
-            sw - new_width
-        ) // 2
-
-        image = image.crop(
-            (
-                left,
-                0,
-                left + new_width,
-                sh,
-            )
-        )
-
-    else:
-
-        new_height = int(
-            sw / target_ratio
-        )
-
-        top = (
-            sh - new_height
-        ) // 2
-
-        image = image.crop(
-            (
-                0,
-                top,
-                sw,
-                top + new_height,
-            )
-        )
-
-    return image.resize(
-        (W, H),
-        Image.Resampling.LANC
+def draw_text_block(
+    draw,
+    text,
+    x,
+    y,
+    width,
+    font,
