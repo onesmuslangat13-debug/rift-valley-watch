@@ -114,12 +114,6 @@ jobs:
 
           rm -f assets/video_work/narration.mp3
 
-          # Remove all generated story images regardless of extension.
-          # This matches the current news engine naming scheme:
-          # story_1_image.jpg
-          # story_1_image_2.jpg
-          # story_2_image.jpg
-          # etc.
           find assets/source -maxdepth 1 -type f \
             \( \
               -name 'story_*_image.*' \
@@ -251,12 +245,8 @@ jobs:
           echo "CHECKING PYTHON SYNTAX"
           echo "============================================================"
 
-          echo ""
-          echo "Main:"
           python -m py_compile rift_valley_main.py
 
-          echo ""
-          echo "Renderer:"
           python -m py_compile rift_valley_video_generator.py
 
           echo ""
@@ -306,22 +296,22 @@ jobs:
 
 
       # ==========================================================
-      # RUN REAL-TIME NEWS ENGINE
+      # RUN MAIN APPLICATION
       # ==========================================================
 
-      - name: Run Rift Valley Watch news engine
+      - name: Run Rift Valley Watch main engine
         run: |
           set -e
 
           echo "============================================================"
-          echo "STARTING RIFT VALLEY WATCH NEWS ENGINE"
+          echo "STARTING RIFT VALLEY WATCH"
           echo "============================================================"
 
           python -u rift_valley_main.py
 
           echo ""
           echo "============================================================"
-          echo "NEWS ENGINE FINISHED"
+          echo "RIFT VALLEY WATCH MAIN ENGINE FINISHED"
           echo "============================================================"
 
 
@@ -338,7 +328,7 @@ jobs:
           echo "============================================================"
 
           echo ""
-          echo "Data directory:"
+          echo "DATA FILES:"
           find data -maxdepth 1 -type f -print -exec ls -lh {} \; || true
 
           if [ ! -f data/story.json ]; then
@@ -354,28 +344,218 @@ jobs:
           fi
 
           echo ""
-          echo "story.json found:"
+          echo "story.json:"
           ls -lh data/story.json
 
           echo ""
-          echo "script.json found:"
+          echo "script.json:"
           ls -lh data/script.json
 
 
       # ==========================================================
+      # NORMALIZE STORY + SCRIPT FOR RENDERER
+      #
+      # Accepts:
+      #
+      # 1. {"stories": [...]}
+      #
+      # 2. [{"title": ...}, ...]
+      #
+      # 3. {"title": ..., "image_path": ...}
+      #
+      # and converts to:
+      #
+      # {"stories": [...]}
+      # ==========================================================
+
+      - name: Prepare renderer input
+        run: |
+          set -e
+
+          echo "============================================================"
+          echo "NORMALIZING RENDERER INPUT"
+          echo "============================================================"
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          data_dir = Path("data")
+
+          story_path = data_dir / "story.json"
+          script_path = data_dir / "script.json"
+
+          selected_story_path = data_dir / "selected_story.json"
+          selected_script_path = data_dir / "selected_script.json"
+
+
+          def load_json(path):
+              with path.open("r", encoding="utf-8") as f:
+                  return json.load(f)
+
+
+          def normalize_stories(data):
+              # Already standard structure.
+              if isinstance(data, dict):
+                  stories = data.get("stories")
+
+                  if isinstance(stories, list):
+                      return {
+                          "stories": stories
+                      }
+
+                  # Some engines use "story".
+                  single = data.get("story")
+
+                  if isinstance(single, dict):
+                      return {
+                          "stories": [single]
+                      }
+
+                  # Single story object.
+                  if any(
+                      key in data
+                      for key in (
+                          "title",
+                          "headline",
+                          "description",
+                          "summary",
+                          "image",
+                          "image_path",
+                          "images",
+                          "source",
+                          "county",
+                      )
+                  ):
+                      return {
+                          "stories": [data]
+                      }
+
+              # Root list.
+              if isinstance(data, list):
+                  return {
+                      "stories": data
+                  }
+
+              raise RuntimeError(
+                  "Unable to identify stories in story.json."
+              )
+
+
+          def normalize_script(data):
+              if isinstance(data, dict):
+                  scripts = data.get("scripts")
+
+                  if isinstance(scripts, list):
+                      return {
+                          "scripts": scripts
+                      }
+
+                  script = data.get("script")
+
+                  if isinstance(script, dict):
+                      return {
+                          "scripts": [script]
+                      }
+
+                  if any(
+                      key in data
+                      for key in (
+                          "narration",
+                          "text",
+                          "script",
+                          "title",
+                          "story",
+                      )
+                  ):
+                      return {
+                          "scripts": [data]
+                      }
+
+              if isinstance(data, list):
+                  return {
+                      "scripts": data
+                  }
+
+              # Keep any unknown dictionary structure rather than
+              # destroying useful information.
+              if isinstance(data, dict):
+                  return data
+
+              raise RuntimeError(
+                  "Unable to identify script data in script.json."
+              )
+
+
+          story_data = load_json(story_path)
+          script_data = load_json(script_path)
+
+          normalized_story = normalize_stories(story_data)
+          normalized_script = normalize_script(script_data)
+
+          stories = normalized_story.get("stories", [])
+
+          if not stories:
+              raise RuntimeError(
+                  "story.json contains zero stories."
+              )
+
+          with selected_story_path.open(
+              "w",
+              encoding="utf-8"
+          ) as f:
+              json.dump(
+                  normalized_story,
+                  f,
+                  ensure_ascii=False,
+                  indent=2
+              )
+
+          with selected_script_path.open(
+              "w",
+              encoding="utf-8"
+          ) as f:
+              json.dump(
+                  normalized_script,
+                  f,
+                  ensure_ascii=False,
+                  indent=2
+              )
+
+          print("")
+          print("Story normalization successful.")
+          print("Stories:", len(stories))
+
+          print("")
+          print("Story structure:")
+          print(type(story_data).__name__)
+
+          print("")
+          print("Selected story:")
+          print(selected_story_path)
+
+          print("")
+          print("Selected script:")
+          print(selected_script_path)
+          PY
+
+          echo ""
+          echo "============================================================"
+          echo "NORMALIZED SELECTED STORY"
+          echo "============================================================"
+
+          cat data/selected_story.json
+
+          echo ""
+          echo "============================================================"
+          echo "NORMALIZED SELECTED SCRIPT"
+          echo "============================================================"
+
+          cat data/selected_script.json
+
+
+      # ==========================================================
       # VERIFY REAL STORY PHOTOS
-      #
-      # IMPORTANT:
-      # Do NOT rely on:
-      # story_image*.jpg
-      #
-      # Current news engine uses:
-      # story_1_image.jpg
-      # story_1_image_2.jpg
-      # story_2_image.jpg
-      #
-      # This verification uses JSON + Pillow and checks the
-      # actual image contents, not just the filename extension.
       # ==========================================================
 
       - name: Verify real story images
@@ -388,7 +568,6 @@ jobs:
 
           python - <<'PY'
           import json
-          import os
           from pathlib import Path
 
           from PIL import Image, ImageFile
@@ -397,7 +576,7 @@ jobs:
 
           BASE_DIR = Path.cwd()
           SOURCE_DIR = BASE_DIR / "assets" / "source"
-          STORY_FILE = BASE_DIR / "data" / "story.json"
+          STORY_FILE = BASE_DIR / "data" / "selected_story.json"
 
           MIN_BYTES = 10000
           MIN_WIDTH = 300
@@ -416,6 +595,7 @@ jobs:
               "generic avatar",
               "profile picture",
           ]
+
 
           def normalize_ref(value):
               if isinstance(value, dict):
@@ -447,6 +627,7 @@ jobs:
 
               return str(value)
 
+
           def resolve_image(ref):
               ref = normalize_ref(ref).strip()
 
@@ -466,10 +647,14 @@ jobs:
               candidates.append(BASE_DIR / ref)
 
               clean = ref.lstrip("./")
+
               candidates.append(BASE_DIR / clean)
 
               filename = Path(clean).name
-              candidates.append(SOURCE_DIR / filename)
+
+              candidates.append(
+                  SOURCE_DIR / filename
+              )
 
               seen = set()
 
@@ -487,13 +672,13 @@ jobs:
                   if candidate.is_file():
                       return candidate
 
-              # Exact filename recovery.
-              matches = list(SOURCE_DIR.rglob(filename))
+              matches = list(
+                  SOURCE_DIR.rglob(filename)
+              )
 
               if matches:
                   return matches[0]
 
-              # Same-stem recovery.
               stem = Path(filename).stem
 
               for candidate in SOURCE_DIR.rglob("*"):
@@ -505,75 +690,101 @@ jobs:
 
               return None
 
-          def valid_image(path):
+
+          def validate_image(path):
               if path is None:
-                  return False, "path not found"
+                  return False, "not found"
 
               if not path.is_file():
                   return False, "not a file"
 
-              try:
-                  size = path.stat().st_size
-              except Exception as exc:
-                  return False, f"stat failed: {exc}"
+              size = path.stat().st_size
 
               if size < MIN_BYTES:
-                  return False, f"too small ({size} bytes)"
+                  return False, f"too small: {size} bytes"
 
               lower = path.name.lower()
 
               for term in FORBIDDEN_TERMS:
                   if term in lower:
-                      return False, f"forbidden filename term: {term}"
+                      return False, (
+                          f"forbidden filename: {term}"
+                      )
 
               try:
-                  with Image.open(path) as im:
-                      im.load()
+                  with Image.open(path) as image:
+                      image.load()
 
-                      width, height = im.size
+                      width, height = image.size
 
-                      if width < MIN_WIDTH or height < MIN_HEIGHT:
-                          return (
-                              False,
-                              f"too small dimensions ({width}x{height})"
+                      if (
+                          width < MIN_WIDTH
+                          or height < MIN_HEIGHT
+                      ):
+                          return False, (
+                              f"dimensions too small: "
+                              f"{width}x{height}"
                           )
 
-                      return True, f"{width}x{height}, {im.format}"
+                      return True, (
+                          f"{width}x{height}, "
+                          f"{image.format}"
+                      )
 
               except Exception as exc:
-                  return False, f"Pillow decode failed: {exc}"
+                  return False, (
+                      f"Pillow decode failed: {exc}"
+                  )
 
-          with STORY_FILE.open("r", encoding="utf-8") as f:
+
+          with STORY_FILE.open(
+              "r",
+              encoding="utf-8"
+          ) as f:
               data = json.load(f)
 
           stories = data.get("stories", [])
 
           if not isinstance(stories, list):
-              raise RuntimeError("story.json has no valid stories list.")
-
-          print("")
-          print("Stories in story.json:", len(stories))
+              raise RuntimeError(
+                  "Normalized selected_story.json "
+                  "does not contain a stories list."
+              )
 
           references = []
 
-          for index, story in enumerate(stories, start=1):
+          print("")
+          print("Stories:", len(stories))
+
+          for index, story in enumerate(
+              stories,
+              start=1
+          ):
               if not isinstance(story, dict):
                   continue
 
               print("")
-              print("Story", index)
-              print("Title:", story.get("title", ""))
-              print("Source:", story.get("source", ""))
-              print("County:", story.get("county", ""))
-
-              values = []
+              print(f"Story {index}:")
+              print(
+                  "Title:",
+                  story.get("title", "")
+              )
+              print(
+                  "County:",
+                  story.get("county", "")
+              )
+              print(
+                  "Source:",
+                  story.get("source", "")
+              )
 
               images = story.get("images", [])
 
               if isinstance(images, list):
-                  values.extend(images)
+                  for item in images:
+                      references.append(item)
               elif images:
-                  values.append(images)
+                  references.append(images)
 
               for key in (
                   "image_path",
@@ -583,51 +794,25 @@ jobs:
                   "photo_path",
               ):
                   if story.get(key):
-                      values.append(story[key])
+                      references.append(
+                          story[key]
+                      )
 
-              for value in values:
-                  ref = normalize_ref(value).strip()
-
-                  if ref:
-                      references.append(ref)
-                      print("Image reference:", ref)
-
-          # Also inspect the generated story image files directly.
-          # This is a fallback for cases where JSON has incomplete
-          # metadata but the news engine successfully downloaded photos.
-          direct_files = []
-
-          for pattern in (
-              "story_*_image.*",
-              "story_image.*",
-          ):
-              for path in SOURCE_DIR.glob(pattern):
-                  if path.is_file():
-                      direct_files.append(path)
-
-          # De-duplicate.
-          unique_direct = []
-          seen_direct = set()
-
-          for path in direct_files:
-              key = str(path.resolve())
-
-              if key not in seen_direct:
-                  seen_direct.add(key)
-                  unique_direct.append(path)
-
-          valid_paths = []
-          seen_valid = set()
+          valid = []
+          seen = set()
 
           print("")
           print("============================================================")
-          print("CHECKING JSON IMAGE REFERENCES")
+          print("CHECKING STORY IMAGE REFERENCES")
           print("============================================================")
 
-          for ref in references:
-              path = resolve_image(ref)
+          for item in references:
+              ref = normalize_ref(item)
 
-              ok, reason = valid_image(path)
+              if not ref:
+                  continue
+
+              path = resolve_image(ref)
 
               print("")
               print("Reference:", ref)
@@ -637,58 +822,83 @@ jobs:
               else:
                   print("Resolved: NOT FOUND")
 
-              print("Status:", "VALID" if ok else "INVALID")
-              print("Details:", reason)
+              ok, reason = validate_image(path)
+
+              print(
+                  "Status:",
+                  "VALID" if ok else "INVALID"
+              )
+
+              print(
+                  "Details:",
+                  reason
+              )
 
               if ok:
                   key = str(path.resolve())
 
-                  if key not in seen_valid:
-                      seen_valid.add(key)
-                      valid_paths.append(path)
+                  if key not in seen:
+                      seen.add(key)
+                      valid.append(path)
 
+          # Direct fallback for generated story files.
           print("")
           print("============================================================")
           print("CHECKING GENERATED STORY IMAGE FILES")
           print("============================================================")
 
-          for path in unique_direct:
-              ok, reason = valid_image(path)
+          for pattern in (
+              "story_*_image.*",
+              "story_image.*",
+          ):
+              for path in SOURCE_DIR.glob(pattern):
+                  if not path.is_file():
+                      continue
 
-              print("")
-              print("File:", path)
-              print("Status:", "VALID" if ok else "INVALID")
-              print("Details:", reason)
+                  ok, reason = validate_image(path)
 
-              if ok:
-                  key = str(path.resolve())
+                  print("")
+                  print("File:", path)
+                  print(
+                      "Status:",
+                      "VALID" if ok else "INVALID"
+                  )
+                  print(
+                      "Details:",
+                      reason
+                  )
 
-                  if key not in seen_valid:
-                      seen_valid.add(key)
-                      valid_paths.append(path)
+                  if ok:
+                      key = str(path.resolve())
+
+                      if key not in seen:
+                          seen.add(key)
+                          valid.append(path)
 
           print("")
           print("============================================================")
-          print("VALID REAL STORY IMAGES")
+          print("REAL STORY IMAGES FOUND:")
+          print(len(valid))
           print("============================================================")
 
-          for index, path in enumerate(valid_paths, start=1):
-              print(f"{index}. {path}")
+          for index, path in enumerate(
+              valid,
+              start=1
+          ):
+              print(
+                  f"{index}. {path}"
+              )
 
-          print("")
-          print("Real story images found:")
-          print(len(valid_paths))
-
-          if len(valid_paths) < 1:
+          if not valid:
               print("")
-              print("============================================================")
-              print("ERROR: NO VALID REAL STORY IMAGES FOUND")
-              print("============================================================")
+              print("ERROR: No valid real story images found.")
 
               print("")
-              print("Contents of assets/source:")
+              print("ASSETS/SOURCE CONTENT:")
 
-              for path in sorted(SOURCE_DIR.rglob("*")):
+              for path in sorted(
+                  SOURCE_DIR.rglob("*")
+              ):
                   if path.is_file():
                       print(
                           path,
@@ -704,65 +914,7 @@ jobs:
 
 
       # ==========================================================
-      # PREPARE RENDERER INPUT
-      #
-      # Do this AFTER image verification.
-      # The main Python application has already generated its
-      # selected_story.json / selected_script.json.
-      #
-      # If they exist, preserve them.
-      # Otherwise create them from story/script.
-      # ==========================================================
-
-      - name: Prepare renderer input
-        run: |
-          set -e
-
-          echo "============================================================"
-          echo "PREPARING RENDERER INPUT"
-          echo "============================================================"
-
-          if [ ! -f data/selected_story.json ]; then
-            echo "selected_story.json not found."
-            echo "Creating it from story.json."
-            cp data/story.json data/selected_story.json
-          else
-            echo "Using existing data/selected_story.json"
-          fi
-
-          if [ ! -f data/selected_script.json ]; then
-            echo "selected_script.json not found."
-            echo "Creating it from script.json."
-            cp data/script.json data/selected_script.json
-          else
-            echo "Using existing data/selected_script.json"
-          fi
-
-          echo ""
-          echo "selected_story.json:"
-          ls -lh data/selected_story.json
-
-          echo ""
-          echo "selected_script.json:"
-          ls -lh data/selected_script.json
-
-          echo ""
-          echo "============================================================"
-          echo "SELECTED STORY"
-          echo "============================================================"
-
-          cat data/selected_story.json
-
-          echo ""
-          echo "============================================================"
-          echo "SELECTED SCRIPT"
-          echo "============================================================"
-
-          cat data/selected_script.json
-
-
-      # ==========================================================
-      # VERIFY SELECTED STORY STRUCTURE
+      # VALIDATE SELECTED STORY STRUCTURE
       # ==========================================================
 
       - name: Validate selected story structure
@@ -777,9 +929,14 @@ jobs:
           import json
           from pathlib import Path
 
-          path = Path("data/selected_story.json")
+          path = Path(
+              "data/selected_story.json"
+          )
 
-          with path.open("r", encoding="utf-8") as f:
+          with path.open(
+              "r",
+              encoding="utf-8"
+          ) as f:
               data = json.load(f)
 
           if not isinstance(data, dict):
@@ -791,7 +948,7 @@ jobs:
 
           if not isinstance(stories, list):
               raise RuntimeError(
-                  "selected_story.json has no valid stories list."
+                  "selected_story.json normalization failed."
               )
 
           if not stories:
@@ -799,48 +956,81 @@ jobs:
                   "selected_story.json contains zero stories."
               )
 
-          print("Stories:", len(stories))
+          print(
+              "Stories:",
+              len(stories)
+          )
 
-          for i, story in enumerate(stories, start=1):
-              title = story.get("title", "")
-              county = story.get("county", "")
-              source = story.get("source", "")
-
-              if not title:
+          for index, story in enumerate(
+              stories,
+              start=1
+          ):
+              if not isinstance(story, dict):
                   raise RuntimeError(
-                      f"Story {i} has no title."
+                      f"Story {index} is not an object."
                   )
 
-              if not county:
-                  raise RuntimeError(
-                      f"Story {i} has no county."
-                  )
+              print("")
+              print(
+                  f"Story {index}:"
+              )
 
-              if not source:
-                  raise RuntimeError(
-                      f"Story {i} has no source."
-                  )
+              print(
+                  "Title:",
+                  story.get("title", "")
+              )
 
-              print()
-              print(f"Story {i}:")
-              print("Title:", title)
-              print("County:", county)
-              print("Category:", story.get("category", ""))
-              print("Source:", source)
-              print("Currentness:", story.get("currentness", ""))
-              print("Image URL:", story.get("image_url", ""))
-              print("Image path:", story.get("image_path", ""))
+              print(
+                  "County:",
+                  story.get("county", "")
+              )
 
-              images = story.get("images", [])
+              print(
+                  "Category:",
+                  story.get("category", "")
+              )
+
+              print(
+                  "Source:",
+                  story.get("source", "")
+              )
+
+              print(
+                  "Currentness:",
+                  story.get("currentness", "")
+              )
+
+              print(
+                  "Image URL:",
+                  story.get("image_url", "")
+              )
+
+              print(
+                  "Image path:",
+                  story.get("image_path", "")
+              )
+
+              images = story.get(
+                  "images",
+                  []
+              )
 
               if isinstance(images, list):
-                  print("Image references:", len(images))
+                  print(
+                      "Image references:",
+                      len(images)
+                  )
 
                   for image in images:
-                      print("  -", image)
+                      print(
+                          "  -",
+                          image
+                      )
 
-          print()
-          print("SELECTED STORY JSON VALIDATION PASSED")
+          print("")
+          print(
+              "SELECTED STORY JSON VALIDATION PASSED"
+          )
           PY
 
 
@@ -908,6 +1098,7 @@ jobs:
 
           echo ""
           echo "FFprobe:"
+
           ffprobe -v error \
             -show_entries format=duration,size \
             -show_entries stream=codec_name,codec_type,sample_rate,channels \
