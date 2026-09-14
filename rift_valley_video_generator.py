@@ -1,6 +1,7 @@
 from pathlib import Path
 import hashlib
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -13,19 +14,26 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 # RIFT VALLEY WATCH
 # VIDEO GENERATOR
 #
-# VERSION: RVW_VIDEO_V35_EXACT_PHOTO_RECOVERY
+# VERSION: RVW_VIDEO_V36_FULL_NEWS_REEL
 #
 # PURPOSE
 # - Read data/selected_story.json
-# - Resolve the exact selected article photographs
-# - Recover exact files even when path formatting differs
-# - Handle escaped underscores such as story\_1\_image.jpg
+# - Resolve ONLY the exact selected article photographs
+# - Never search Google for replacement images
+# - Never use unrelated source-directory photographs
+# - Recover exact files when path formatting differs
+# - Handle escaped underscores
 # - Handle extension mismatches safely
-# - Never mix photos from unrelated stories
-# - Never use Citizen / CTV / World Cup / avatar / placeholder
-# - One scene per genuinely unique article photograph
+# - Remove duplicate photographs
+# - Use every genuinely unique selected article photograph
+# - Build a complete vertical news reel
+# - Use the FULL narration duration
+# - Never prematurely terminate the video because of -shortest
+# - Add controlled photo movement
+# - Add opening / story / update / source visual treatment
 # - 1080x1920 vertical MP4
 # - Narration from audio/narration.mp3
+# - Reject Citizen / CTV / World Cup / avatar / placeholder
 # ============================================================
 
 
@@ -64,6 +72,15 @@ MIN_IMAGE_HEIGHT = 200
 MIN_AUDIO_BYTES = 1000
 MIN_VIDEO_BYTES = 100000
 
+MAX_IMAGES = 6
+
+# Small safety extension so video is never shorter than narration.
+VIDEO_SAFETY_SECONDS = 1.50
+
+# Opening / closing cards consume part of the narration timeline.
+OPENING_SECONDS = 2.50
+CLOSING_SECONDS = 2.50
+
 
 # ============================================================
 # FORBIDDEN VISUAL TERMS
@@ -88,7 +105,6 @@ FORBIDDEN_TERMS = (
     "dummy",
     "generic",
     "generic image",
-    "generic-image",
     "logo",
     "icon",
     "advert",
@@ -97,7 +113,7 @@ FORBIDDEN_TERMS = (
 
 
 # ============================================================
-# RUN COMMAND
+# SUBPROCESS
 # ============================================================
 
 def run(command, label):
@@ -163,19 +179,40 @@ def load_json(path):
 
 
 def get_story(data):
+    """
+    Supports all currently used selected-story schemas:
+
+        {
+            "story": {...}
+        }
+
+        {
+            "stories": [{...}]
+        }
+
+        [
+            {...}
+        ]
+
+        {
+            "title": "...",
+            "image_path": "..."
+        }
+    """
+
     if isinstance(data, dict):
 
-        if isinstance(
-            data.get("story"),
-            dict,
-        ):
-            return data["story"]
+        story_value = data.get("story")
 
-        if isinstance(
-            data.get("stories"),
-            list,
-        ):
-            for item in data["stories"]:
+        if isinstance(story_value, dict):
+            return story_value
+
+        stories_value = data.get("stories")
+
+        if isinstance(stories_value, list):
+
+            for item in stories_value:
+
                 if isinstance(item, dict):
                     return item
 
@@ -183,10 +220,27 @@ def get_story(data):
                 "Selected story list contains no story object"
             )
 
+        if isinstance(
+            data.get("selected_story"),
+            dict,
+        ):
+            return data["selected_story"]
+
         return data
 
+    if isinstance(data, list):
+
+        for item in data:
+
+            if isinstance(item, dict):
+                return item
+
+        raise RuntimeError(
+            "Selected story array contains no story object"
+        )
+
     raise RuntimeError(
-        "Selected story JSON is not an object"
+        "Selected story JSON has an unsupported structure"
     )
 
 
@@ -195,6 +249,7 @@ def get_story(data):
 # ============================================================
 
 def clean_text(value, fallback=""):
+
     if value is None:
         return fallback
 
@@ -204,13 +259,37 @@ def clean_text(value, fallback=""):
     ):
         return fallback
 
+    value = str(value)
+
+    value = value.replace(
+        "\\_",
+        "_",
+    )
+
     value = re.sub(
         r"\s+",
         " ",
-        str(value),
+        value,
     ).strip()
 
     return value or fallback
+
+
+def truncate_text(value, maximum):
+
+    value = clean_text(value)
+
+    if len(value) <= maximum:
+        return value
+
+    truncated = value[:maximum].rsplit(
+        " ",
+        1,
+    )[0]
+
+    return truncated.rstrip(
+        " ,.;:-"
+    ) + "…"
 
 
 # ============================================================
@@ -220,6 +299,7 @@ def clean_text(value, fallback=""):
 def get_font(size, bold=False):
 
     if bold:
+
         candidates = [
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
             "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
@@ -229,6 +309,7 @@ def get_font(size, bold=False):
         ]
 
     else:
+
         candidates = [
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
@@ -242,11 +323,13 @@ def get_font(size, bold=False):
         path = Path(candidate)
 
         if path.exists():
+
             try:
                 return ImageFont.truetype(
                     str(path),
                     size,
                 )
+
             except Exception:
                 pass
 
@@ -264,6 +347,7 @@ def wrap_text(
     max_width,
     maximum=5,
 ):
+
     words = clean_text(value).split()
 
     if not words:
@@ -276,10 +360,10 @@ def wrap_text(
 
         trial = (
             f"{current} {word}"
-            .strip()
-        )
+        ).strip()
 
         try:
+
             box = draw.textbbox(
                 (0, 0),
                 trial,
@@ -291,9 +375,11 @@ def wrap_text(
             )
 
         except Exception:
+
             trial_width = len(trial) * 20
 
         if trial_width <= max_width:
+
             current = trial
 
         else:
@@ -323,6 +409,7 @@ def draw_wrapped_text(
     gap=10,
     maximum=5,
 ):
+
     lines = wrap_text(
         draw,
         value,
@@ -335,9 +422,17 @@ def draw_wrapped_text(
         return y
 
     try:
-        bbox = selected_font.getbbox("Ag")
-        line_height = bbox[3] - bbox[1]
+
+        bbox = selected_font.getbbox(
+            "Ag"
+        )
+
+        line_height = (
+            bbox[3] - bbox[1]
+        )
+
     except Exception:
+
         line_height = 40
 
     for index, line in enumerate(lines):
@@ -364,36 +459,23 @@ def draw_wrapped_text(
 # ============================================================
 
 def normalize_path_string(value):
-    """
-    Normalizes path strings coming from JSON.
-
-    Handles:
-        story_1_image.jpg
-        story\\_1\\_image.jpg
-        assets/source/story_1_image.jpg
-        ./assets/source/story_1_image.jpg
-    """
 
     value = str(value).strip()
 
-    # Remove accidental escaping of underscores.
     value = value.replace(
         "\\_",
         "_",
     )
 
-    # Normalize separators.
     value = value.replace(
         "\\",
         "/",
     )
 
-    # Remove surrounding quotes.
     value = value.strip(
         "\"'"
     )
 
-    # Remove leading ./.
     while value.startswith("./"):
         value = value[2:]
 
@@ -411,6 +493,7 @@ def valid_image(path):
 
     try:
         path = Path(path)
+
     except Exception:
         return False
 
@@ -421,20 +504,25 @@ def valid_image(path):
         return False
 
     try:
+
         if path.stat().st_size < MIN_IMAGE_BYTES:
             return False
+
     except Exception:
+
         return False
 
     lowered = str(path).lower()
 
     for term in FORBIDDEN_TERMS:
+
         if term in lowered:
             return False
 
     try:
 
         with Image.open(path) as image:
+
             image.verify()
 
         with Image.open(path) as image:
@@ -452,6 +540,7 @@ def valid_image(path):
         return True
 
     except Exception:
+
         return False
 
 
@@ -473,29 +562,47 @@ def image_signature(path):
                 "RGB"
             )
 
-            image = image.resize(
-                (64, 64),
+            image.thumbnail(
+                (96, 96),
                 Image.Resampling.LANCZOS,
             )
 
+            canvas = Image.new(
+                "RGB",
+                (96, 96),
+                (0, 0, 0),
+            )
+
+            left = (
+                96 - image.width
+            ) // 2
+
+            top = (
+                96 - image.height
+            ) // 2
+
+            canvas.paste(
+                image,
+                (
+                    left,
+                    top,
+                ),
+            )
+
             return hashlib.sha256(
-                image.tobytes()
+                canvas.tobytes()
             ).hexdigest()
 
     except Exception:
+
         return ""
 
 
 # ============================================================
-# EXACT FILE SEARCH
+# EXACT SOURCE SEARCH
 # ============================================================
 
 def exact_source_search(filename):
-    """
-    Searches assets/source ONLY for the exact filename.
-
-    It does NOT select arbitrary images.
-    """
 
     if not filename:
         return None
@@ -504,29 +611,29 @@ def exact_source_search(filename):
         filename
     )
 
-    wanted = Path(filename).name
+    wanted = Path(
+        filename
+    ).name
 
     if not wanted:
         return None
 
-    # Direct location first.
     direct = SOURCE_DIR / wanted
 
     if valid_image(direct):
+
         print(
             "[IMAGE] Exact source match:",
             direct,
         )
+
         return direct.resolve()
 
-    # Recursive exact filename search.
     try:
 
-        matches = SOURCE_DIR.rglob(
+        for match in SOURCE_DIR.rglob(
             wanted
-        )
-
-        for match in matches:
+        ):
 
             if valid_image(match):
 
@@ -544,24 +651,10 @@ def exact_source_search(filename):
 
 
 # ============================================================
-# IMAGE STEM SEARCH
+# EXTENSION MISMATCH SEARCH
 # ============================================================
 
 def exact_stem_search(filename):
-    """
-    Handles extension mismatch.
-
-    Example:
-
-        selected story:
-            story_1_image.jpg
-
-        actual file:
-            story_1_image.webp
-
-    This is still considered the SAME requested file
-    because the basename/stem is identical.
-    """
 
     if not filename:
         return None
@@ -570,7 +663,9 @@ def exact_stem_search(filename):
         filename
     )
 
-    requested = Path(filename)
+    requested = Path(
+        filename
+    )
 
     stem = requested.stem.lower()
 
@@ -590,7 +685,7 @@ def exact_stem_search(filename):
             if valid_image(match):
 
                 print(
-                    "[IMAGE] Extension-mismatch recovery:",
+                    "[IMAGE] Extension mismatch recovery:",
                     match,
                 )
 
@@ -632,15 +727,14 @@ def resolve_image_path(value):
     if not value:
         return None
 
-    candidate = Path(value)
+    candidate = Path(
+        value
+    )
 
     candidates = []
 
-    # --------------------------------------------------------
-    # Absolute path
-    # --------------------------------------------------------
-
     if candidate.is_absolute():
+
         candidates.append(
             candidate
         )
@@ -655,16 +749,11 @@ def resolve_image_path(value):
             ]
         )
 
-        # Filename only.
         if len(candidate.parts) == 1:
 
             candidates.append(
                 SOURCE_DIR / candidate.name
             )
-
-    # --------------------------------------------------------
-    # Try direct candidates
-    # --------------------------------------------------------
 
     seen = set()
 
@@ -672,6 +761,7 @@ def resolve_image_path(value):
 
         try:
             item = item.resolve()
+
         except Exception:
             pass
 
@@ -696,20 +786,12 @@ def resolve_image_path(value):
 
             return item
 
-    # --------------------------------------------------------
-    # Exact filename recovery
-    # --------------------------------------------------------
-
     recovered = exact_source_search(
         candidate.name
     )
 
     if recovered:
         return recovered
-
-    # --------------------------------------------------------
-    # Extension recovery
-    # --------------------------------------------------------
 
     recovered = exact_stem_search(
         candidate.name
@@ -727,7 +809,7 @@ def resolve_image_path(value):
 
 
 # ============================================================
-# EXTRACT IMAGE REFERENCES
+# IMAGE REFERENCE EXTRACTION
 # ============================================================
 
 def append_image_candidate(
@@ -743,7 +825,9 @@ def append_image_candidate(
         value = value.strip()
 
         if value:
-            candidates.append(value)
+            candidates.append(
+                value
+            )
 
         return
 
@@ -759,6 +843,7 @@ def append_image_candidate(
         )
 
         if possible:
+
             append_image_candidate(
                 candidates,
                 possible,
@@ -775,10 +860,6 @@ def append_image_candidate(
                 item,
             )
 
-
-# ============================================================
-# FIND SELECTED IMAGES
-# ============================================================
 
 def find_selected_images(story):
 
@@ -807,7 +888,9 @@ def find_selected_images(story):
         if field not in story:
             continue
 
-        value = story.get(field)
+        value = story.get(
+            field
+        )
 
         print(
             f"{field}:",
@@ -818,10 +901,6 @@ def find_selected_images(story):
             candidates,
             value,
         )
-
-    # --------------------------------------------------------
-    # Resolve exact references
-    # --------------------------------------------------------
 
     resolved = []
     seen_paths = set()
@@ -836,12 +915,19 @@ def find_selected_images(story):
         if path is None:
             continue
 
+        try:
+            path = path.resolve()
+        except Exception:
+            pass
+
         path_key = str(path)
 
         if path_key in seen_paths:
             continue
 
-        seen_paths.add(path_key)
+        seen_paths.add(
+            path_key
+        )
 
         signature = image_signature(
             path
@@ -862,14 +948,16 @@ def find_selected_images(story):
                 signature
             )
 
-        resolved.append(path)
+        resolved.append(
+            path
+        )
 
         print(
             "[IMAGE] ACCEPTED ARTICLE PHOTO:",
             path,
         )
 
-        if len(resolved) >= 6:
+        if len(resolved) >= MAX_IMAGES:
             break
 
     return resolved
@@ -883,7 +971,8 @@ def story_title(story):
 
     return clean_text(
         story.get("title")
-        or story.get("headline"),
+        or story.get("headline")
+        or story.get("name"),
         "Rift Valley Regional Update",
     )
 
@@ -892,7 +981,8 @@ def story_county(story):
 
     return clean_text(
         story.get("county")
-        or story.get("location"),
+        or story.get("location")
+        or story.get("region"),
         "Rift Valley",
     )
 
@@ -900,7 +990,9 @@ def story_county(story):
 def story_category(story):
 
     return clean_text(
-        story.get("category"),
+        story.get("category")
+        or story.get("section")
+        or story.get("type"),
         "REGIONAL UPDATE",
     ).upper()
 
@@ -910,7 +1002,8 @@ def story_summary(story):
     return clean_text(
         story.get("summary")
         or story.get("description")
-        or story.get("excerpt"),
+        or story.get("excerpt")
+        or story.get("body"),
         "",
     )
 
@@ -929,7 +1022,8 @@ def story_source(story):
 
         source = clean_text(
             source_data.get("name")
-            or source_data.get("title"),
+            or source_data.get("title")
+            or source_data.get("source"),
             "Rift Valley Watch",
         )
 
@@ -948,9 +1042,21 @@ def story_source(story):
         or "citizen digital" in lowered
         or "citizen tv" in lowered
     ):
+
         return "Rift Valley Watch"
 
     return source
+
+
+def story_date(story):
+
+    return clean_text(
+        story.get("published")
+        or story.get("published_at")
+        or story.get("date")
+        or story.get("pub_date"),
+        "",
+    )
 
 
 # ============================================================
@@ -969,14 +1075,13 @@ def prepare_image(path):
             "RGB"
         )
 
-    source_width, source_height = (
-        image.size
-    )
+    source_width, source_height = image.size
 
     if (
         source_width <= 0
         or source_height <= 0
     ):
+
         raise RuntimeError(
             f"Invalid image dimensions: {path}"
         )
@@ -1051,37 +1156,47 @@ def add_gradient_overlay(image):
         overlay
     )
 
-    for y in range(HEIGHT):
+    for y in range(
+        HEIGHT
+    ):
 
         position = y / HEIGHT
 
-        if position < 0.38:
+        if position < 0.40:
 
             alpha = int(
-                205
+                175
                 * (
                     1
-                    - position / 0.38
+                    - position / 0.40
                 )
             )
 
         else:
 
             alpha = int(
-                175
+                210
                 * (
-                    (position - 0.38)
-                    / 0.62
+                    (position - 0.40)
+                    / 0.60
                 )
             )
 
         alpha = max(
             0,
-            min(205, alpha),
+            min(
+                210,
+                alpha,
+            ),
         )
 
         draw.line(
-            (0, y, WIDTH, y),
+            (
+                0,
+                y,
+                WIDTH,
+                y,
+            ),
             fill=(
                 0,
                 0,
@@ -1097,12 +1212,14 @@ def add_gradient_overlay(image):
 
 
 # ============================================================
-# DECORATE SCENE
+# DRAW BACKGROUND STORY SCENE
 # ============================================================
 
 def decorate_scene(
     image,
     story,
+    scene_number,
+    scene_total,
 ):
 
     image = add_gradient_overlay(
@@ -1120,9 +1237,9 @@ def decorate_scene(
     )
 
     muted = (
-        218,
-        225,
-        232,
+        220,
+        226,
+        233,
     )
 
     yellow = (
@@ -1154,18 +1271,23 @@ def decorate_scene(
     )
 
     title_font = get_font(
-        65,
+        64,
         True,
     )
 
     body_font = get_font(
-        33,
+        34,
         False,
     )
 
     footer_font = get_font(
         23,
         False,
+    )
+
+    scene_font = get_font(
+        22,
+        True,
     )
 
     title = story_title(
@@ -1189,7 +1311,7 @@ def decorate_scene(
     )
 
     # --------------------------------------------------------
-    # HEADER
+    # TOP BRAND BAR
     # --------------------------------------------------------
 
     draw.rectangle(
@@ -1197,7 +1319,7 @@ def decorate_scene(
             0,
             0,
             WIDTH,
-            126,
+            132,
         ),
         fill=dark,
     )
@@ -1205,9 +1327,9 @@ def decorate_scene(
     draw.rectangle(
         (
             0,
-            122,
+            126,
             WIDTH,
-            130,
+            134,
         ),
         fill=yellow,
     )
@@ -1215,11 +1337,36 @@ def decorate_scene(
     draw.text(
         (
             58,
-            35,
+            38,
         ),
         "RIFT VALLEY WATCH",
         font=brand_font,
         fill=white,
+    )
+
+    # --------------------------------------------------------
+    # STORY POSITION
+    # --------------------------------------------------------
+
+    if scene_total > 1:
+
+        scene_label = (
+            f"REGIONAL UPDATE  •  "
+            f"{scene_number}/{scene_total}"
+        )
+
+    else:
+
+        scene_label = "REGIONAL UPDATE"
+
+    draw.text(
+        (
+            58,
+            158,
+        ),
+        scene_label,
+        font=scene_font,
+        fill=muted,
     )
 
     # --------------------------------------------------------
@@ -1229,7 +1376,7 @@ def decorate_scene(
     draw.text(
         (
             58,
-            150,
+            205,
         ),
         f"{county.upper()}  |  {category}",
         font=label_font,
@@ -1244,7 +1391,7 @@ def decorate_scene(
         draw,
         title,
         58,
-        240,
+        290,
         WIDTH - 116,
         title_font,
         white,
@@ -1259,13 +1406,18 @@ def decorate_scene(
     if summary:
 
         summary_y = max(
-            title_y + 55,
-            930,
+            title_y + 45,
+            970,
+        )
+
+        summary_text = truncate_text(
+            summary,
+            430,
         )
 
         draw_wrapped_text(
             draw,
-            summary,
+            summary_text,
             58,
             summary_y,
             WIDTH - 116,
@@ -1276,10 +1428,35 @@ def decorate_scene(
         )
 
     # --------------------------------------------------------
-    # SOURCE
+    # DATE
     # --------------------------------------------------------
 
-    footer_y = HEIGHT - 110
+    published = story_date(
+        story
+    )
+
+    if published:
+
+        date_font = get_font(
+            24,
+            False,
+        )
+
+        draw.text(
+            (
+                58,
+                HEIGHT - 175,
+            ),
+            published,
+            font=date_font,
+            fill=muted,
+        )
+
+    # --------------------------------------------------------
+    # FOOTER
+    # --------------------------------------------------------
+
+    footer_y = HEIGHT - 125
 
     draw.rectangle(
         (
@@ -1294,7 +1471,7 @@ def decorate_scene(
     draw.text(
         (
             58,
-            footer_y + 10,
+            footer_y + 15,
         ),
         f"SOURCE: {source}",
         font=footer_font,
@@ -1305,12 +1482,14 @@ def decorate_scene(
 
 
 # ============================================================
-# CREATE SCENE IMAGE
+# CREATE STORY SCENE IMAGE
 # ============================================================
 
 def create_scene_image(
     source_path,
     story,
+    scene_number,
+    scene_total,
     output_path,
 ):
 
@@ -1327,6 +1506,8 @@ def create_scene_image(
     image = decorate_scene(
         image,
         story,
+        scene_number,
+        scene_total,
     )
 
     image.save(
@@ -1337,14 +1518,419 @@ def create_scene_image(
     )
 
     if not output_path.exists():
+
         raise RuntimeError(
             f"Scene image was not created: {output_path}"
         )
 
     if output_path.stat().st_size < 50000:
+
         raise RuntimeError(
             f"Scene image is unexpectedly small: {output_path}"
         )
+
+
+# ============================================================
+# CREATE OPENING CARD
+# ============================================================
+
+def create_opening_card(
+    story,
+    output_path,
+):
+
+    image = Image.new(
+        "RGB",
+        (
+            WIDTH,
+            HEIGHT,
+        ),
+        (
+            5,
+            12,
+            21,
+        ),
+    )
+
+    draw = ImageDraw.Draw(
+        image
+    )
+
+    white = (
+        255,
+        255,
+        255,
+    )
+
+    muted = (
+        205,
+        214,
+        224,
+    )
+
+    yellow = (
+        245,
+        185,
+        62,
+    )
+
+    brand_font = get_font(
+        54,
+        True,
+    )
+
+    label_font = get_font(
+        32,
+        True,
+    )
+
+    title_font = get_font(
+        67,
+        True,
+    )
+
+    county_font = get_font(
+        31,
+        True,
+    )
+
+    draw.rectangle(
+        (
+            0,
+            0,
+            WIDTH,
+            150,
+        ),
+        fill=(
+            3,
+            8,
+            15,
+        ),
+    )
+
+    draw.rectangle(
+        (
+            0,
+            142,
+            WIDTH,
+            151,
+        ),
+        fill=yellow,
+    )
+
+    draw.text(
+        (
+            58,
+            48,
+        ),
+        "RIFT VALLEY WATCH",
+        font=brand_font,
+        fill=white,
+    )
+
+    draw.text(
+        (
+            58,
+            245,
+        ),
+        "LATEST REGIONAL UPDATE",
+        font=label_font,
+        fill=yellow,
+    )
+
+    title = story_title(
+        story
+    )
+
+    draw_wrapped_text(
+        draw,
+        title,
+        58,
+        350,
+        WIDTH - 116,
+        title_font,
+        white,
+        gap=14,
+        maximum=6,
+    )
+
+    county = story_county(
+        story
+    )
+
+    category = story_category(
+        story
+    )
+
+    draw.text(
+        (
+            58,
+            1260,
+        ),
+        f"{county.upper()}  |  {category}",
+        font=county_font,
+        fill=muted,
+    )
+
+    draw.rectangle(
+        (
+            58,
+            1370,
+            220,
+            1378,
+        ),
+        fill=yellow,
+    )
+
+    draw.text(
+        (
+            58,
+            1435,
+        ),
+        "ONE STORY • VERIFIED PHOTO • RIFT VALLEY",
+        font=get_font(
+            27,
+            True,
+        ),
+        fill=muted,
+    )
+
+    draw.rectangle(
+        (
+            0,
+            HEIGHT - 180,
+            WIDTH,
+            HEIGHT,
+        ),
+        fill=(
+            3,
+            8,
+            15,
+        ),
+    )
+
+    draw.text(
+        (
+            58,
+            HEIGHT - 115,
+        ),
+        "RIFT VALLEY WATCH",
+        font=get_font(
+            28,
+            True,
+        ),
+        fill=white,
+    )
+
+    image.save(
+        output_path,
+        format="JPEG",
+        quality=94,
+        optimize=True,
+    )
+
+
+# ============================================================
+# CREATE CLOSING CARD
+# ============================================================
+
+def create_closing_card(
+    story,
+    output_path,
+):
+
+    image = Image.new(
+        "RGB",
+        (
+            WIDTH,
+            HEIGHT,
+        ),
+        (
+            5,
+            12,
+            21,
+        ),
+    )
+
+    draw = ImageDraw.Draw(
+        image
+    )
+
+    white = (
+        255,
+        255,
+        255,
+    )
+
+    muted = (
+        205,
+        214,
+        224,
+    )
+
+    yellow = (
+        245,
+        185,
+        62,
+    )
+
+    draw.rectangle(
+        (
+            0,
+            0,
+            WIDTH,
+            150,
+        ),
+        fill=(
+            3,
+            8,
+            15,
+        ),
+    )
+
+    draw.rectangle(
+        (
+            0,
+            142,
+            WIDTH,
+            151,
+        ),
+        fill=yellow,
+    )
+
+    draw.text(
+        (
+            58,
+            48,
+        ),
+        "RIFT VALLEY WATCH",
+        font=get_font(
+            54,
+            True,
+        ),
+        fill=white,
+    )
+
+    draw.text(
+        (
+            58,
+            310,
+        ),
+        "STORY SOURCE",
+        font=get_font(
+            32,
+            True,
+        ),
+        fill=yellow,
+    )
+
+    source = story_source(
+        story
+    )
+
+    draw_wrapped_text(
+        draw,
+        source,
+        58,
+        410,
+        WIDTH - 116,
+        get_font(
+            58,
+            True,
+        ),
+        white,
+        gap=12,
+        maximum=4,
+    )
+
+    title = story_title(
+        story
+    )
+
+    draw_wrapped_text(
+        draw,
+        title,
+        58,
+        720,
+        WIDTH - 116,
+        get_font(
+            38,
+            False,
+        ),
+        muted,
+        gap=10,
+        maximum=6,
+    )
+
+    draw.rectangle(
+        (
+            58,
+            1210,
+            WIDTH - 58,
+            1218,
+        ),
+        fill=yellow,
+    )
+
+    draw.text(
+        (
+            58,
+            1300,
+        ),
+        "RIFT VALLEY WATCH",
+        font=get_font(
+            44,
+            True,
+        ),
+        fill=white,
+    )
+
+    draw.text(
+        (
+            58,
+            1380,
+        ),
+        "Regional news and current affairs",
+        font=get_font(
+            30,
+            False,
+        ),
+        fill=muted,
+    )
+
+    draw.rectangle(
+        (
+            0,
+            HEIGHT - 180,
+            WIDTH,
+            HEIGHT,
+        ),
+        fill=(
+            3,
+            8,
+            15,
+        ),
+    )
+
+    draw.text(
+        (
+            58,
+            HEIGHT - 115,
+        ),
+        "END OF UPDATE",
+        font=get_font(
+            28,
+            True,
+        ),
+        fill=yellow,
+    )
+
+    image.save(
+        output_path,
+        format="JPEG",
+        quality=94,
+        optimize=True,
+    )
 
 
 # ============================================================
@@ -1354,11 +1940,13 @@ def create_scene_image(
 def audio_duration():
 
     if not AUDIO_FILE.exists():
+
         raise RuntimeError(
             f"Missing narration file: {AUDIO_FILE}"
         )
 
     if AUDIO_FILE.stat().st_size < MIN_AUDIO_BYTES:
+
         raise RuntimeError(
             "Narration file is empty or too small"
         )
@@ -1385,6 +1973,7 @@ def audio_duration():
     )
 
     if result.returncode != 0:
+
         raise RuntimeError(
             "Could not read narration duration:\n"
             + result.stdout
@@ -1404,13 +1993,14 @@ def audio_duration():
         )
 
     if duration <= 0:
+
         raise RuntimeError(
             "Narration duration is invalid"
         )
 
     print(
         "[AUDIO] Duration:",
-        f"{duration:.2f}",
+        f"{duration:.3f}",
         "seconds",
     )
 
@@ -1418,19 +2008,55 @@ def audio_duration():
 
 
 # ============================================================
-# CREATE SCENE VIDEO
+# GENERIC IMAGE SCENE VIDEO
 # ============================================================
 
 def create_scene_video(
     scene_image,
     output_path,
     duration,
+    movement_index=0,
 ):
 
     duration = max(
         1.0,
         float(duration),
     )
+
+    # --------------------------------------------------------
+    # Controlled Ken Burns movement.
+    #
+    # Different scenes use slightly different directions.
+    # The photo remains the SAME selected article photo.
+    # --------------------------------------------------------
+
+    zoom_in = (
+        movement_index % 2 == 0
+    )
+
+    if zoom_in:
+
+        zoom_filter = (
+            "scale="
+            f"{WIDTH * 1.08:.0f}:"
+            f"{HEIGHT * 1.08:.0f},"
+            "crop="
+            f"{WIDTH}:{HEIGHT}:"
+            "(iw-ow)/2:"
+            "(ih-oh)/2"
+        )
+
+    else:
+
+        zoom_filter = (
+            "scale="
+            f"{WIDTH * 1.05:.0f}:"
+            f"{HEIGHT * 1.05:.0f},"
+            "crop="
+            f"{WIDTH}:{HEIGHT}:"
+            "(iw-ow)/2:"
+            "(ih-oh)/2"
+        )
 
     command = [
         "ffmpeg",
@@ -1442,6 +2068,9 @@ def create_scene_video(
         "-loop",
         "1",
 
+        "-framerate",
+        str(FPS),
+
         "-i",
         str(scene_image),
 
@@ -1450,10 +2079,8 @@ def create_scene_video(
 
         "-vf",
         (
-            f"scale={WIDTH}:{HEIGHT}:"
-            "force_original_aspect_ratio=decrease,"
-            f"pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2,"
-            "format=yuv420p"
+            zoom_filter
+            + ",format=yuv420p"
         ),
 
         "-r",
@@ -1473,6 +2100,9 @@ def create_scene_video(
 
         "-an",
 
+        "-movflags",
+        "+faststart",
+
         str(output_path),
     ]
 
@@ -1482,11 +2112,13 @@ def create_scene_video(
     )
 
     if not output_path.exists():
+
         raise RuntimeError(
             f"Scene video was not created: {output_path}"
         )
 
     if output_path.stat().st_size < 50000:
+
         raise RuntimeError(
             f"Scene video is unexpectedly small: {output_path}"
         )
@@ -1502,6 +2134,7 @@ def concatenate_scene_videos(
 ):
 
     if not scene_videos:
+
         raise RuntimeError(
             "No scene videos available"
         )
@@ -1561,6 +2194,9 @@ def concatenate_scene_videos(
 
         "-an",
 
+        "-movflags",
+        "+faststart",
+
         str(output_path),
     ]
 
@@ -1570,9 +2206,66 @@ def concatenate_scene_videos(
     )
 
     if not output_path.exists():
+
         raise RuntimeError(
             "Silent video was not created"
         )
+
+    if output_path.stat().st_size < MIN_VIDEO_BYTES:
+
+        raise RuntimeError(
+            "Concatenated silent video is too small"
+        )
+
+
+# ============================================================
+# VIDEO DURATION
+# ============================================================
+
+def video_duration(path):
+
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(path),
+    ]
+
+    result = subprocess.run(
+        command,
+        cwd=str(BASE_DIR),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+    if result.returncode != 0:
+
+        raise RuntimeError(
+            "Could not read video duration:\n"
+            + result.stdout
+        )
+
+    try:
+
+        value = float(
+            result.stdout.strip()
+        )
+
+    except Exception:
+
+        raise RuntimeError(
+            "Video duration could not be parsed:\n"
+            + result.stdout
+        )
+
+    return value
 
 
 # ============================================================
@@ -1581,20 +2274,57 @@ def concatenate_scene_videos(
 
 def add_audio(
     silent_video,
+    narration_duration,
 ):
 
     if not silent_video.exists():
+
         raise RuntimeError(
             f"Silent video does not exist: {silent_video}"
         )
 
     if not AUDIO_FILE.exists():
+
         raise RuntimeError(
             f"Narration does not exist: {AUDIO_FILE}"
         )
 
+    silent_duration = video_duration(
+        silent_video
+    )
+
+    print(
+        "[VIDEO] Silent video duration:",
+        f"{silent_duration:.3f}",
+        "seconds",
+    )
+
+    print(
+        "[AUDIO] Required narration duration:",
+        f"{narration_duration:.3f}",
+        "seconds",
+    )
+
+    # The silent video must be longer than the narration.
+    if silent_duration + 0.10 < narration_duration:
+
+        raise RuntimeError(
+            "Silent video is shorter than narration. "
+            f"Video={silent_duration:.3f}s "
+            f"Audio={narration_duration:.3f}s"
+        )
+
     if FINAL_FILE.exists():
+
         FINAL_FILE.unlink()
+
+    # --------------------------------------------------------
+    # IMPORTANT:
+    # NO -shortest.
+    #
+    # The video is deliberately longer than narration.
+    # The audio is therefore allowed to finish naturally.
+    # --------------------------------------------------------
 
     command = [
         "ffmpeg",
@@ -1624,7 +2354,8 @@ def add_audio(
         "-b:a",
         "128k",
 
-        "-shortest",
+        "-t",
+        f"{narration_duration + 0.20:.3f}",
 
         "-movflags",
         "+faststart",
@@ -1639,29 +2370,19 @@ def add_audio(
 
 
 # ============================================================
-# VALIDATE VIDEO
+# FINAL VIDEO PROBE
 # ============================================================
 
-def validate_final_video():
-
-    if not FINAL_FILE.exists():
-        raise RuntimeError(
-            "Final MP4 was not created"
-        )
-
-    size = FINAL_FILE.stat().st_size
-
-    if size < MIN_VIDEO_BYTES:
-        raise RuntimeError(
-            f"Final MP4 is too small: {size} bytes"
-        )
+def probe_final_video():
 
     command = [
         "ffprobe",
         "-v",
         "error",
         "-show_entries",
-        "stream=codec_type,width,height",
+        "stream=codec_type,width,height,duration",
+        "-show_entries",
+        "format=duration",
         "-of",
         "default=noprint_wrappers=1",
         str(FINAL_FILE),
@@ -1678,18 +2399,44 @@ def validate_final_video():
     )
 
     if result.returncode != 0:
+
         raise RuntimeError(
             "Could not inspect final MP4:\n"
             + result.stdout
         )
 
-    output = result.stdout
-
     print()
     print("=" * 72)
     print("FINAL VIDEO PROBE")
     print("=" * 72)
-    print(output)
+    print(result.stdout)
+
+    return result.stdout
+
+
+# ============================================================
+# VALIDATE FINAL VIDEO
+# ============================================================
+
+def validate_final_video(
+    narration_duration,
+):
+
+    if not FINAL_FILE.exists():
+
+        raise RuntimeError(
+            "Final MP4 was not created"
+        )
+
+    size = FINAL_FILE.stat().st_size
+
+    if size < MIN_VIDEO_BYTES:
+
+        raise RuntimeError(
+            f"Final MP4 is too small: {size} bytes"
+        )
+
+    output = probe_final_video()
 
     compact = output.replace(
         " ",
@@ -1697,38 +2444,91 @@ def validate_final_video():
     ).lower()
 
     if "codec_type=video" not in compact:
+
         raise RuntimeError(
             "Final MP4 has no video stream"
         )
 
     if "codec_type=audio" not in compact:
+
         raise RuntimeError(
             "Final MP4 has no audio stream"
         )
 
     if "width=1080" not in compact:
+
         raise RuntimeError(
             "Final MP4 width is not 1080"
         )
 
     if "height=1920" not in compact:
+
         raise RuntimeError(
             "Final MP4 height is not 1920"
+        )
+
+    final_duration = video_duration(
+        FINAL_FILE
+    )
+
+    print(
+        "[FINAL] Duration:",
+        f"{final_duration:.3f}",
+        "seconds",
+    )
+
+    print(
+        "[FINAL] Narration:",
+        f"{narration_duration:.3f}",
+        "seconds",
+    )
+
+    # Final MP4 must contain essentially the entire narration.
+    if final_duration + 0.25 < narration_duration:
+
+        raise RuntimeError(
+            "FINAL VIDEO IS SHORTER THAN NARRATION. "
+            f"Video={final_duration:.3f}s "
+            f"Audio={narration_duration:.3f}s"
+        )
+
+    # Prevent accidental tiny/truncated output.
+    minimum_expected = max(
+        5.0,
+        narration_duration - 0.25,
+    )
+
+    if final_duration < minimum_expected:
+
+        raise RuntimeError(
+            "Final video appears prematurely truncated. "
+            f"Expected at least {minimum_expected:.3f}s, "
+            f"got {final_duration:.3f}s"
         )
 
     print()
     print("=" * 72)
     print("FINAL VIDEO VALIDATED")
     print("=" * 72)
+
     print(
         "FILE:",
         FINAL_FILE,
     )
+
     print(
         "SIZE:",
         size,
         "bytes",
     )
+
+    print(
+        "DURATION:",
+        f"{final_duration:.3f}",
+        "seconds",
+    )
+
+    return final_duration
 
 
 # ============================================================
@@ -1750,10 +2550,14 @@ def clean_work_directory():
                 item.is_file()
                 or item.is_symlink()
             ):
+
                 item.unlink()
 
             elif item.is_dir():
-                shutil.rmtree(item)
+
+                shutil.rmtree(
+                    item
+                )
 
         except Exception as error:
 
@@ -1765,6 +2569,478 @@ def clean_work_directory():
 
 
 # ============================================================
+# SCENE DURATION PLANNER
+# ============================================================
+
+def calculate_scene_durations(
+    narration_duration,
+    image_count,
+):
+
+    if image_count <= 0:
+
+        raise RuntimeError(
+            "Cannot calculate scene durations without images"
+        )
+
+    # --------------------------------------------------------
+    # ONE PHOTO
+    #
+    # The single real article photo receives the entire
+    # narration duration. No premature short clip.
+    # --------------------------------------------------------
+
+    if image_count == 1:
+
+        return [
+            narration_duration
+        ]
+
+    # --------------------------------------------------------
+    # MULTIPLE PHOTOS
+    #
+    # Reserve time for opening and closing cards while still
+    # allowing article photos to occupy the majority of the reel.
+    # --------------------------------------------------------
+
+    usable = (
+        narration_duration
+        - OPENING_SECONDS
+        - CLOSING_SECONDS
+    )
+
+    if usable < (
+        image_count * 2.0
+    ):
+
+        usable = narration_duration
+
+    each = (
+        usable
+        / image_count
+    )
+
+    durations = [
+        each
+        for _ in range(image_count)
+    ]
+
+    total = sum(
+        durations
+    )
+
+    difference = (
+        usable - total
+    )
+
+    durations[-1] += difference
+
+    # If opening/closing cards are included, return the full
+    # sequence durations separately through the caller.
+    return durations
+
+
+# ============================================================
+# CREATE CARD VIDEO
+# ============================================================
+
+def create_card_video(
+    image_path,
+    output_path,
+    duration,
+):
+
+    duration = max(
+        1.0,
+        float(duration),
+    )
+
+    command = [
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+
+        "-loop",
+        "1",
+
+        "-framerate",
+        str(FPS),
+
+        "-i",
+        str(image_path),
+
+        "-t",
+        f"{duration:.3f}",
+
+        "-vf",
+        (
+            f"scale={WIDTH}:{HEIGHT},"
+            "format=yuv420p"
+        ),
+
+        "-r",
+        str(FPS),
+
+        "-c:v",
+        "libx264",
+
+        "-preset",
+        "veryfast",
+
+        "-crf",
+        "20",
+
+        "-pix_fmt",
+        "yuv420p",
+
+        "-an",
+
+        "-movflags",
+        "+faststart",
+
+        str(output_path),
+    ]
+
+    run(
+        command,
+        f"Creating card {output_path.name}",
+    )
+
+    if not output_path.exists():
+
+        raise RuntimeError(
+            f"Card video was not created: {output_path}"
+        )
+
+
+# ============================================================
+# CREATE STORY REEL
+# ============================================================
+
+def create_story_reel(
+    story,
+    images,
+    narration_duration,
+):
+
+    clean_work_directory()
+
+    scene_videos = []
+
+    image_count = len(
+        images
+    )
+
+    print()
+    print("=" * 72)
+    print("VIDEO STRUCTURE")
+    print("=" * 72)
+
+    print(
+        "NARRATION:",
+        f"{narration_duration:.2f}s",
+    )
+
+    print(
+        "ARTICLE PHOTOS:",
+        image_count,
+    )
+
+    # --------------------------------------------------------
+    # VERY SHORT NARRATION
+    #
+    # For very short audio, avoid allocating too much time
+    # to separate opening/closing cards.
+    # --------------------------------------------------------
+
+    use_cards = (
+        image_count > 1
+        and narration_duration >= 12.0
+    )
+
+    if use_cards:
+
+        opening_duration = min(
+            OPENING_SECONDS,
+            narration_duration * 0.12,
+        )
+
+        closing_duration = min(
+            CLOSING_SECONDS,
+            narration_duration * 0.12,
+        )
+
+        article_duration = (
+            narration_duration
+            - opening_duration
+            - closing_duration
+        )
+
+        if article_duration <= (
+            image_count * 1.5
+        ):
+
+            use_cards = False
+
+    # --------------------------------------------------------
+    # OPENING CARD
+    # --------------------------------------------------------
+
+    if use_cards:
+
+        opening_image = (
+            WORK_DIR
+            / "opening_card.jpg"
+        )
+
+        opening_video = (
+            WORK_DIR
+            / "opening_card.mp4"
+        )
+
+        create_opening_card(
+            story,
+            opening_image,
+        )
+
+        create_card_video(
+            opening_image,
+            opening_video,
+            opening_duration,
+        )
+
+        scene_videos.append(
+            opening_video
+        )
+
+    # --------------------------------------------------------
+    # ARTICLE PHOTO DURATIONS
+    # --------------------------------------------------------
+
+    if use_cards:
+
+        photo_total = article_duration
+
+    else:
+
+        photo_total = narration_duration
+
+    each = (
+        photo_total
+        / image_count
+    )
+
+    photo_durations = [
+        each
+        for _ in range(image_count)
+    ]
+
+    photo_durations[-1] = (
+        photo_total
+        - sum(
+            photo_durations[:-1]
+        )
+    )
+
+    # --------------------------------------------------------
+    # ARTICLE PHOTOS
+    # --------------------------------------------------------
+
+    for index, image_path in enumerate(
+        images,
+        start=1,
+    ):
+
+        scene_image = (
+            WORK_DIR
+            / f"scene_{index:02d}.jpg"
+        )
+
+        scene_video = (
+            WORK_DIR
+            / f"scene_{index:02d}.mp4"
+        )
+
+        scene_duration = (
+            photo_durations[index - 1]
+        )
+
+        print()
+        print("=" * 72)
+        print(
+            f"ARTICLE PHOTO SCENE {index}/{image_count}"
+        )
+        print("=" * 72)
+
+        print(
+            "REAL ARTICLE PHOTO:",
+            image_path,
+        )
+
+        print(
+            "DURATION:",
+            f"{scene_duration:.3f}",
+            "seconds",
+        )
+
+        create_scene_image(
+            image_path,
+            story,
+            index,
+            image_count,
+            scene_image,
+        )
+
+        create_scene_video(
+            scene_image,
+            scene_video,
+            scene_duration,
+            movement_index=index - 1,
+        )
+
+        scene_videos.append(
+            scene_video
+        )
+
+    # --------------------------------------------------------
+    # CLOSING CARD
+    # --------------------------------------------------------
+
+    if use_cards:
+
+        closing_image = (
+            WORK_DIR
+            / "closing_card.jpg"
+        )
+
+        closing_video = (
+            WORK_DIR
+            / "closing_card.mp4"
+        )
+
+        create_closing_card(
+            story,
+            closing_image,
+        )
+
+        create_card_video(
+            closing_image,
+            closing_video,
+            closing_duration,
+        )
+
+        scene_videos.append(
+            closing_video
+        )
+
+    # --------------------------------------------------------
+    # SAFETY DURATION CHECK
+    # --------------------------------------------------------
+
+    planned_duration = sum(
+        video_duration(video)
+        for video in scene_videos
+    )
+
+    required_duration = (
+        narration_duration
+        + VIDEO_SAFETY_SECONDS
+    )
+
+    print()
+    print(
+        "[VIDEO] Planned duration:",
+        f"{planned_duration:.3f}s",
+    )
+
+    print(
+        "[VIDEO] Required duration:",
+        f"{required_duration:.3f}s",
+    )
+
+    # --------------------------------------------------------
+    # If ffmpeg rounding made the planned duration too short,
+    # create an extra safety tail using the final article scene.
+    # --------------------------------------------------------
+
+    if planned_duration < required_duration:
+
+        extra_duration = (
+            required_duration
+            - planned_duration
+            + 0.25
+        )
+
+        safety_image = (
+            WORK_DIR
+            / "safety_tail.jpg"
+        )
+
+        safety_video = (
+            WORK_DIR
+            / "safety_tail.mp4"
+        )
+
+        # Reuse the LAST SELECTED ARTICLE PHOTO only.
+        # This is not a new photo and not an unrelated image.
+        last_photo = images[-1]
+
+        create_scene_image(
+            last_photo,
+            story,
+            image_count,
+            image_count,
+            safety_image,
+        )
+
+        create_scene_video(
+            safety_image,
+            safety_video,
+            extra_duration,
+            movement_index=image_count,
+        )
+
+        scene_videos.append(
+            safety_video
+        )
+
+    # --------------------------------------------------------
+    # CONCATENATE
+    # --------------------------------------------------------
+
+    silent_video = (
+        WORK_DIR
+        / "silent_video.mp4"
+    )
+
+    concatenate_scene_videos(
+        scene_videos,
+        silent_video,
+    )
+
+    final_silent_duration = video_duration(
+        silent_video
+    )
+
+    print()
+    print(
+        "[VIDEO] Final silent duration:",
+        f"{final_silent_duration:.3f}s",
+    )
+
+    if final_silent_duration + 0.10 < narration_duration:
+
+        raise RuntimeError(
+            "Silent video is shorter than narration after "
+            "scene concatenation."
+        )
+
+    return silent_video
+
+
+# ============================================================
 # MAIN
 # ============================================================
 
@@ -1772,11 +3048,11 @@ def main():
 
     print("=" * 72)
     print("RIFT VALLEY WATCH VIDEO GENERATOR")
-    print("VERSION: RVW_VIDEO_V35_EXACT_PHOTO_RECOVERY")
+    print("VERSION: RVW_VIDEO_V36_FULL_NEWS_REEL")
     print("=" * 72)
 
     # --------------------------------------------------------
-    # Directories
+    # DIRECTORIES
     # --------------------------------------------------------
 
     for directory in (
@@ -1786,26 +3062,30 @@ def main():
         AUDIO_DIR,
         OUTPUT_DIR,
     ):
+
         directory.mkdir(
             parents=True,
             exist_ok=True,
         )
 
     # --------------------------------------------------------
-    # Required files
+    # REQUIRED FILES
     # --------------------------------------------------------
 
     if not STORY_FILE.exists():
+
         raise RuntimeError(
             f"Missing selected story: {STORY_FILE}"
         )
 
     if not SCRIPT_FILE.exists():
+
         raise RuntimeError(
             f"Missing selected script: {SCRIPT_FILE}"
         )
 
     if not AUDIO_FILE.exists():
+
         raise RuntimeError(
             f"Missing narration: {AUDIO_FILE}"
         )
@@ -1827,7 +3107,7 @@ def main():
     )
 
     # --------------------------------------------------------
-    # Load selected story
+    # LOAD STORY
     # --------------------------------------------------------
 
     story_data = load_json(
@@ -1864,7 +3144,31 @@ def main():
     )
 
     # --------------------------------------------------------
-    # Find exact selected photos
+    # HARD FORBIDDEN STORY CHECK
+    # --------------------------------------------------------
+
+    title_lower = (
+        story_title(story)
+        .lower()
+    )
+
+    source_lower = (
+        story_source(story)
+        .lower()
+    )
+
+    if (
+        "gachagua" in title_lower
+        or "rigathi gachagua" in title_lower
+        or "gachagua" in source_lower
+    ):
+
+        raise RuntimeError(
+            "Forbidden Rigathi Gachagua story reached renderer"
+        )
+
+    # --------------------------------------------------------
+    # FIND EXACT SELECTED ARTICLE PHOTOS
     # --------------------------------------------------------
 
     images = find_selected_images(
@@ -1883,7 +3187,7 @@ def main():
         )
 
         print(
-            "but none could be resolved to a valid physical image."
+            "but none could be resolved to valid physical article photographs."
         )
 
         print()
@@ -1919,11 +3223,12 @@ def main():
                     )
 
         raise RuntimeError(
-            "No valid real article photographs found in selected_story.json"
+            "No valid real article photographs found "
+            "in selected_story.json"
         )
 
     # --------------------------------------------------------
-    # Selected image summary
+    # PHOTO SUMMARY
     # --------------------------------------------------------
 
     print()
@@ -1948,128 +3253,37 @@ def main():
     )
 
     # --------------------------------------------------------
-    # Audio
+    # AUDIO
     # --------------------------------------------------------
 
-    duration = audio_duration()
+    narration_duration = audio_duration()
 
     # --------------------------------------------------------
-    # Clean work directory
+    # BUILD COMPLETE STORY REEL
     # --------------------------------------------------------
 
-    clean_work_directory()
-
-    # --------------------------------------------------------
-    # Scene durations
-    # --------------------------------------------------------
-
-    scene_count = len(images)
-
-    if scene_count == 1:
-
-        durations = [
-            duration
-        ]
-
-    else:
-
-        each = (
-            duration
-            / scene_count
-        )
-
-        durations = [
-            each
-            for _ in range(scene_count)
-        ]
-
-        durations[-1] = (
-            duration
-            - sum(durations[:-1])
-        )
-
-    # --------------------------------------------------------
-    # Create scenes
-    # --------------------------------------------------------
-
-    scene_videos = []
-
-    for index, image_path in enumerate(
+    silent_video = create_story_reel(
+        story,
         images,
-        start=1,
-    ):
-
-        scene_image = (
-            WORK_DIR
-            / f"scene_{index:02d}.jpg"
-        )
-
-        scene_video = (
-            WORK_DIR
-            / f"scene_{index:02d}.mp4"
-        )
-
-        print()
-        print("=" * 72)
-        print(
-            f"CREATING SCENE {index}/{scene_count}"
-        )
-        print("=" * 72)
-
-        print(
-            "ARTICLE PHOTO:",
-            image_path,
-        )
-
-        print(
-            "SCENE DURATION:",
-            f"{durations[index - 1]:.2f}",
-            "seconds",
-        )
-
-        create_scene_image(
-            image_path,
-            story,
-            scene_image,
-        )
-
-        create_scene_video(
-            scene_image,
-            scene_video,
-            durations[index - 1],
-        )
-
-        scene_videos.append(
-            scene_video
-        )
-
-    # --------------------------------------------------------
-    # Concatenate
-    # --------------------------------------------------------
-
-    silent_video = (
-        WORK_DIR
-        / "silent_video.mp4"
-    )
-
-    concatenate_scene_videos(
-        scene_videos,
-        silent_video,
+        narration_duration,
     )
 
     # --------------------------------------------------------
-    # Narration
+    # ADD FULL NARRATION
     # --------------------------------------------------------
 
     add_audio(
-        silent_video
+        silent_video,
+        narration_duration,
     )
 
     # --------------------------------------------------------
-    # Validate
+    # FINAL VALIDATION
     # --------------------------------------------------------
 
-    validate_final_video()
+    validate_final_video(
+        narration_duration
+    )
 
     print()
     print("=" * 72)
@@ -2079,6 +3293,16 @@ def main():
     print(
         "FINAL MP4:",
         FINAL_FILE,
+    )
+
+    print(
+        "ARTICLE PHOTOS USED:",
+        len(images),
+    )
+
+    print(
+        "NARRATION DURATION:",
+        f"{narration_duration:.3f}s",
     )
 
 
@@ -2098,10 +3322,12 @@ if __name__ == "__main__":
         print("=" * 72)
         print("RIFT VALLEY WATCH GENERATOR FAILED")
         print("=" * 72)
+
         print(
             "ERROR:",
             error,
         )
+
         print("=" * 72)
 
         sys.exit(1)
