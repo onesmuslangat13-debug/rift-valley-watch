@@ -5,8 +5,9 @@ import hashlib
 import re
 import sys
 import time
-from urllib.parse import quote_plus, urljoin, urlparse
+from urllib.parse import quote_plus, urljoin, urlparse, parse_qs
 from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
 from xml.etree import ElementTree as ET
 
 from PIL import Image
@@ -14,10 +15,19 @@ from PIL import Image
 
 # ============================================================
 # RIFT VALLEY WATCH
-# NEWS ENGINE V12
-# NO BS4
-# NO COMPLEX MULTILINE REGEX
+# NEWS ENGINE V13
+#
+# FIXES:
+# - Does not require county detection
+# - Follows redirects
+# - Extracts Google News redirect destinations
+# - Uses RSS descriptions when publisher pages fail
+# - Extracts image URLs from RSS and article pages
+# - Provides rejection diagnostics
+# - Downloads only real photographic images
+# - No BS4
 # ============================================================
+
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
@@ -36,9 +46,11 @@ USER_AGENT = (
 
 MAX_STORIES = 12
 MAX_IMAGES = 5
+
 MIN_IMAGE_BYTES = 6000
 MIN_WIDTH = 400
 MIN_HEIGHT = 250
+
 
 COUNTY_ALIASES = {
     "Bomet": ["bomet", "sotik", "konoin", "chepalungu", "longisa"],
@@ -46,15 +58,40 @@ COUNTY_ALIASES = {
     "Nakuru": ["nakuru", "naivasha", "gilgil", "molo", "bahati", "njoro"],
     "Nandi": ["nandi", "kapsabet", "aldai", "emgwen", "mosop"],
     "Uasin Gishu": ["uasin gishu", "eldoret", "kesses", "kapseret", "soy"],
-    "Elgeyo-Marakwet": ["elgeyo", "marakwet", "iten", "keiyo", "kapsowar"],
-    "West Pokot": ["west pokot", "pokot", "kapenguria", "kacheliba", "sigor"],
+    "Elgeyo-Marakwet": [
+        "elgeyo",
+        "marakwet",
+        "iten",
+        "keiyo",
+        "kapsowar",
+    ],
+    "West Pokot": [
+        "west pokot",
+        "pokot",
+        "kapenguria",
+        "kacheliba",
+        "sigor",
+    ],
     "Narok": ["narok", "kilgoris", "suswa", "transmara"],
-    "Trans Nzoia": ["trans nzoia", "kitale", "endebess", "saboti", "cherangany"],
+    "Trans Nzoia": [
+        "trans nzoia",
+        "kitale",
+        "endebess",
+        "saboti",
+        "cherangany",
+    ],
     "Samburu": ["samburu", "maralal", "baragoi", "wamba"],
     "Turkana": ["turkana", "lodwar", "kakuma", "lokichar"],
     "Laikipia": ["laikipia", "nanyuki", "nyahururu", "rumuruti"],
-    "Kajiado": ["kajiado", "kitengela", "ngong", "loitokitok", "namanga"],
+    "Kajiado": [
+        "kajiado",
+        "kitengela",
+        "ngong",
+        "loitokitok",
+        "namanga",
+    ],
 }
+
 
 SEARCH_QUERIES = [
     "Rift Valley Kenya latest news",
@@ -73,11 +110,13 @@ SEARCH_QUERIES = [
     "Kajiado latest news Kenya",
 ]
 
+
 FORBIDDEN_STORY_TERMS = [
     "rigathi gachagua",
     "rigathi",
     "gachagua",
 ]
+
 
 FORBIDDEN_IMAGE_TERMS = [
     "google.com",
@@ -117,7 +156,7 @@ FORBIDDEN_IMAGE_TERMS = [
 ]
 
 
-def log(message):
+def log(message=""):
     print(message, flush=True)
 
 
@@ -165,69 +204,153 @@ def hostname(value):
 def forbidden_story(text):
     lower = clean_text(text).lower()
 
-    for term in FORBIDDEN_STORY_TERMS:
-        if term in lower:
-            return True
-
-    return False
+    return any(
+        term in lower
+        for term in FORBIDDEN_STORY_TERMS
+    )
 
 
 def forbidden_image(value):
     lower = str(value).lower()
 
-    for term in FORBIDDEN_IMAGE_TERMS:
-        if term in lower:
-            return True
+    return any(
+        term in lower
+        for term in FORBIDDEN_IMAGE_TERMS
+    )
 
-    return False
 
-
-def fetch_bytes(url, timeout=25, limit=8_000_000):
+def fetch_response(url, timeout=30, limit=12_000_000):
     if not is_http_url(url):
-        return b""
+        return b"", ""
 
     try:
         request = Request(
             url,
             headers={
                 "User-Agent": USER_AGENT,
-                "Accept": "*/*",
+                "Accept": (
+                    "text/html,application/xhtml+xml,"
+                    "application/xml,image/avif,image/webp,"
+                    "image/apng,image/svg+xml,image/*,*/*;q=0.8"
+                ),
+                "Accept-Language": "en-KE,en;q=0.9",
+                "Cache-Control": "no-cache",
             },
         )
 
         with urlopen(request, timeout=timeout) as response:
+            final_url = response.geturl()
             data = response.read(limit + 1)
 
         if len(data) > limit:
-            return b""
+            return b"", final_url
 
-        return data
+        return data, final_url
 
     except Exception:
-        return b""
+        return b"", ""
+
+
+def fetch_bytes(url, timeout=30, limit=12_000_000):
+    data, _ = fetch_response(
+        url,
+        timeout=timeout,
+        limit=limit,
+    )
+
+    return data
 
 
 def fetch_text(url):
-    data = fetch_bytes(url)
+    data, final_url = fetch_response(url)
 
     if not data:
         return ""
 
-    return data.decode(
+    try:
+        return data.decode(
+            "utf-8",
+            errors="ignore",
+        )
+    except Exception:
+        return ""
+
+
+def resolve_google_news_url(url):
+    url = normalize_url(url)
+
+    if not url:
+        return ""
+
+    parsed = urlparse(url)
+
+    if "news.google.com" not in parsed.netloc.lower():
+        return url
+
+    query = parse_qs(parsed.query)
+
+    for key in ["url", "u", "link"]:
+        values = query.get(key)
+
+        if values:
+            candidate = normalize_url(values[0])
+
+            if is_http_url(candidate):
+                return candidate
+
+    data, final_url = fetch_response(url)
+
+    if final_url and "news.google.com" not in hostname(final_url):
+        return final_url
+
+    page = data.decode(
         "utf-8",
         errors="ignore",
+    ) if data else ""
+
+    candidates = []
+
+    candidates.extend(
+        re.findall(
+            r'https?://[^"\'<> ]+',
+            page,
+            flags=re.IGNORECASE,
+        )
     )
+
+    for candidate in candidates:
+        candidate = html.unescape(candidate)
+        candidate = candidate.replace("\\u003d", "=")
+        candidate = candidate.replace("\\u0026", "&")
+        candidate = candidate.replace("\\/", "/")
+
+        if not is_http_url(candidate):
+            continue
+
+        if "news.google.com" in hostname(candidate):
+            continue
+
+        if "google.com" in hostname(candidate):
+            continue
+
+        return candidate
+
+    return url
 
 
 def google_rss_url(query):
     return (
         "https://news.google.com/rss/search?"
-        f"q={quote_plus(query)}&hl=en-KE&gl=KE&ceid=KE:en"
+        f"q={quote_plus(query)}"
+        "&hl=en-KE&gl=KE&ceid=KE:en"
     )
 
 
 def parse_rss(xml_text):
     results = []
+
+    if not xml_text:
+        return results
 
     try:
         root = ET.fromstring(xml_text)
@@ -241,28 +364,35 @@ def parse_rss(xml_text):
         date_node = item.find("pubDate")
         source_node = item.find("source")
 
-        title = ""
-        link = ""
-        description = ""
-        published = ""
-        source = ""
+        title = clean_text(
+            title_node.text
+            if title_node is not None
+            else ""
+        )
 
-        if title_node is not None:
-            title = clean_text(title_node.text)
+        link = clean_text(
+            link_node.text
+            if link_node is not None
+            else ""
+        )
 
-        if link_node is not None:
-            link = clean_text(link_node.text)
+        description = clean_text(
+            description_node.text
+            if description_node is not None
+            else ""
+        )
 
-        if description_node is not None:
-            description = clean_text(
-                description_node.text
-            )
+        published = clean_text(
+            date_node.text
+            if date_node is not None
+            else ""
+        )
 
-        if date_node is not None:
-            published = clean_text(date_node.text)
-
-        if source_node is not None:
-            source = clean_text(source_node.text)
+        source = clean_text(
+            source_node.text
+            if source_node is not None
+            else ""
+        )
 
         if title and link:
             results.append(
@@ -279,10 +409,15 @@ def parse_rss(xml_text):
 
 
 def meta_value(page, key):
+    if not page:
+        return ""
+
     pattern_one = (
-        r'<meta[^>]+(?:property|name|itemprop)\s*=\s*["\']'
+        r'<meta[^>]+'
+        r'(?:property|name|itemprop)\s*=\s*["\']'
         + re.escape(key)
-        + r'["\'][^>]+content\s*=\s*["\']([^"\']+)'
+        + r'["\'][^>]+content\s*=\s*["\']'
+        r'([^"\']+)'
     )
 
     match = re.search(
@@ -295,8 +430,9 @@ def meta_value(page, key):
         return html.unescape(match.group(1))
 
     pattern_two = (
-        r'<meta[^>]+content\s*=\s*["\']([^"\']+)["\']'
-        r'[^>]+(?:property|name|itemprop)\s*=\s*["\']'
+        r'<meta[^>]+content\s*=\s*["\']'
+        r'([^"\']+)["\'][^>]+'
+        r'(?:property|name|itemprop)\s*=\s*["\']'
         + re.escape(key)
         + r'["\']'
     )
@@ -346,6 +482,9 @@ def page_description(page):
 
 
 def extract_article_text(page):
+    if not page:
+        return ""
+
     blocks = re.findall(
         r"<p[^>]*>(.*?)</p>",
         page,
@@ -357,19 +496,24 @@ def extract_article_text(page):
     for block in blocks:
         text = clean_text(block)
 
-        if len(text) >= 45:
-            lower = text.lower()
+        if len(text) < 45:
+            continue
 
-            if "subscribe" in lower:
-                continue
+        lower = text.lower()
 
-            if "advertisement" in lower:
-                continue
+        if "subscribe" in lower:
+            continue
 
-            if "cookie" in lower:
-                continue
+        if "advertisement" in lower:
+            continue
 
-            output.append(text)
+        if "cookie" in lower:
+            continue
+
+        if "sign up" in lower:
+            continue
+
+        output.append(text)
 
         if len(output) >= 12:
             break
@@ -377,7 +521,7 @@ def extract_article_text(page):
     return " ".join(output)[:4500]
 
 
-def add_image_url(results, value, base_url):
+def add_image_url(results, value, base_url=""):
     value = normalize_url(value, base_url)
 
     if not value:
@@ -393,7 +537,7 @@ def add_image_url(results, value, base_url):
         results.append(value)
 
 
-def extract_srcset(value, results, base_url):
+def extract_srcset(value, results, base_url=""):
     if not value:
         return
 
@@ -410,8 +554,11 @@ def extract_srcset(value, results, base_url):
         )
 
 
-def extract_image_urls(page, base_url):
+def extract_image_urls(page, base_url=""):
     results = []
+
+    if not page:
+        return results
 
     for key in [
         "og:image",
@@ -448,6 +595,8 @@ def extract_image_urls(page, base_url):
             "data-original",
             "data-image",
             "data-url",
+            "data-fsrc",
+            "data-lazy",
         ]:
             add_image_url(
                 results,
@@ -466,7 +615,8 @@ def extract_image_urls(page, base_url):
             )
 
     raw_urls = re.findall(
-        r'https?://[^"\'>\s]+?\.(?:jpg|jpeg|png|webp)(?:\?[^"\'>\s]*)?',
+        r'https?://[^"\'<> ]+?\.(?:jpg|jpeg|png|webp)'
+        r'(?:\?[^"\'<> ]*)?',
         page,
         flags=re.IGNORECASE,
     )
@@ -477,6 +627,36 @@ def extract_image_urls(page, base_url):
             value,
             base_url,
         )
+
+    return results
+
+
+def extract_rss_image_urls(item):
+    results = []
+
+    for key in [
+        "description",
+        "title",
+        "link",
+    ]:
+        value = item.get(key, "")
+
+        if not value:
+            continue
+
+        raw_urls = re.findall(
+            r'https?://[^"\'<> ]+?\.(?:jpg|jpeg|png|webp)'
+            r'(?:\?[^"\'<> ]*)?',
+            str(value),
+            flags=re.IGNORECASE,
+        )
+
+        for image_url in raw_urls:
+            add_image_url(
+                results,
+                image_url,
+                "",
+            )
 
     return results
 
@@ -504,7 +684,7 @@ def detect_county(title, description, article_text):
             best_score = score
             best_county = county
 
-    return best_county
+    return best_county or "Rift Valley"
 
 
 def detect_category(title, description, article_text):
@@ -520,13 +700,16 @@ def detect_category(title, description, article_text):
         word in text
         for word in [
             "governor",
+            " mp ",
             "mp ",
             "senator",
             "president",
             "politics",
-            "election",
             "political",
+            "election",
             "parliament",
+            "deputy president",
+            "cabinet secretary",
         ]
     ):
         return "Politics"
@@ -540,6 +723,7 @@ def detect_category(title, description, article_text):
             "maize",
             "livestock",
             "coffee",
+            "harvest",
         ]
     ):
         return "Agriculture"
@@ -553,6 +737,7 @@ def detect_category(title, description, article_text):
             "murder",
             "accident",
             "security",
+            "investigation",
         ]
     ):
         return "Security"
@@ -565,6 +750,7 @@ def detect_category(title, description, article_text):
             "doctor",
             "patients",
             "disease",
+            "medical",
         ]
     ):
         return "Health"
@@ -578,6 +764,7 @@ def detect_category(title, description, article_text):
             "water",
             "school",
             "electricity",
+            "bridge",
         ]
     ):
         return "Development"
@@ -591,6 +778,7 @@ def detect_category(title, description, article_text):
             "market",
             "trade",
             "finance",
+            "investment",
         ]
     ):
         return "Business"
@@ -600,7 +788,6 @@ def detect_category(title, description, article_text):
 
 def image_score(url):
     lower = url.lower()
-
     score = 0
 
     for word in [
@@ -617,6 +804,8 @@ def image_score(url):
         "featured",
         "story",
         "wp-content",
+        "2026",
+        "2025",
     ]:
         if word in lower:
             score += 2
@@ -633,6 +822,7 @@ def image_score(url):
         "advert",
         "social",
         "share",
+        "thumbnail",
     ]:
         if word in lower:
             score -= 8
@@ -670,6 +860,7 @@ def image_signature(path):
         with Image.open(path) as image:
             image = image.convert("RGB")
             image.thumbnail((80, 80))
+
             return hashlib.sha256(
                 image.tobytes()
             ).hexdigest()
@@ -687,7 +878,7 @@ def download_image(url, story_id, number):
             "utf-8",
             errors="ignore",
         )
-    ).hexdigest()[:20]
+    ).hexdigest()[:24]
 
     temporary = SOURCE_DIR / f"{digest}.tmp"
     final = SOURCE_DIR / f"{digest}.jpg"
@@ -697,16 +888,24 @@ def download_image(url, story_id, number):
             url,
             headers={
                 "User-Agent": USER_AGENT,
-                "Accept": "image/*,*/*;q=0.8",
-                "Referer": f"https://{hostname(url)}/",
+                "Accept": (
+                    "image/avif,image/webp,image/apng,"
+                    "image/svg+xml,image/*,*/*;q=0.8"
+                ),
+                "Accept-Language": "en-KE,en;q=0.9",
+                "Referer": (
+                    f"https://{hostname(url)}/"
+                    if hostname(url)
+                    else ""
+                ),
             },
         )
 
         with urlopen(
             request,
-            timeout=30,
+            timeout=35,
         ) as response:
-            data = response.read(12_000_000)
+            data = response.read(15_000_000)
 
         if len(data) < MIN_IMAGE_BYTES:
             return ""
@@ -715,14 +914,16 @@ def download_image(url, story_id, number):
 
         with Image.open(temporary) as image:
             image = image.convert("RGB")
+
             image.thumbnail(
                 (2400, 2400),
                 Image.Resampling.LANCZOS,
             )
+
             image.save(
                 final,
                 "JPEG",
-                quality=91,
+                quality=92,
                 optimize=True,
             )
 
@@ -772,40 +973,70 @@ def clean_old_images():
 
 
 def enrich_item(item):
-    title = clean_text(item.get("title", ""))
-    link = normalize_url(item.get("link", ""))
+    original_title = clean_text(
+        item.get("title", "")
+    )
+
+    original_link = normalize_url(
+        item.get("link", "")
+    )
+
     description = clean_text(
         item.get("description", "")
     )
+
     source = clean_text(
         item.get("source", "")
     )
+
     published = clean_text(
         item.get("published", "")
     )
 
-    if not title or not link:
+    if not original_title or not original_link:
         return None
 
-    if forbidden_story(title):
+    if forbidden_story(original_title):
+        log("    rejected: forbidden story title")
         return None
+
+    link = resolve_google_news_url(
+        original_link
+    )
+
+    if not link:
+        link = original_link
 
     page = fetch_text(link)
 
-    if not page:
+    title = original_title
+    article_text = ""
+    page_description_text = ""
+
+    if page:
+        real_title = page_title(page)
+
+        if real_title:
+            title = real_title
+
+        page_description_text = page_description(page)
+
+        if page_description_text:
+            description = page_description_text
+
+        article_text = extract_article_text(page)
+
+    combined_text = (
+        title
+        + " "
+        + description
+        + " "
+        + article_text
+    )
+
+    if forbidden_story(combined_text):
+        log("    rejected: forbidden story text")
         return None
-
-    real_title = page_title(page)
-
-    if real_title:
-        title = real_title
-
-    real_description = page_description(page)
-
-    if real_description:
-        description = real_description
-
-    article_text = extract_article_text(page)
 
     county = detect_county(
         title,
@@ -813,29 +1044,56 @@ def enrich_item(item):
         article_text,
     )
 
-    if not county:
-        return None
-
-    if forbidden_story(
-        title + " " + article_text
-    ):
-        return None
-
     category = detect_category(
         title,
         description,
         article_text,
     )
 
-    candidates = extract_image_urls(
-        page,
-        link,
+    candidates = []
+
+    if page:
+        candidates.extend(
+            extract_image_urls(
+                page,
+                link,
+            )
+        )
+
+    candidates.extend(
+        extract_rss_image_urls(item)
     )
 
-    candidates.sort(
+    unique_candidates = []
+
+    for candidate in candidates:
+        candidate = normalize_url(
+            candidate,
+            link,
+        )
+
+        if not candidate:
+            continue
+
+        if forbidden_image(candidate):
+            continue
+
+        if candidate not in unique_candidates:
+            unique_candidates.append(candidate)
+
+    unique_candidates.sort(
         key=image_score,
         reverse=True,
     )
+
+    log(
+        f"    image candidates: "
+        f"{len(unique_candidates)}"
+    )
+
+    if not unique_candidates:
+        log("    rejected: no image candidates")
+        return None
 
     story_id = hashlib.sha256(
         link.encode(
@@ -848,7 +1106,7 @@ def enrich_item(item):
     signatures = set()
 
     for number, image_url in enumerate(
-        candidates
+        unique_candidates
     ):
         if len(images) >= MAX_IMAGES:
             break
@@ -862,8 +1120,10 @@ def enrich_item(item):
         if not local_path:
             continue
 
+        absolute_path = BASE_DIR / local_path
+
         signature = image_signature(
-            BASE_DIR / local_path
+            absolute_path
         )
 
         if not signature:
@@ -876,13 +1136,26 @@ def enrich_item(item):
         images.append(local_path)
 
     if not images:
+        log("    rejected: image downloads failed")
         return None
 
+    if not description:
+        description = article_text[:600]
+
+    if not description:
+        description = title
+
+    if not article_text:
+        article_text = description
+
+    source_name = source or hostname(link)
+
     return {
+        "id": story_id,
         "title": title,
         "url": link,
-        "source": source or hostname(link),
-        "source_name": source or hostname(link),
+        "source": source_name,
+        "source_name": source_name,
         "published": published,
         "description": description,
         "summary": description,
@@ -904,16 +1177,20 @@ def collect_items():
     for query in SEARCH_QUERIES:
         log(f"Searching: {query}")
 
-        xml = fetch_text(
-            google_rss_url(query)
-        )
+        rss_url = google_rss_url(query)
+        xml = fetch_text(rss_url)
 
         if not xml:
+            log("    RSS unavailable")
             continue
 
-        items.extend(
-            parse_rss(xml)
+        parsed = parse_rss(xml)
+
+        log(
+            f"    RSS items: {len(parsed)}"
         )
+
+        items.extend(parsed)
 
         time.sleep(0.3)
 
@@ -930,9 +1207,8 @@ def deduplicate(stories):
             story.get("title", "")
         ).lower()
 
-        url = story.get(
-            "url",
-            "",
+        url = clean_text(
+            story.get("url", "")
         ).lower()
 
         title_key = re.sub(
@@ -941,14 +1217,18 @@ def deduplicate(stories):
             title,
         ).strip()
 
-        if title_key in seen_titles:
+        if title_key and title_key in seen_titles:
             continue
 
-        if url in seen_urls:
+        if url and url in seen_urls:
             continue
 
-        seen_titles.add(title_key)
-        seen_urls.add(url)
+        if title_key:
+            seen_titles.add(title_key)
+
+        if url:
+            seen_urls.add(url)
+
         output.append(story)
 
     return output
@@ -986,173 +1266,5 @@ def build_script(story):
         if len(sentence.strip()) >= 35
     ][:4]
 
-    parts = [title + "."]
-
-    parts.extend(sentences)
-
-    if county:
-        parts.append(
-            f"The development is being reported in {county} County."
-        )
-
-    if category:
-        parts.append(
-            f"This is part of the latest {category.lower()} news from the Rift Valley region."
-        )
-
-    if source:
-        parts.append(
-            f"Reporting from {source}."
-        )
-
-    narration = clean_text(
-        " ".join(parts)
-    )
-
-    if len(narration) < 180:
-        narration += (
-            " Rift Valley Watch is following the development "
-            "and will provide further verified updates "
-            "as more information becomes available."
-        )
-
-    return {
-        "title": title,
-        "county": county,
-        "category": category,
-        "source": source,
-        "narration": narration,
-        "script": narration,
-        "text": narration,
-        "images": story.get(
-            "images",
-            [],
-        ),
-        "story_url": story.get(
-            "url",
-            "",
-        ),
-    }
-
-
-def write_outputs(stories):
-    story_payload = {
-        "version": "RVW_NEWS_ENGINE_V12",
-        "generated_at": time.strftime(
-            "%Y-%m-%d %H:%M:%S"
-        ),
-        "count": len(stories),
-        "stories": stories,
-    }
-
-    script_payload = {
-        "version": "RVW_NEWS_ENGINE_V12",
-        "generated_at": time.strftime(
-            "%Y-%m-%d %H:%M:%S"
-        ),
-        "count": len(stories),
-        "scripts": [
-            build_script(story)
-            for story in stories
-        ],
-    }
-
-    STORY_JSON.write_text(
-        json.dumps(
-            story_payload,
-            indent=2,
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-
-    SCRIPT_JSON.write_text(
-        json.dumps(
-            script_payload,
-            indent=2,
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-
-
-def main():
-    log("=" * 68)
-    log("RIFT VALLEY WATCH NEWS ENGINE V12")
-    log("=" * 68)
-
-    clean_old_images()
-
-    items = collect_items()
-
-    log(f"RSS items collected: {len(items)}")
-
-    stories = []
-
-    for index, item in enumerate(items, start=1):
-        log(
-            f"[{index}] {item.get('title', '')[:100]}"
-        )
-
-        story = enrich_item(item)
-
-        if not story:
-            log("    skipped")
-            continue
-
-        log(
-            f"    County: {story['county']}"
-        )
-
-        log(
-            f"    Real photos: {len(story['images'])}"
-        )
-
-        stories.append(story)
-
-        if len(stories) >= MAX_STORIES:
-            break
-
-    stories = deduplicate(stories)
-
-    if not stories:
-        raise RuntimeError(
-            "No valid stories with real article photographs were found."
-        )
-
-    write_outputs(stories)
-
-    log("=" * 68)
-    log(f"Valid stories: {len(stories)}")
-    log(
-        "REAL STORY IMAGES FOUND: "
-        + str(
-            sum(
-                len(
-                    story.get(
-                        "images",
-                        [],
-                    )
-                )
-                for story in stories
-            )
-        )
-    )
-    log(f"Created: {STORY_JSON}")
-    log(f"Created: {SCRIPT_JSON}")
-    log("NEWS ENGINE EXIT: SUCCESS")
-    log("=" * 68)
-
-    return 0
-
-
-if __name__ == "__main__":
-    try:
-        sys.exit(main())
-    except Exception as exc:
-        log("")
-        log("FULL NEWS ENGINE OUTPUT:")
-        log(str(exc))
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+    parts = [
+        title +
